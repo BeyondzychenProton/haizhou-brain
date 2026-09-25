@@ -1,0 +1,78 @@
+# AgentScope Java：源码阅读与接入验证
+
+| 项目 | 说明 |
+| --- | --- |
+| 状态 | 源码静态核查与实验清单；所有运行验收均待执行 |
+| 版本 | 0.1 |
+| 更新日期 | 2026-09-23 |
+| 范围 | AgentScope Java `v2.0.3`，对应仓库依赖 2.0.3 |
+| 前置阅读 | [Agent 与 Harness 能力参考](agentscope-java-capabilities.md)、[整体工程架构](../design/agent-platform/architecture.md) |
+
+## 1. 证据怎样使用
+
+- **现有实现**：根 POM 已声明框架和扩展依赖；本次确认本地对应 JAR 中存在关键类，不代表业务链路已经实现。
+- **官方能力**：下面链接固定到官方 `v2.0.3` 文档和源码，不用其他语言版本或主分支代替。
+- **已确认设计**：平台负责业务状态和执行协调，优先复用框架机制；框架对象限制在适配边界。
+- **待验证事项**：静态代码路径不等于实际配置下的运行保证，验收条件需要通过针对性实验完成。
+
+查阅顺序为“文档解释用途 → 源码确认入口、分支和默认装配 → 锁定依赖运行实验”。遇到冲突时记录差异，不将文档示例当成已验证实现。
+
+## 2. 跟踪一次“读取资料并生成报告”的请求
+
+| 阶段 | 框架阅读入口 | 要核查的行为 | 平台保留的职责 |
+| --- | --- | --- | --- |
+| 装配 | [HarnessAgent](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/agentscope-harness/src/main/java/io/agentscope/harness/agent/HarnessAgent.java) | Builder 到工具、中间件、文件与状态存储的有效组合 | 固定 Profile / Skill 修订和有效配置 |
+| 加载配置 | [WorkspaceContextMiddleware](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/agentscope-harness/src/main/java/io/agentscope/harness/agent/middleware/WorkspaceContextMiddleware.java) | 系统指令如何与工作空间内容组合 | 配置来源可信，资料不会自动变为指令 |
+| 进入调用 | [AgentBase](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/agentscope-core/src/main/java/io/agentscope/core/agent/AgentBase.java) | 生命周期、状态加载、调用串行化 | Session / Run 接入、执行槽与重复请求处理 |
+| 模型与工具循环 | [ReActAgent](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/agentscope-core/src/main/java/io/agentscope/core/ReActAgent.java) | `buildAgentStream`、`doCall`、reasoning / acting、暂停分支 | 将执行事件转换为业务反馈 |
+| 实际工具调度 | [ToolExecutor](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/agentscope-core/src/main/java/io/agentscope/core/tool/ToolExecutor.java) | 外部工具、执行、超时、重试与异常 | 权限、资源范围、有效授权、幂等和副作用管理 |
+| 用户等待 | [Agent 文档](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/docs/v2/en/docs/building-blocks/agent.md) | 确认事件、外部执行事件与后续输入关联 | 等待记录、提前响应暂存、恢复调度 |
+| 状态保存 | [JdbcAgentStateStore](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/agentscope-extensions/agentscope-extensions-jdbc/src/main/java/io/agentscope/extensions/jdbc/state/JdbcAgentStateStore.java) | 状态序列化、版本控制、存储失败路径 | Run 状态与框架快照的一致性判断 |
+| 交付与观测 | [OtelTracingMiddleware](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/agentscope-core/src/main/java/io/agentscope/core/tracing/OtelTracingMiddleware.java) | span 生命周期、模型 usage 与上下文传播 | 产物版本登记、最终交付、Langfuse 关联 |
+
+例如读取资料需要用户补充选择时，框架的一次调用可能结束于等待；用户补充后又进行一次调用。两次调用可以属于同一个业务 Run。最终文本出现、事件流关闭、框架状态保存成功和产物提交成功是不同的事实，平台需要分别判断。
+
+## 3. 已发现的默认行为与资料差异
+
+| 核查点 | 静态核查结果 | 接入处理 |
+| --- | --- | --- |
+| 压缩与大型结果转存 | [压缩文档](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/docs/v2/en/docs/harness/compaction.md)称相关机制默认关闭；[Builder 源码](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/agentscope-harness/src/main/java/io/agentscope/harness/agent/HarnessAgent.java)却初始化默认 compaction / eviction 配置并有条件装配 | 不引用“默认关闭”作为结论；显式配置并验证实际触发条件 |
+| 状态持久化开关 | 同一 HarnessAgent 源码将 `disableSessionPersistence()` 标为 2.0 起 no-op | 不把方法名称当成禁用存储的保证，检查实际 StateStore 路径 |
+| 长期记忆 | [记忆文档](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/docs/v2/en/docs/harness/memory.md)说明每轮 flush、后台维护与工具注入分别受控 | 验证 hooks、tools、提示词注入及压缩前 flush；也覆盖子 Agent |
+| 带上下文的流式调用 | [Agent 文档](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/docs/v2/en/docs/building-blocks/agent.md)部分描述与 [ReActAgent 源码](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/agentscope-core/src/main/java/io/agentscope/core/ReActAgent.java)不一致；源码存在带 RuntimeContext 的 `streamEvents` 重载 | 以锁定依赖的实际签名与运行行为为准，不退回共享默认 Session |
+| 补充消息入口 | ReActAgent 的 `doObserve` 通过默认状态访问路径添加消息 | 不直接把 `observe` 当作面向指定运行中 Session 的安全补充入口 |
+| 顺序委派 | [AgentSpawnTool](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/agentscope-harness/src/main/java/io/agentscope/harness/agent/tool/AgentSpawnTool.java)支持强制同步，同时说明默认工具调度仍可并行 | 同时验证禁止后台晋升、顺序调度、取消传播及不直接暴露子 Agent |
+
+此表记录的是官方资料与静态代码的观察，尚未通过编译和执行实验确认每个配置组合。
+
+## 4. 进入详细设计前的最小验证集
+
+按顺序验证，每项保留配置、触发输入、事件时序、存储结果和实际工具操作记录。验证目标是决定接入方式，不在本轮编写完整平台实现。
+
+| 优先级 | 实验 | 通过标准 |
+| --- | --- | --- |
+| P0 | 受控 Harness 装配 | 记录最终工具集合、提示词来源、Skill 修订与存储路径；无意外长期记忆、自学习或跨 Session 检索 |
+| P0 | 统一工具检查 | Java 工具、MCP、内置文件工具、动态 Skills 和子 Agent 的实际操作均进入有效检查；无法覆盖的路径不开放 |
+| P0 | 权限与确认区分 | 无权限时直接拒绝；即使提交“同意”也不能执行；有权限但需确认时仅等待，不提前产生副作用 |
+| P0 | 等待与状态保存 | 在等待事件之后、保存之前注入故障；不能显示成可安全恢复；确认必须在保存和清理完成后续接 |
+| P0 | 用户 / Session 隔离 | 不同用户相同 Session 标识、同用户不同 Session、并发调用均不混入上下文、文件、工具结果或配置 |
+| P0 | 副作用与恢复 | 工具已成功但响应丢失或状态保存失败时，不自动重复产生副作用；明确可恢复与必须人工处理的边界 |
+| P1 | 补充输入 | 输入在安全点一次应用到原 Run；显示“已接收”和“已应用”不同状态；结束后的晚到输入不串到下一 Run |
+| P1 | 取消链路 | 分别取消模型流、慢工具和委派；区分已请求取消、停止确认与仍未停止；不宣称自动撤销 |
+| P1 | 存储版本冲突 | 模拟旧状态写入和重复恢复；识别冲突，不静默覆盖；验证框架状态与 Run 业务状态分开提交时的修复路径 |
+| P1 | 压缩与日志 | 长会话触发压缩、大型结果转存和溢出路径；原文仍可受控获取，不重复摘要，不意外写长期记忆 |
+| P1 | 顺序委派 | 多个委派请求、超时和父取消均符合初版约束；没有后台遗留工作或越权子工具 |
+| P1 | Langfuse | Run / Session / Agent / 模型关联正确，跨线程和子 Agent 不丢父关联；重复 span 可识别；上报故障不阻塞业务 |
+| P1 | 前端断连 | 断开反馈连接不会未经业务决策就取消执行；重连能按平台记录恢复展示，不依赖重放框架执行 |
+
+## 5. 验证结果如何影响工程选择
+
+若 Harness 的内置操作能统一经过平台检查，且配置与状态边界可控，则保留 Harness 的工程能力组合。某项内置能力不符合约束时，先关闭或替换该项适配；只有组合方式本身无法满足要求，才评估用 ReActAgent 加精选中间件。此处是验证后的选择规则，不提前决定重写框架。
+
+对 JDBC 状态存储，先验证官方扩展能否满足平台定义的状态存储端口；不能仅因项目使用 MyBatis-Plus 就重写框架内部存储。业务记录仍由各自模块管理，禁止把框架序列化对象扩散到平台业务表设计。
+
+对 Langfuse，先确认官方 OTel 链路能覆盖哪些观测，再补平台关联与必要粒度。仓库未声明的 Langfuse、OpenTelemetry 和导出组件版本，留到接入选型时明确，不在本文件指定。
+
+## 6. 本次完成与未完成
+
+已完成官方版本文档、关键源码与本地关键依赖类存在性的核查，并整理项目映射、差异记录和验证标准。未执行模型调用、数据库连接或变更、沙箱启动、MCP 连接、Langfuse 上报和恢复故障实验。本文不构成生产可用性或全链路验证结论。

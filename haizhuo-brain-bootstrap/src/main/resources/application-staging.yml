@@ -1,0 +1,11 @@
+spring:
+  datasource:
+    url: ${HZ_BRAIN_DB_URL}
+    username: ${HZ_BRAIN_DB_USERNAME}
+    password: ${HZ_BRAIN_DB_PASSWORD}
+  data:
+    redis:
+      host: ${HZ_BRAIN_REDIS_HOST}
+      port: ${HZ_BRAIN_REDIS_PORT:6379}
+      password: ${HZ_BRAIN_REDIS_PASSWORD:}
+      database: ${HZ_BRAIN_REDIS_DATABASE:0}

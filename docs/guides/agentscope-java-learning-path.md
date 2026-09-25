@@ -1,0 +1,136 @@
+# AgentScope Java 2.0.3：面向本项目的学习路线
+
+| 项目 | 说明 |
+| --- | --- |
+| 状态 | 学习与设计准备文档；官方资料和源码静态核查，运行实验待做 |
+| 版本 | 0.1 |
+| 更新日期 | 2026-09-23 |
+| 适用范围 | 根 `pom.xml` 锁定的 AgentScope Java 2.0.3；官方 `v2.0.3` 标签 |
+| 关联文档 | [框架能力参考](agentscope-java-capabilities.md)、[接入验证清单](agentscope-java-integration-checklist.md)、[项目架构](../design/agent-platform/architecture.md) |
+
+## 1. 先明确学习目标
+
+本项目的下一步是把工程骨架接成一条可信的真实执行链：用户在个人 Workspace 中选择资料，主 Agent 用 Skills 和工具完成工作，必要时等待用户，再把结果登记为产物。要学会的不是 AgentScope 所有功能，而是弄清**哪一步由框架执行、哪一步由平台决定，以及二者怎样安全连接**。
+
+仓库目前声明 `agentscope-harness`、DashScope 模型扩展和 JDBC 扩展，但 `AgentScopeRuntime` 等仍是占位实现；`platform` 模块也尚未落地。因此“依赖已声明”“官方支持”“本项目已接入”是三个不同层次。本文的次序为本轮建议，不改变[已确认架构](../design/agent-platform/architecture.md)。
+
+建议按下面顺序学习。**P0** 是开始写运行适配器和工具边界前应理解的内容；**P1** 是设计交互控制与可靠性前应理解的内容；**P2** 在初版委派、长会话和观测接入前完成。可以用同一个“读取资料 → 需要确认 → 继续 → 交付产物”的例子贯穿，不必为每个特性单独造系统。
+
+| 顺序 | 主题 | 先能回答的问题 | 对应的工程决策 |
+| --- | --- | --- | --- |
+| P0-1 | Agent 调用与事件 | 一次框架 `call` 从哪里开始、怎样结束？ | `runtime-agentscope` 的调用与事件转换 |
+| P0-2 | 身份、状态与并发 | `RuntimeContext`、`AgentState`、Session、Run 各存什么？ | 状态寻址、隔离和运行契约 |
+| P0-3 | 工具、MCP 与权限 | 实际操作前由谁做最后一次授权检查？ | 统一工具入口与拒绝/确认分离 |
+| P0-4 | Harness 装配与文件系统 | Builder 最终启用了哪些工具和文件访问？ | Profile、资源视图与执行环境 |
+| P0-5 | Skills 与模型配置 | Skills、工具、模型配置何时解析、何时可能变化？ | Run 绑定配置与凭据隔离 |
+| P1-1 | 等待、取消、恢复 | 框架事件与业务 Run 状态如何对应？ | 澄清、审批、取消和继续 |
+| P1-2 | 存储与失败 | 何时保存状态；失败和并发写如何处理？ | 框架检查点与业务状态协调 |
+| P1-3 | Reactor 与 Spring | 流式执行、阻塞存储和网页连接怎样共存？ | 内部执行器、事务与前端反馈 |
+| P2-1 | 压缩、日志与记忆 | 哪份记录给模型看，哪份供用户和审计查询？ | Session 历史与摘要边界 |
+| P2-2 | 子 Agent | 如何保证顺序委派与主 Agent 交付？ | 专业 Agent 范围与停止传播 |
+| P2-3 | 观测 | Agent、模型、工具事件如何关联业务 Run？ | Langfuse 接入与运行诊断 |
+
+## 2. P0：先学到能够接通一条真实执行链
+
+### P0-1：Agent 循环、消息和事件
+
+**应理解：** `HarnessAgent` 在 `ReActAgent` 上装配能力；ReAct 循环经历模型推理、工具行动、结果回填与再次推理。`call` 面向最终消息，`streamEvents` 面向逐步事件。事件中的 `replyId`、`blockId` 和 `toolCallId` 用于组装一次回复，但它们都不能直接充当平台 Run 编号。[官方 Agent 文档](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/docs/v2/en/docs/building-blocks/agent.md)、[消息与事件文档](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/docs/v2/en/docs/building-blocks/message-and-event.md)
+
+**建议阅读源码：** 从 [AgentBase 调用生命周期](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/agentscope-core/src/main/java/io/agentscope/core/agent/AgentBase.java)进入，跟到 [ReActAgent 的 `buildAgentStream` / `doCall` / 推理和行动分支](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/agentscope-core/src/main/java/io/agentscope/core/ReActAgent.java)。只追踪一次“模型选择读资料工具，工具返回后生成答复”的路径；先不通读所有事件类。
+
+**学到位的标志：** 能画出一次调用中“模型请求 → 工具调用 → 工具结果 → 最终消息”的时间线，指出等待事件、失败事件和最终消息分别由谁转换为平台事件；知道 `AgentEndEvent` 表示框架本次回复结束，平台 Run 可能仍在等待后续输入。
+
+### P0-2：`RuntimeContext`、`AgentState` 和同会话并发
+
+**应理解：** `RuntimeContext` 是本次调用携带的用户、Session 和附加信息；`AgentState` 包含会话消息、摘要和部分框架子状态，交给 `AgentStateStore` 保存。ReActAgent 对相同 `(userId, sessionId)` 的调用有串行门闩；这不替代平台对活跃 Run、请求去重和用户权限的检查。`RuntimeContext` 的附加属性不自动持久化到 AgentState。[官方 Context 文档](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/docs/v2/en/docs/building-blocks/context.md)、[AgentBase 串行实现](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/agentscope-core/src/main/java/io/agentscope/core/agent/AgentBase.java)
+
+**本项目要会区分：** 平台 Session 管持续对话，Run 管一次业务执行；同一 Run 可以经过多次框架调用。框架的状态槽用显式用户和 Session 寻址，Run 关联另外记录。调用恢复时还要重新提供本次有效权限和配置依据，不能指望瞬时 `RuntimeContext` 从状态库恢复。
+
+**学到位的标志：** 能解释“同用户不同 Session”“不同用户相同 Session 字符串”“同 Session 两个并发调用”各自读写哪个状态槽，哪些情况需要平台先拒绝或等待。还应知道无参 `observe()` 的 [ReActAgent 实现](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/agentscope-core/src/main/java/io/agentscope/core/ReActAgent.java)使用默认状态槽，不能直接用作指定运行中 Run 的补充输入。
+
+### P0-3：工具、MCP、框架权限与平台授权
+
+**应理解：** Toolkit 注册并分发 Java 工具、MCP 工具和工具组；Skill 给模型提供方法，实际动作仍由工具承担。框架权限系统产生 `ALLOW`、`DENY`、`ASK`，确认时还可能接受建议规则并影响之后的调用。MCP 的只读提示可影响框架的自动放行判断；它不是本项目资源权限的证明。[官方工具文档](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/docs/v2/en/docs/building-blocks/tool.md)、[权限系统文档](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/docs/v2/en/docs/building-blocks/permission-system.md)
+
+**建议阅读源码：** [ToolExecutor](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/agentscope-core/src/main/java/io/agentscope/core/tool/ToolExecutor.java) 的工具查找、组启用、参数校验、外部工具短路及执行路径；[MiddlewareBase](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/agentscope-core/src/main/java/io/agentscope/core/middleware/MiddlewareBase.java) 的扩展点。官方中间件文档说明 `onActing` 只包裹框架内部执行的工具，外部执行不走该点，因此不能仅在 `onActing` 放一层检查就认为所有实际操作都已覆盖。[中间件文档](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/docs/v2/en/docs/building-blocks/middleware.md)
+
+**本项目规则：** 工具定义声明权限和确认要求，Profile 限定可用工具与范围；执行前结合用户权限、资源范围和有效授权做最终检查。无权限直接拒绝，用户确认不能提升权限。框架的工具过滤和 `ASK` 用于承接交互，不能独自作为最终业务授权。专业 Agent、文件工具和 MCP 也应走同一原则。
+
+**学到位的标志：** 能沿一条 Java 工具路径和一条 MCP / 内置工具路径找到实际操作点；说明怎样防止“允许清单之外的工具”“已撤销权限的工具”“模型传入别人的资源 ID”执行。对于找不到统一拦截点的路径，知道应先限制暴露，再决定适配方式。
+
+### P0-4：Harness Builder、Workspace 与文件系统
+
+**应理解：** Harness Workspace 组织 Agent 指令、Skills、子 Agent、工具配置、知识、记忆和工作文件。Builder 的编程配置与工作空间文件可能共同影响最终 Agent；`WorkspaceContextMiddleware` 会把工作空间内容加入系统提示词。平台 Workspace 则是用户个人资源空间，平台 Profile 是已发布的 Agent 配置，三者职责不同。[官方 Harness 架构](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/docs/v2/en/docs/harness/architecture.md)、[Workspace 文档](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/docs/v2/en/docs/harness/workspace.md)、[HarnessAgent Builder](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/agentscope-harness/src/main/java/io/agentscope/harness/agent/HarnessAgent.java)
+
+**优先核查一个默认值：** [文件系统文档](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/docs/v2/en/docs/harness/filesystem.md)写明不指定 `filesystem(...)` 时默认本地模式，文件工具可访问宿主机文件，shell 可以在宿主机执行。共享存储模式不提供 shell；沙箱模式在隔离环境执行。用户无需本地目录，不意味着服务端可以默认开放宿主机读写与命令。具体工具是否注册、默认目录在哪里，仍以选定 Builder 组合核实。
+
+**建议阅读源码：** [WorkspaceManager](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/agentscope-harness/src/main/java/io/agentscope/harness/agent/workspace/WorkspaceManager.java) 的路径解析与文件系统路由，以及 [WorkspaceContextMiddleware](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/agentscope-harness/src/main/java/io/agentscope/harness/agent/middleware/WorkspaceContextMiddleware.java) 的指令装配。
+
+**学到位的标志：** 能列出当前有效系统指令、工具清单、文件路径来源和隔离维度；能指出哪些文件只是用户资料、哪些是可信 Agent 配置。若使用远程文件视图，要知道不在框架文件抽象内直接使用宿主机 `java.nio.Files` 写入用户资源。
+
+### P0-5：Skills 来源与模型装配
+
+**应理解：** Skill 可以来自工作空间和仓库；同名 Skill 有来源覆盖规则，动态加载发生在框架调用过程中。模型接口与供应商实现分开，本项目 POM 声明了 DashScope 扩展；简单模型 ID 解析可能缓存模型实例，带上下文的创建有不同缓存策略。[Skills 文档](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/docs/v2/en/docs/harness/skill.md)、[工具与 Skill 加载文档](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/docs/v2/en/docs/building-blocks/tool.md)、[模型文档](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/docs/v2/en/docs/building-blocks/model.md)
+
+**建议阅读源码：** [HarnessAgent Builder](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/agentscope-harness/src/main/java/io/agentscope/harness/agent/HarnessAgent.java) 的 Skill 来源装配，以及 [ModelRegistry](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/agentscope-core/src/main/java/io/agentscope/core/model/ModelRegistry.java) 的供应商查找与缓存键选择。
+
+**本项目关注：** 平台发布 Profile / Skill 修订，Run 记录实际采用的版本；等待后继续仍使用原 Run 的配置依据。动态 Skill 来源和模型实例缓存不能导致重新装配后使用另一份指令、工具范围或凭据。模型是否支持工具调用、结构化输出、多模态以及相应的用量反馈，要按实际 DashScope 模型核实。
+
+**学到位的标志：** 能说明一项 Skill 从“平台已发布”到“当前 Run 可加载”的路径，以及同名冲突和版本锁定策略；能说明模型 ID、凭据和有效配置怎样共同决定模型实例身份。
+
+## 3. P1：把等待与故障处理设计正确
+
+### P1-1：确认、外部执行、补充输入、取消与恢复
+
+**应理解：** 框架有确认事件、外部执行暂停与结果回填、中断信号和保存状态；这些机制分别处理工具许可、工具结果和本次调用控制。它们不自动定义平台的澄清等待、提前回答、取消完成或安全重启。[Agent 文档](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/docs/v2/en/docs/building-blocks/agent.md)、[Context 文档](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/docs/v2/en/docs/building-blocks/context.md)、[ReActAgent 源码](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/agentscope-core/src/main/java/io/agentscope/core/ReActAgent.java)
+
+**重点追踪：** 产生 `RequireUserConfirmEvent` 或 `RequireExternalExecutionEvent` 后，何时形成可保存状态、何时结束当前框架调用；下次调用如何匹配确认或工具结果；同批多个工具有一个等待时其他工具的状态如何处理；中断在模型流、工具执行和保存阶段各会怎样表现。`ToolExecutor` 的超时和 Reactor 取消不保证外部副作用撤销，不能将“取消请求已接收”显示为“操作已停止”。[工具执行器源码](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/agentscope-core/src/main/java/io/agentscope/core/tool/ToolExecutor.java)
+
+**学到位的标志：** 能分别写出正常等待、提前回答、重复回答、确认与取消竞争、工具完成后保存失败五条时间线，并说明哪条可继续原 Run、哪条必须停止本次尝试。对应的实际实验见[验证清单](agentscope-java-integration-checklist.md)。
+
+### P1-2：AgentStateStore、JDBC 与业务事务
+
+**应理解：** 状态存储按用户、Session 和状态键寻址，支持可选的版本化写入；不支持版本化的实现可能退化为覆盖写。[AgentStateStore 接口](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/agentscope-core/src/main/java/io/agentscope/core/state/AgentStateStore.java)和 [JdbcAgentStateStore](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/agentscope-extensions/agentscope-extensions-jdbc/src/main/java/io/agentscope/extensions/jdbc/state/JdbcAgentStateStore.java)是本项目需核查的入口。
+
+**重要源码细节：** ReActAgent 正常调用完成时保存状态；中断路径若保存失败，会记录警告后仍返回中断回复。因此“框架返回了中断结果”不证明状态已持久化。[ReActAgent 保存与中断路径](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/agentscope-core/src/main/java/io/agentscope/core/ReActAgent.java)
+
+**本项目关注：** MyBatis-Plus 管平台业务数据，框架 JDBC 扩展可候选保存 AgentState。二者即使共用数据库，也不能预设同一事务。平台记录等待点或 Run 终态前，应能判断框架检查点是否可靠、工具副作用是否已发生。
+
+**学到位的标志：** 能说清楚一次调用的“业务状态、框架状态、外部工具副作用”三者谁先发生、哪一步可重试、哪一步需要幂等或人工收敛。
+
+### P1-3：Reactor、Spring Boot 和前端事件流
+
+**应理解：** 框架用 Reactor `Mono` / `Flux` 表达调用和事件流，当前仓库 `runtime-api` 也使用 `Flux`，API 使用 WebFlux。`AgentBase` 会对同状态槽调用串行化；工具执行器有调度、超时和错误转换逻辑。这些机制不决定数据库访问、文件处理、执行器名额和网页连接生命周期。[AgentBase 源码](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/agentscope-core/src/main/java/io/agentscope/core/agent/AgentBase.java)、[ToolExecutor 源码](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/agentscope-core/src/main/java/io/agentscope/core/tool/ToolExecutor.java)
+
+**本项目关注：** Spring Boot 负责单体装配与接入，平台内部执行器持有 Run；网页断连不直接决定 Run 存亡。阻塞式 MyBatis-Plus 或工具调用不应占住事件处理线程；数据库短事务不包裹模型请求或用户等待。这是工程设计要求，线程位置和背压还需在本项目中验证。
+
+**学到位的标志：** 能画出请求线程、平台调度、模型流、工具执行、数据库写入和前端订阅之间的关系；能说明流式输出丢失后如何从平台持久记录恢复展示，而非重跑 Agent。
+
+## 4. P2：在初版需要时再深入
+
+### P2-1：上下文压缩、transcript、长期记忆
+
+**应理解：** `AgentState` 的消息上下文可压缩；transcript 保存未压缩原文；大型工具结果可以移出模型上下文；长期记忆又是独立的提取与整理路径。Harness 的默认装配和部分官方说明存在差异，不能只看功能名称或文档默认值。[压缩文档](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/docs/v2/en/docs/harness/compaction.md)、[记忆文档](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/docs/v2/en/docs/harness/memory.md)、[HarnessAgent 默认装配源码](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/agentscope-harness/src/main/java/io/agentscope/harness/agent/HarnessAgent.java)
+
+**本项目关注：** 先复用压缩，平台保留原文与摘要关联；初版不自动开放跨会话记忆。`disableMemoryHooks()` 与 `disableMemoryTools()` 控制的路径不同，transcript 又独立于两者；压缩前写记忆和历史查询工具也需验证。能区分这四类数据及各自读取边界，才适合设计 Session 摘要。
+
+### P2-2：子 Agent 的实际调度语义
+
+**应理解：** Harness 支持同步与后台委派。普通同步超时可能转成后台 task；`CTX_FORCE_SYNC` 能阻止这种转移，但同一轮多个委派仍可能随默认 Toolkit 并行。子 Agent 的 Workspace、工具和权限继承也要单独核查。[子 Agent 文档](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/docs/v2/en/docs/harness/subagent.md)、[AgentSpawnTool 源码](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/agentscope-harness/src/main/java/io/agentscope/harness/agent/tool/AgentSpawnTool.java)
+
+**本项目关注：** 初版顺序委派，主 Agent 统一交付；框架后台 task 不能混同平台业务 Task 或 Run。学到位的标志是能说明超时、取消、权限收窄和子 Agent 产物回收的真实执行路径。
+
+### P2-3：OpenTelemetry 到 Langfuse
+
+**应理解：** 官方 `OtelTracingMiddleware` 为 Agent、模型调用和工具行动生成 span；现有实现的工具行动 span 可能覆盖一批工具。跟踪数据的完整性、粒度和 Reactor 上下文传播需要用实际调用确认。[跟踪源码](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/agentscope-core/src/main/java/io/agentscope/core/tracing/OtelTracingMiddleware.java)、[中间件文档](https://github.com/agentscope-ai/agentscope-java/blob/v2.0.3/docs/v2/en/docs/building-blocks/middleware.md)
+
+**本项目关注：** `observability` 接入 Langfuse，补充平台 Session / Run 关联。可先验证官方 OTel 输出；上报失败不影响 Run，预算直接依据执行反馈。Langfuse 官方 Java 资料可作为接入参考；本仓库未声明的 Langfuse / OTel 版本需接入时再定。[Langfuse Java 官方仓库](https://github.com/langfuse/langfuse-java/blob/main/README.md)
+
+## 5. 建议的阅读与练习节奏
+
+1. **第一轮：跑通认知。** 阅读 P0-1、P0-2，用纸面时间线描述同一 Session 两轮对话、一次工具调用和前端事件。输出一张“框架消息 / 平台事件 / 平台 Run 状态”对照图。
+2. **第二轮：锁定边界。** 阅读 P0-3 至 P0-5，列出一个有效 Profile 装配后的系统指令、Skills、工具与文件视图，并给每个实际操作标注最终授权位置。输出一张“可信配置来源与实际操作入口”清单。
+3. **第三轮：处理异常。** 阅读 P1，沿一个“工具已成功、状态保存失败”的例子追踪状态与副作用；输出等待、取消、恢复的时序和不能自动继续的条件。
+4. **第四轮：按需拓展。** 仅当首条执行链需要长会话、顺序委派或 Langfuse 时深入 P2；用[接入验证清单](agentscope-java-integration-checklist.md)安排实验。
+
+开始编码前，最有价值的共同结论是：**实际工具操作如何被平台统一授权，以及 Harness 最终暴露了哪些工具与文件能力**。这两点定下来，运行适配器和后续 Run 控制才有可靠边界。以上“学习完成”指能解释并设计，不表示功能已在本仓库完成运行验证。
