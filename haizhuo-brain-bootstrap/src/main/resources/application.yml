@@ -2,14 +2,14 @@ spring:
   application:
     name: haizhuo-brain-server
   profiles:
-    active: ${SPRING_PROFILES_ACTIVE:local}
+    active: local
   lifecycle:
     timeout-per-shutdown-phase: 30s
   jackson:
     default-property-inclusion: non_null
     time-zone: Asia/Shanghai
 server:
-  port: ${SERVER_PORT:8080}
+  port: 8080
   shutdown: graceful
 mybatis-plus:
   mapper-locations: classpath*:/mapper/**/*.xml
@@ -38,11 +38,11 @@ management:
       show-details: when_authorized
   tracing:
     sampling:
-      probability: ${TRACING_SAMPLING_PROBABILITY:0.1}
+      probability: 0.1
 haizhuo:
   brain:
     agent:
-      provider: ${HZ_BRAIN_MODEL_PROVIDER:dashscope}
-      primary-model: ${HZ_BRAIN_PRIMARY_MODEL:qwen-plus}
+      provider: dashscope
+      primary-model: qwen-plus
     persistence:
       enabled: true

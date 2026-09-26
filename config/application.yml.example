@@ -1,0 +1,20 @@
+spring:
+  application:
+    name: haizhuo-brain-server
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
+  jackson:
+    default-property-inclusion: non_null
+    time-zone: Asia/Shanghai
+server:
+  port: 8080
+  shutdown: graceful
+haizhuo:
+  brain:
+    agent:
+      provider: dashscope
+      primary-model: qwen-plus
+management:
+  tracing:
+    sampling:
+      probability: 0.1

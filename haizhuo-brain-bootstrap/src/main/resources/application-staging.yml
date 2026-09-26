@@ -1,11 +1,11 @@
 spring:
   datasource:
-    url: ${HZ_BRAIN_DB_URL}
-    username: ${HZ_BRAIN_DB_USERNAME}
-    password: ${HZ_BRAIN_DB_PASSWORD}
+    url: jdbc:mysql://请填写预发数据库地址:3306/haizhuo_brain
+    username: 请填写数据库用户名
+    password: ""
   data:
     redis:
-      host: ${HZ_BRAIN_REDIS_HOST}
-      port: ${HZ_BRAIN_REDIS_PORT:6379}
-      password: ${HZ_BRAIN_REDIS_PASSWORD:}
-      database: ${HZ_BRAIN_REDIS_DATABASE:0}
+      host: 请填写预发 Redis 地址
+      port: 6379
+      password: ""
+      database: 0

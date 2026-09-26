@@ -1,0 +1,11 @@
+server:
+  port: 8080
+haizhuo:
+  brain:
+    persistence:
+      enabled: false
+    agent:
+      provider: dashscope
+      primary-model: qwen-plus
+      api-key: ""
+      base-url: ""

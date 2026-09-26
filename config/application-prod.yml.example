@@ -2,7 +2,7 @@ spring:
   datasource:
     url: jdbc:mysql://请填写生产数据库地址:3306/haizhuo_brain
     username: 请填写数据库用户名
-    password: ""
+    password: 请填写数据库密码
     hikari:
       maximum-pool-size: 30
       minimum-idle: 5
@@ -11,10 +11,9 @@ spring:
     redis:
       host: 请填写生产 Redis 地址
       port: 6379
-      password: ""
+      password: 请填写 Redis 密码
       database: 0
 logging:
   level:
     root: INFO
     com.haizhuo.brain: INFO
-    com.haizhuo.brain.infrastructure.persistence: WARN
