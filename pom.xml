@@ -19,7 +19,7 @@
         <module>haizhuo-brain-runtime-api</module>
         <module>haizhuo-brain-security</module>
         <module>haizhuo-brain-observability</module>
-        <module>haizhuo-brain-meeting</module>
+        <module>haizhuo-brain-platform</module>
         <module>haizhuo-brain-runtime-agentscope</module>
         <module>haizhuo-brain-infrastructure</module>
         <module>haizhuo-brain-api</module>

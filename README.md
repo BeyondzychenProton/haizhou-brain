@@ -2,7 +2,9 @@
 
 基于 JDK 17、Spring Boot 3.5.16 的模块化单体工程骨架。
 
-本初始化版本按实施说明创建模块边界、运行时接口、配置和基础设施边界；按项目要求暂不包含 Flyway、数据库迁移脚本、建表 SQL、数据库表对象及 Mapper XML。
+当前已增加 `haizhuo-brain-platform`，定义数字员工发布目录、渠道入站校验、原子消息接收、Session/Run 与出站投递端口。`meeting` 源码暂保留，但已移出根 Maven 构建。
+
+这一轮是通用 Java 骨架：尚无数据库表与迁移、渠道认证入口、持久化实现、后台 worker 或真实 AgentScope 执行。未配置的运行时会明确报错，不会返回虚假的成功结果。
 
 ## 本地运行
 
@@ -17,3 +19,4 @@ mvn -pl haizhuo-brain-bootstrap -am spring-boot:run -Dspring-boot.run.profiles=l
 
 - [文档索引与目录约定](docs/README.md)
 - [Agent 工作助手平台初版概要设计](docs/design/agent-platform/overview.md)
+- [数字员工多渠道接入与消息流转设计](docs/design/agent-platform/multi-channel-ingress.md)

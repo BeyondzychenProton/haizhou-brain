@@ -1,7 +1,7 @@
 package com.haizhuo.brain.runtime.api.event;
 
-import com.haizhuo.brain.kernel.identity.AgentTaskId;
+import com.haizhuo.brain.kernel.identity.RunId;
 
 public interface BrainAgentEvent {
-    AgentTaskId taskId();
+    RunId runId();
 }

@@ -2,5 +2,5 @@ package com.haizhuo.brain.runtime.api.event;
 
 import com.haizhuo.brain.kernel.identity.RunId;
 
-public record AgentTextDeltaEvent(RunId runId, String text) implements BrainAgentEvent {
+public record AgentRunCompletedEvent(RunId runId, String result) implements BrainAgentEvent {
 }

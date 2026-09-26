@@ -44,7 +44,5 @@ haizhuo:
     agent:
       provider: ${HZ_BRAIN_MODEL_PROVIDER:dashscope}
       primary-model: ${HZ_BRAIN_PRIMARY_MODEL:qwen-plus}
-    meeting:
-      enabled: true
     persistence:
       enabled: true

@@ -7,6 +7,7 @@
 | [Agent 工作助手平台初版概要设计](design/agent-platform/overview.md) | 已确认的概要设计 | 核心概念与运行关系；主 Agent 行为边界；Workspace 资料、产物版本与跨会话使用规则 |
 | [请求执行链路与控制概要](design/agent-platform/request-lifecycle.md) | 已确认原则的链路整理，工程细节待验证 | 网页请求到 AgentScope Java 执行的主链路、交互控制、前后端展示分工与工程职责 |
 | [Agent 平台整体工程架构](design/agent-platform/architecture.md) | 架构草案待审阅；职责与复用方向已确认，具体接入及运行验证待完成 | 模块与数据归属、官方 Workspace 定位及重叠评估、执行控制、事务、Langfuse 和验证清单 |
+| [数字员工多渠道接入与消息流转设计](design/agent-platform/multi-channel-ingress.md) | 0.1 架构设计；当前仅完成通用 Java 骨架 | 数字员工发布、渠道身份、Session/Run、入站去重与出站投递边界 |
 | [AgentScope Java：Agent 与 Harness 能力参考](guides/agentscope-java-capabilities.md) | 官方 2.0.3 文档与源码核查 | Agent / Harness 能力、Workspace 与 Profile 区别、项目复用边界及 Langfuse 定位 |
 | [AgentScope Java：源码阅读与接入验证](guides/agentscope-java-integration-checklist.md) | 静态核查完成，运行验证待执行 | 调用链阅读入口、文档与源码差异、进入详细设计前的实验和验收条件 |
 | [AgentScope Java 2.0.3：面向本项目的学习路线](guides/agentscope-java-learning-path.md) | 官方资料与源码核查；学习建议 | 按编码决策排序的学习主题、官方阅读入口及学到位的判断标准 |
@@ -26,7 +27,8 @@ docs/
     └── agent-platform/
         ├── overview.md               # Agent 平台概要设计
         ├── request-lifecycle.md       # 请求执行链路与控制概要
-        └── architecture.md            # 整体工程架构草案
+        ├── architecture.md            # 整体工程架构草案
+        └── multi-channel-ingress.md   # 多渠道接入与消息流转
 ```
 
 - 设计文档按业务主题归档到 `design/<topic>/`，同一主题的概要与后续详细设计放在一起。
