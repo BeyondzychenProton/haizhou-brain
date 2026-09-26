@@ -7,3 +7,12 @@ spring:
       - org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration
       - org.springframework.boot.autoconfigure.security.reactive.ReactiveSecurityAutoConfiguration
       - org.springframework.boot.autoconfigure.security.reactive.ReactiveUserDetailsServiceAutoConfiguration
+haizhuo:
+  brain:
+    persistence:
+      enabled: false
+    agent:
+      provider: dashscope
+      primary-model: ${HZ_BRAIN_PRIMARY_MODEL:qwen-plus}
+      api-key: ${DASHSCOPE_API_KEY:}
+      base-url: ${DASHSCOPE_BASE_URL:}
