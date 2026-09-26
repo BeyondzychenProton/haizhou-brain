@@ -10,7 +10,7 @@ import org.springframework.stereotype.Component;
 
 /** Single-process deterministic A-201 mock. Data is intentionally volatile. */
 @Component
-@Profile("meeting-mock | test")
+@Profile("test")
 public class InMemoryMockMeetingRoomSystem implements MeetingRoomSystem {
     private final Map<String, Booking> bookings = new ConcurrentHashMap<>();
     private final Map<String, String> operationDigests = new ConcurrentHashMap<>();

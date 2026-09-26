@@ -9,9 +9,10 @@ import com.haizhuo.brain.runtime.api.event.AgentRunFailedEvent;
 import com.haizhuo.brain.runtime.agentscope.config.AgentScopeRuntimeProperties;
 import com.haizhuo.brain.runtime.agentscope.tool.MeetingRoomTools;
 import io.agentscope.core.agent.RuntimeContext;
+import io.agentscope.core.ReActAgent;
 import io.agentscope.extensions.model.dashscope.DashScopeChatModel;
+import io.agentscope.extensions.model.openai.OpenAIChatModel;
 import io.agentscope.core.tool.Toolkit;
-import io.agentscope.harness.agent.HarnessAgent;
 import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Component;
 import reactor.core.scheduler.Schedulers;
@@ -32,16 +33,26 @@ public class AgentScopeRuntime implements AgentRuntime {
     public Flux<BrainAgentEvent> execute(AgentExecutionRequest request) {
         return Mono.fromCallable(() -> {
             if (properties.apiKey() == null || properties.apiKey().isBlank())
-                throw new IllegalStateException("DashScope API key is missing; set DASHSCOPE_API_KEY to execute a Run");
-            var modelBuilder = DashScopeChatModel.builder().apiKey(properties.apiKey()).modelName(request.modelName()).stream(false);
-            if (properties.baseUrl() != null && !properties.baseUrl().isBlank()) modelBuilder.baseUrl(properties.baseUrl());
+                throw new IllegalStateException("LLM API key is missing; configure config/application-meeting-mock.yml");
+            String provider = request.modelProvider() == null ? properties.provider() : request.modelProvider();
+            var model = switch (provider == null ? "" : provider.toLowerCase(java.util.Locale.ROOT)) {
+                case "openai", "openai-compatible" -> {
+                    if (properties.baseUrl() == null || properties.baseUrl().isBlank())
+                        throw new IllegalStateException("LLM base-url is missing; configure config/application-meeting-mock.yml");
+                    yield OpenAIChatModel.builder().apiKey(properties.apiKey()).modelName(request.modelName())
+                            .baseUrl(properties.baseUrl()).stream(false).build();
+                }
+                case "dashscope" -> {
+                    var builder = DashScopeChatModel.builder().apiKey(properties.apiKey()).modelName(request.modelName()).stream(false);
+                    if (properties.baseUrl() != null && !properties.baseUrl().isBlank()) builder.baseUrl(properties.baseUrl());
+                    yield builder.build();
+                }
+                default -> throw new IllegalStateException("Unsupported LLM provider: " + provider);
+            };
             Toolkit toolkit = new Toolkit();
             toolkit.registerTool(new MeetingRoomTools(toolGateway, request));
-            try (HarnessAgent agent = HarnessAgent.builder().name("meeting-room-agent").description("Mock meeting-room reservation agent")
-                    .sysPrompt(request.instructions()).model(modelBuilder.build()).toolkit(toolkit).maxIters(6)
-                    .disableFilesystemTools().disableShellTool().disableMemoryTools().disableMemoryHooks()
-                    .disableTranscript().disableSessionPersistence().disableWorkspaceContext().disableSubagents()
-                    .disableDynamicSkills().disableDefaultWorkspaceSkills().disableToolsConfig().build()) {
+            try (ReActAgent agent = ReActAgent.builder().name("meeting-room-agent").description("Mock meeting-room reservation agent")
+                    .sysPrompt(request.instructions()).model(model).toolkit(toolkit).maxIters(6).build()) {
                 RuntimeContext context = RuntimeContext.builder().sessionId(request.sessionId().value())
                         .userId(Long.toString(request.userId().value())).put(AgentExecutionRequest.class, request).build();
                 var answer = agent.call(request.prompt(), context).block();

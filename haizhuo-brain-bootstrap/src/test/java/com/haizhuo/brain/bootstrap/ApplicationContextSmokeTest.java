@@ -9,7 +9,7 @@ import org.springframework.boot.test.context.SpringBootTest.WebEnvironment;
 import org.junit.jupiter.api.Assertions;
 
 @SpringBootTest(webEnvironment = WebEnvironment.RANDOM_PORT)
-@ActiveProfiles("meeting-mock")
+@ActiveProfiles("test")
 class ApplicationContextSmokeTest {
     @LocalServerPort int port;
 

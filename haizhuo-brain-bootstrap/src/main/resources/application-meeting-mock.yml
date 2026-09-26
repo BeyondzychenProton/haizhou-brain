@@ -1,18 +1,22 @@
+server:
+  address: 127.0.0.1
 spring:
   main:
     web-application-type: reactive
   autoconfigure:
     exclude:
-      - org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
-      - org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration
       - org.springframework.boot.autoconfigure.security.reactive.ReactiveSecurityAutoConfiguration
       - org.springframework.boot.autoconfigure.security.reactive.ReactiveUserDetailsServiceAutoConfiguration
+management:
+  health:
+    redis:
+      enabled: false
 haizhuo:
   brain:
     persistence:
-      enabled: false
+      enabled: true
     agent:
-      provider: dashscope
-      primary-model: qwen-plus
+      provider: openai
+      primary-model: qwen3.7-max
       api-key: ""
       base-url: ""

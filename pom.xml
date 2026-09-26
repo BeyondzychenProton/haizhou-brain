@@ -41,8 +41,8 @@
                 <groupId>com.baomidou</groupId><artifactId>mybatis-plus-bom</artifactId>
                 <version>${mybatis-plus.version}</version><type>pom</type><scope>import</scope>
             </dependency>
-            <dependency><groupId>io.agentscope</groupId><artifactId>agentscope-harness</artifactId><version>${agentscope.version}</version></dependency>
             <dependency><groupId>io.agentscope</groupId><artifactId>agentscope-extensions-model-dashscope</artifactId><version>${agentscope.version}</version></dependency>
+            <dependency><groupId>io.agentscope</groupId><artifactId>agentscope-extensions-model-openai</artifactId><version>${agentscope.version}</version></dependency>
             <dependency><groupId>io.agentscope</groupId><artifactId>agentscope-extensions-jdbc</artifactId><version>${agentscope.version}</version></dependency>
         </dependencies>
     </dependencyManagement>

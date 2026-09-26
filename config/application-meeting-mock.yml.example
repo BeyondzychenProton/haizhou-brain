@@ -1,11 +1,12 @@
 server:
+  address: 127.0.0.1
   port: 8080
 haizhuo:
   brain:
     persistence:
       enabled: false
     agent:
-      provider: dashscope
-      primary-model: qwen-plus
+      provider: openai
+      primary-model: model-id-from-v1-models
       api-key: ""
       base-url: ""
