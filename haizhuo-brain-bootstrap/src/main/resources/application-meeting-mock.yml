@@ -20,3 +20,8 @@ haizhuo:
       primary-model: qwen3.7-max
       api-key: ""
       base-url: ""
+    meeting-room:
+      tenant-id: 1
+      employee-id: 1
+      test-user-id: 1001
+      admin-actor-id: 1001

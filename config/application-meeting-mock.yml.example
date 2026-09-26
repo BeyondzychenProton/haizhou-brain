@@ -10,3 +10,13 @@ haizhuo:
       primary-model: model-id-from-v1-models
       api-key: ""
       base-url: ""
+    meeting-room:
+      tenant-id: 1
+      employee-id: 1
+      test-user-id: 1001
+      admin-actor-id: 1001
+    meeting-room:
+      tenant-id: 1
+      employee-id: 1
+      test-user-id: 1001
+      admin-actor-id: 1001

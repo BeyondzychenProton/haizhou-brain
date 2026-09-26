@@ -2,10 +2,20 @@ package com.haizhuo.brain.platform.meetingroom;
 
 import com.haizhuo.brain.runtime.api.ToolExecutionGateway;
 import com.haizhuo.brain.runtime.api.model.AgentExecutionRequest;
+import com.haizhuo.brain.runtime.api.model.RuntimeCapability;
+import com.haizhuo.brain.platform.capability.CapabilityRunAuthorizer;
+import com.haizhuo.brain.platform.employee.AgentDefinitionRepository;
+import com.haizhuo.brain.platform.employee.ToolInvocationAudit;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.HexFormat;
 import java.util.Map;
+import java.util.TreeMap;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 /** Validates every model tool call and delegates to the configured meeting-room adapter. */
@@ -13,14 +23,17 @@ public class MeetingRoomToolGateway implements ToolExecutionGateway {
     private static final ZoneId ZONE = ZoneId.of("Asia/Shanghai");
     private final MeetingRoomSystem system;
     private final MeetingRoomRunStore runStore;
+    private final CapabilityRunAuthorizer authorizer;
+    private final AgentDefinitionRepository definitions;
     private final Map<String, QueryReceipt> successfulQueries = new ConcurrentHashMap<>();
     private final Map<String, String> outcomes = new ConcurrentHashMap<>();
 
-    public MeetingRoomToolGateway(MeetingRoomSystem system) { this(system, null); }
-
-    public MeetingRoomToolGateway(MeetingRoomSystem system, MeetingRoomRunStore runStore) {
+    public MeetingRoomToolGateway(MeetingRoomSystem system, MeetingRoomRunStore runStore,
+                                  CapabilityRunAuthorizer authorizer, AgentDefinitionRepository definitions) {
         this.system = system;
         this.runStore = runStore;
+        this.authorizer = authorizer;
+        this.definitions = definitions;
     }
 
     @Override public void finish(AgentExecutionRequest run) {
@@ -39,12 +52,25 @@ public class MeetingRoomToolGateway implements ToolExecutionGateway {
     }
 
     @Override public String execute(AgentExecutionRequest run, String capabilityId, Map<String, Object> args) {
-        boolean granted = run.capabilities().stream().anyMatch(c -> capabilityId.equals(c.referenceId()));
-        if (!granted) {
+        RuntimeCapability capability = run.capabilities().stream()
+                .filter(item -> capabilityId.equals(item.referenceId())).findFirst().orElse(null);
+        if (capability == null || authorizer == null || !authorizer.isAllowedNow(run, capabilityId)) {
             outcomes.put(run.runId().value(), "DENIED");
             record(run, "TOOL_DENIED", "本次运行未获准使用会议室动作");
+            if (capability != null) audit(run, capability, args, "DENY", "POLICY_DENIED", "执行前权限复核未通过");
             throw new SecurityException("Run is not granted capability " + capabilityId);
         }
+        try {
+            String result = executeAuthorized(run, capabilityId, args);
+            audit(run, capability, args, "ALLOW", "SUCCEEDED", "工具动作执行完成");
+            return result;
+        } catch (RuntimeException failure) {
+            audit(run, capability, args, "ALLOW", "FAILED", "工具动作执行失败");
+            throw failure;
+        }
+    }
+
+    private String executeAuthorized(AgentExecutionRequest run, String capabilityId, Map<String, Object> args) {
         OffsetDateTime start = parse(args.get("startAt"));
         OffsetDateTime end = parse(args.get("endAt"));
         if (!end.isAfter(start) || !start.isAfter(OffsetDateTime.now(ZONE))) throw new IllegalArgumentException("Provide a future startAt and an endAt after it");
@@ -96,6 +122,18 @@ public class MeetingRoomToolGateway implements ToolExecutionGateway {
 
     private void record(AgentExecutionRequest run, String type, String summary) {
         if (runStore != null) runStore.appendEvent(run.runId().value(), type, summary);
+    }
+    private void audit(AgentExecutionRequest run, RuntimeCapability capability, Map<String, Object> arguments,
+                       String decision, String resultStatus, String resultSummary) {
+        // 中文注释：审计只写参数哈希和结果摘要，避免把会议信息原文扩散到审计表。
+        definitions.recordToolInvocation(new ToolInvocationAudit(UUID.randomUUID().toString(), run.runId().value(),
+                capability.referenceId(), capability.revision(), run.userId().value(), capability.businessAction(),
+                argumentsHash(arguments), decision, resultStatus, resultSummary, Instant.now()));
+    }
+    private static String argumentsHash(Map<String, Object> arguments) {
+        try { return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                .digest(new TreeMap<>(arguments).toString().getBytes(StandardCharsets.UTF_8))); }
+        catch (Exception e) { throw new IllegalStateException("Could not hash tool arguments", e); }
     }
     private record QueryReceipt(OffsetDateTime startAt, OffsetDateTime endAt, int attendees, boolean available) {}
     private record AvailabilityView(MeetingRoomSystem.Availability availability, int attendees) {

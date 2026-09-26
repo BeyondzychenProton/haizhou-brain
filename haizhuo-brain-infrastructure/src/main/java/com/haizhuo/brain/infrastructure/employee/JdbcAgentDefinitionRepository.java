@@ -1,0 +1,237 @@
+package com.haizhuo.brain.infrastructure.employee;
+
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.haizhuo.brain.kernel.identity.TenantId;
+import com.haizhuo.brain.platform.capability.CapabilityExclusion;
+import com.haizhuo.brain.platform.capability.EffectiveCapabilitySet;
+import com.haizhuo.brain.platform.employee.*;
+import com.haizhuo.brain.runtime.api.model.RuntimeCapability;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.util.*;
+import org.springframework.context.annotation.Profile;
+import org.springframework.dao.EmptyResultDataAccessException;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowMapper;
+import org.springframework.jdbc.support.GeneratedKeyHolder;
+import org.springframework.jdbc.support.KeyHolder;
+import org.springframework.stereotype.Repository;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
+
+/** MySQL implementation for published agent definitions, grants, runtime snapshots and tool audit. */
+@Repository
+@Profile("meeting-mock")
+public class JdbcAgentDefinitionRepository implements AgentDefinitionRepository {
+    private static final TypeReference<Map<String, Object>> JSON_MAP = new TypeReference<>() {};
+    private final JdbcTemplate jdbc;
+    private final TransactionTemplate tx;
+    private final ObjectMapper json;
+
+    public JdbcAgentDefinitionRepository(JdbcTemplate jdbc, PlatformTransactionManager transactions, ObjectMapper json) {
+        this.jdbc = jdbc;
+        this.tx = new TransactionTemplate(transactions);
+        this.json = json;
+    }
+
+    @Override public Optional<PublishedEmployee> findPublished(TenantId tenantId, long employeeId) {
+        List<DefinitionRow> rows = jdbc.query("SELECT e.id employee_id,e.tenant_id,e.employee_code,e.display_name,e.enabled,v.id version_id,v.version_no,v.instructions,v.model_provider,v.model_name,v.content_hash,v.published_at FROM digital_employee e JOIN agent_definition_version v ON v.id=e.current_published_version_id WHERE e.tenant_id=? AND e.id=? AND e.enabled=TRUE",
+                (rs, n) -> definitionRow(rs), tenantId.value(), employeeId);
+        if (rows.isEmpty()) return Optional.empty();
+        DefinitionRow row = rows.get(0);
+        List<CapabilityBinding> bindings = jdbc.query("SELECT capability_code,capability_revision FROM agent_definition_version_capability WHERE definition_version_id=? ORDER BY position_no",
+                (rs, n) -> new CapabilityBinding(row.versionId(), CapabilityBinding.CapabilityType.TOOL,
+                        rs.getString("capability_code"), rs.getString("capability_revision")), row.versionId());
+        DigitalEmployee employee = new DigitalEmployee(row.employeeId(), new TenantId(row.tenantId()), row.employeeCode(), row.displayName(), row.employeeEnabled());
+        AgentDefinitionVersion version = new AgentDefinitionVersion(row.versionId(), row.employeeId(), row.versionNo(), row.instructions(), row.modelProvider(), row.modelName(), row.publishedAt(), row.contentHash());
+        return Optional.of(new PublishedEmployee(employee, version, bindings));
+    }
+
+    @Override public Optional<AgentDefinitionDraft> findDraft(long employeeId) {
+        List<DraftRow> rows = jdbc.query("SELECT draft_revision,instructions,model_provider,model_name,updated_at FROM agent_definition_draft WHERE employee_id=?",
+                (rs, n) -> new DraftRow(rs.getInt(1), rs.getString(2), rs.getString(3), rs.getString(4), rs.getTimestamp(5).toInstant()), employeeId);
+        if (rows.isEmpty()) return Optional.empty();
+        DraftRow row = rows.get(0);
+        List<CapabilitySelection> selected = jdbc.query("SELECT capability_code,capability_revision FROM agent_definition_draft_capability WHERE employee_id=? ORDER BY position_no",
+                (rs, n) -> new CapabilitySelection(rs.getString(1), rs.getString(2)), employeeId);
+        return Optional.of(new AgentDefinitionDraft(employeeId, row.revision(), row.instructions(), row.provider(), row.model(), selected, row.updatedAt()));
+    }
+
+    @Override public List<CapabilityCatalogEntry> listCapabilities() {
+        return jdbc.query("SELECT d.capability_code,d.capability_type,d.status,r.revision,r.display_name,r.description,r.tool_name,r.implementation_key,r.business_action,r.input_schema_json FROM capability_definition d JOIN capability_revision r ON r.capability_code=d.capability_code ORDER BY d.capability_code,r.revision",
+                (rs, n) -> mapCapability(rs));
+    }
+
+    @Override public Optional<CapabilityCatalogEntry> findCapability(String code, String revision) {
+        List<CapabilityCatalogEntry> rows = jdbc.query("SELECT d.capability_code,d.capability_type,d.status,r.revision,r.display_name,r.description,r.tool_name,r.implementation_key,r.business_action,r.input_schema_json FROM capability_definition d JOIN capability_revision r ON r.capability_code=d.capability_code WHERE d.capability_code=? AND r.revision=?",
+                (rs, n) -> mapCapability(rs), code, revision);
+        return rows.stream().findFirst();
+    }
+
+    @Override public AgentDefinitionDraft saveDraft(long employeeId, int expectedDraftRevision, String instructions,
+            String modelProvider, String modelName, List<CapabilitySelection> capabilities, long updatedBy) {
+        return tx.execute(status -> {
+            List<Integer> current = jdbc.query("SELECT draft_revision FROM agent_definition_draft WHERE employee_id=? FOR UPDATE",
+                    (rs, n) -> rs.getInt(1), employeeId);
+            if (current.isEmpty()) throw new IllegalArgumentException("Agent draft not found");
+            if (current.get(0) != expectedDraftRevision) throw new IllegalStateException("Draft revision is stale");
+            int next = expectedDraftRevision + 1;
+            jdbc.update("UPDATE agent_definition_draft SET draft_revision=?,instructions=?,model_provider=?,model_name=?,updated_by=?,updated_at=? WHERE employee_id=?",
+                    next, instructions, modelProvider, modelName, updatedBy, Timestamp.from(Instant.now()), employeeId);
+            jdbc.update("DELETE FROM agent_definition_draft_capability WHERE employee_id=?", employeeId);
+            int position = 0;
+            for (CapabilitySelection selection : capabilities) {
+                jdbc.update("INSERT INTO agent_definition_draft_capability(employee_id,capability_code,capability_revision,position_no) VALUES(?,?,?,?)",
+                        employeeId, selection.capabilityCode(), selection.revision(), ++position);
+            }
+            return new AgentDefinitionDraft(employeeId, next, instructions, modelProvider, modelName, capabilities, Instant.now());
+        });
+    }
+
+    @Override public PublishedEmployee publish(long employeeId, int expectedDraftRevision, long publishedBy, String requestId) {
+        if (requestId == null || requestId.isBlank() || requestId.length() > 128) throw new IllegalArgumentException("Invalid publish request id");
+        Long versionId = tx.execute(status -> {
+            List<Long> replay = jdbc.query("SELECT id FROM agent_definition_version WHERE employee_id=? AND publish_request_id=?",
+                    (rs, n) -> rs.getLong(1), employeeId, requestId);
+            if (!replay.isEmpty()) return replay.get(0);
+            List<Long> employees = jdbc.query("SELECT id FROM digital_employee WHERE id=? FOR UPDATE", (rs, n) -> rs.getLong(1), employeeId);
+            if (employees.isEmpty()) throw new IllegalArgumentException("Digital employee not found");
+            // 中文注释：与草稿保存共用同一行锁，确保发布读到的指令和能力绑定来自同一草稿修订。
+            List<Integer> lockedDraftRevision = jdbc.query("SELECT draft_revision FROM agent_definition_draft WHERE employee_id=? FOR UPDATE",
+                    (rs, n) -> rs.getInt(1), employeeId);
+            if (lockedDraftRevision.isEmpty()) throw new IllegalArgumentException("Agent draft not found");
+            List<AgentDefinitionDraft> drafts = findDraft(employeeId).stream().toList();
+            if (drafts.isEmpty()) throw new IllegalArgumentException("Agent draft not found");
+            AgentDefinitionDraft draft = drafts.get(0);
+            if (draft.draftRevision() != expectedDraftRevision) throw new IllegalStateException("Draft revision is stale");
+            Integer last = jdbc.query("SELECT COALESCE(MAX(version_no),0) FROM agent_definition_version WHERE employee_id=?", rs -> rs.next() ? rs.getInt(1) : 0, employeeId);
+            int versionNo = (last == null ? 0 : last) + 1;
+            String contentHash = definitionHash(draft);
+            KeyHolder key = new GeneratedKeyHolder();
+            jdbc.update(connection -> {
+                PreparedStatement statement = connection.prepareStatement("INSERT INTO agent_definition_version(employee_id,version_no,instructions,model_provider,model_name,content_hash,publish_request_id,published_by,published_at) VALUES(?,?,?,?,?,?,?,?,?)", new String[]{"id"});
+                statement.setLong(1, employeeId); statement.setInt(2, versionNo); statement.setString(3, draft.instructions());
+                statement.setString(4, draft.modelProvider()); statement.setString(5, draft.modelName()); statement.setString(6, contentHash);
+                statement.setString(7, requestId); statement.setLong(8, publishedBy); statement.setTimestamp(9, Timestamp.from(Instant.now()));
+                return statement;
+            }, key);
+            Number generated = key.getKey();
+            if (generated == null) throw new IllegalStateException("Database did not return a definition version id");
+            long id = generated.longValue();
+            int position = 0;
+            for (CapabilitySelection capability : draft.capabilities()) {
+                jdbc.update("INSERT INTO agent_definition_version_capability(definition_version_id,capability_code,capability_revision,position_no) VALUES(?,?,?,?)",
+                        id, capability.capabilityCode(), capability.revision(), ++position);
+            }
+            jdbc.update("UPDATE digital_employee SET current_published_version_id=?,row_version=row_version+1 WHERE id=?", id, employeeId);
+            return id;
+        });
+        if (versionId == null) throw new IllegalStateException("Unable to publish Agent definition");
+        return findByVersionId(employeeId, versionId);
+    }
+
+    @Override public void setCapabilityEnabled(String code, boolean enabled, long updatedBy, String reason) {
+        int changed = jdbc.update("UPDATE capability_definition SET status=?,updated_by=?,updated_at=?,status_reason=? WHERE capability_code=?",
+                enabled ? "ACTIVE" : "DISABLED", updatedBy, Timestamp.from(Instant.now()), reason, code);
+        if (changed == 0) throw new IllegalArgumentException("Capability does not exist");
+    }
+
+    @Override public boolean isCapabilityEnabled(String code, String revision) {
+        Integer count = jdbc.query("SELECT COUNT(*) FROM capability_definition d JOIN capability_revision r ON r.capability_code=d.capability_code WHERE d.capability_code=? AND r.revision=? AND d.status='ACTIVE'",
+                rs -> rs.next() ? rs.getInt(1) : 0, code, revision);
+        return count != null && count > 0;
+    }
+
+    @Override public boolean hasUserCapabilityGrant(long userId, String code) {
+        Integer count = jdbc.query("SELECT COUNT(*) FROM agent_user_capability_grant WHERE user_id=? AND capability_code=? AND enabled=TRUE",
+                rs -> rs.next() ? rs.getInt(1) : 0, userId, code);
+        return count != null && count > 0;
+    }
+
+    @Override public void setUserCapabilityGrant(long userId, String code, boolean enabled, long updatedBy) {
+        jdbc.update("INSERT INTO agent_user_capability_grant(user_id,capability_code,enabled,updated_by,updated_at) VALUES(?,?,?,?,?) ON DUPLICATE KEY UPDATE enabled=VALUES(enabled),updated_by=VALUES(updated_by),updated_at=VALUES(updated_at)",
+                userId, code, enabled, updatedBy, Timestamp.from(Instant.now()));
+    }
+
+    @Override public void saveEffectiveCapabilitySet(EffectiveCapabilitySet set) {
+        tx.executeWithoutResult(status -> {
+            jdbc.update("INSERT INTO run_effective_capability_set(run_id,definition_version_id,user_id,snapshot_hash,resolved_at) VALUES(?,?,?,?,?) ON DUPLICATE KEY UPDATE definition_version_id=VALUES(definition_version_id),user_id=VALUES(user_id),snapshot_hash=VALUES(snapshot_hash),resolved_at=VALUES(resolved_at)",
+                    set.runId(), set.definitionVersionId(), set.userId(), set.snapshotHash(), Timestamp.from(set.resolvedAt()));
+            jdbc.update("DELETE FROM run_effective_capability_item WHERE run_id=?", set.runId());
+            for (RuntimeCapability capability : set.allowedCapabilities()) {
+                jdbc.update("INSERT INTO run_effective_capability_item(run_id,capability_code,capability_revision,allowed,reason_code,runtime_capability_json) VALUES(?,?,?,TRUE,NULL,?)",
+                        set.runId(), capability.referenceId(), capability.revision(), writeJson(capability));
+            }
+            for (CapabilityExclusion exclusion : set.exclusions()) {
+                jdbc.update("INSERT INTO run_effective_capability_item(run_id,capability_code,capability_revision,allowed,reason_code,runtime_capability_json) VALUES(?,?,?,FALSE,?,NULL)",
+                        set.runId(), exclusion.capabilityCode(), exclusion.revision(), exclusion.reasonCode());
+            }
+        });
+    }
+
+    @Override public Optional<EffectiveCapabilitySet> findEffectiveCapabilitySet(String runId) {
+        List<EffectiveCapabilitySet> headers = jdbc.query("SELECT definition_version_id,user_id,snapshot_hash,resolved_at FROM run_effective_capability_set WHERE run_id=?",
+                (rs, n) -> new EffectiveCapabilitySet(runId, rs.getLong(1), rs.getLong(2), rs.getString(3), List.of(), List.of(), rs.getTimestamp(4).toInstant()), runId);
+        if (headers.isEmpty()) return Optional.empty();
+        EffectiveCapabilitySet header = headers.get(0);
+        List<RuntimeCapability> allowed = new ArrayList<>();
+        List<CapabilityExclusion> excluded = new ArrayList<>();
+        jdbc.query("SELECT capability_code,capability_revision,allowed,reason_code,runtime_capability_json FROM run_effective_capability_item WHERE run_id=? ORDER BY capability_code",
+                rs -> {
+                    if (rs.getBoolean("allowed")) allowed.add(readRuntimeCapability(rs.getString("runtime_capability_json")));
+                    else excluded.add(new CapabilityExclusion(rs.getString("capability_code"), rs.getString("capability_revision"), rs.getString("reason_code")));
+                }, runId);
+        return Optional.of(new EffectiveCapabilitySet(runId, header.definitionVersionId(), header.userId(), header.snapshotHash(), allowed, excluded, header.resolvedAt()));
+    }
+
+    @Override public void recordToolInvocation(ToolInvocationAudit audit) {
+        jdbc.update("INSERT INTO tool_invocation_audit(invocation_id,run_id,capability_code,capability_revision,user_id,business_action,arguments_hash,decision,result_status,result_summary,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                audit.invocationId(), audit.runId(), audit.capabilityCode(), audit.capabilityRevision(), audit.userId(), audit.businessAction(),
+                audit.argumentsHash(), audit.decision(), audit.resultStatus(), audit.resultSummary(), Timestamp.from(audit.createdAt()));
+    }
+
+    private PublishedEmployee findByVersionId(long employeeId, long versionId) {
+        List<DefinitionRow> rows = jdbc.query("SELECT e.id employee_id,e.tenant_id,e.employee_code,e.display_name,e.enabled,v.id version_id,v.version_no,v.instructions,v.model_provider,v.model_name,v.content_hash,v.published_at FROM digital_employee e JOIN agent_definition_version v ON v.employee_id=e.id WHERE e.id=? AND v.id=?",
+                (rs, n) -> definitionRow(rs), employeeId, versionId);
+        if (rows.isEmpty()) throw new IllegalStateException("Published definition was not found after commit");
+        DefinitionRow row = rows.get(0);
+        List<CapabilityBinding> bindings = jdbc.query("SELECT capability_code,capability_revision FROM agent_definition_version_capability WHERE definition_version_id=? ORDER BY position_no",
+                (rs, n) -> new CapabilityBinding(versionId, CapabilityBinding.CapabilityType.TOOL, rs.getString(1), rs.getString(2)), versionId);
+        return new PublishedEmployee(new DigitalEmployee(row.employeeId(), new TenantId(row.tenantId()), row.employeeCode(), row.displayName(), row.employeeEnabled()),
+                new AgentDefinitionVersion(versionId, employeeId, row.versionNo(), row.instructions(), row.modelProvider(), row.modelName(), row.publishedAt(), row.contentHash()), bindings);
+    }
+
+    private CapabilityCatalogEntry mapCapability(ResultSet rs) throws SQLException {
+        Map<String, Object> schema;
+        try { schema = json.readValue(rs.getString("input_schema_json"), JSON_MAP); }
+        catch (Exception e) { throw new IllegalStateException("Invalid capability input schema JSON", e); }
+        return new CapabilityCatalogEntry(rs.getString("capability_code"), CapabilityBinding.CapabilityType.valueOf(rs.getString("capability_type")),
+                rs.getString("revision"), rs.getString("display_name"), rs.getString("description"), rs.getString("tool_name"),
+                rs.getString("implementation_key"), rs.getString("business_action"), schema, "ACTIVE".equals(rs.getString("status")));
+    }
+    private DefinitionRow definitionRow(ResultSet rs) throws SQLException {
+        return new DefinitionRow(rs.getLong("employee_id"), rs.getLong("tenant_id"), rs.getString("employee_code"), rs.getString("display_name"),
+                rs.getBoolean("enabled"), rs.getLong("version_id"), rs.getInt("version_no"), rs.getString("instructions"),
+                rs.getString("model_provider"), rs.getString("model_name"), rs.getString("content_hash"), rs.getTimestamp("published_at").toInstant());
+    }
+    private String writeJson(Object value) {
+        try { return json.writeValueAsString(value); } catch (Exception e) { throw new IllegalStateException("Could not serialize runtime capability snapshot", e); }
+    }
+    private RuntimeCapability readRuntimeCapability(String value) {
+        try { return json.readValue(value, RuntimeCapability.class); } catch (Exception e) { throw new IllegalStateException("Could not read runtime capability snapshot", e); }
+    }
+    private String definitionHash(AgentDefinitionDraft draft) {
+        String caps = draft.capabilities().stream().map(c -> c.capabilityCode() + "@" + c.revision()).sorted().reduce((a,b) -> a + "|" + b).orElse("");
+        try { return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest((draft.instructions() + "|" + draft.modelProvider() + "|" + draft.modelName() + "|" + caps).getBytes(StandardCharsets.UTF_8))); }
+        catch (Exception e) { throw new IllegalStateException("SHA-256 is unavailable", e); }
+    }
+    private record DraftRow(int revision, String instructions, String provider, String model, Instant updatedAt) {}
+    private record DefinitionRow(long employeeId, long tenantId, String employeeCode, String displayName, boolean employeeEnabled,
+            long versionId, int versionNo, String instructions, String modelProvider, String modelName, String contentHash, Instant publishedAt) {}
+}

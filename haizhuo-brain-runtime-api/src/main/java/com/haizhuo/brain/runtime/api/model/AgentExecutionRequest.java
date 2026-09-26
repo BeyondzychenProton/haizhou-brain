@@ -12,6 +12,7 @@ import java.util.Objects;
 public record AgentExecutionRequest(TenantId tenantId, UserId userId, SessionId sessionId, RunId runId,
                                     TraceId traceId, long definitionVersionId, String employeeName,
                                     String instructions, String modelProvider, String modelName,
+                                    String effectiveCapabilityHash,
                                     List<RuntimeCapability> capabilities, String prompt) {
     public AgentExecutionRequest {
         Objects.requireNonNull(tenantId);
@@ -21,5 +22,13 @@ public record AgentExecutionRequest(TenantId tenantId, UserId userId, SessionId 
         Objects.requireNonNull(traceId);
         if (definitionVersionId <= 0) throw new IllegalArgumentException("definitionVersionId must be positive");
         capabilities = List.copyOf(capabilities);
+    }
+
+    public AgentExecutionRequest(TenantId tenantId, UserId userId, SessionId sessionId, RunId runId,
+                                 TraceId traceId, long definitionVersionId, String employeeName,
+                                 String instructions, String modelProvider, String modelName,
+                                 List<RuntimeCapability> capabilities, String prompt) {
+        this(tenantId, userId, sessionId, runId, traceId, definitionVersionId, employeeName,
+                instructions, modelProvider, modelName, "", capabilities, prompt);
     }
 }

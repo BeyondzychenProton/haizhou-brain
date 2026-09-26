@@ -5,15 +5,17 @@ import com.haizhuo.brain.kernel.identity.SessionId;
 import com.haizhuo.brain.kernel.identity.TenantId;
 import com.haizhuo.brain.kernel.identity.TraceId;
 import com.haizhuo.brain.kernel.identity.UserId;
+import com.haizhuo.brain.platform.capability.EffectiveCapabilitySet;
+import com.haizhuo.brain.platform.capability.EffectiveCapabilitySetResolver;
+import com.haizhuo.brain.platform.employee.AgentDefinitionRepository;
+import com.haizhuo.brain.platform.employee.PublishedEmployee;
 import com.haizhuo.brain.runtime.api.AgentRuntime;
 import com.haizhuo.brain.runtime.api.ToolExecutionGateway;
 import com.haizhuo.brain.runtime.api.event.AgentRunCompletedEvent;
 import com.haizhuo.brain.runtime.api.event.AgentRunFailedEvent;
 import com.haizhuo.brain.runtime.api.event.BrainAgentEvent;
 import com.haizhuo.brain.runtime.api.model.AgentExecutionRequest;
-import com.haizhuo.brain.runtime.api.model.RuntimeCapability;
 import java.time.Instant;
-import java.util.List;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
 
@@ -23,21 +25,33 @@ public class MeetingRoomRunService {
     private final MeetingRoomSystem rooms;
     private final MeetingRoomRunStore store;
     private final MeetingRoomToolGateway toolGateway;
+    private final AgentDefinitionRepository definitions;
+    private final EffectiveCapabilitySetResolver capabilityResolver;
     private final Executor executor;
-    private final String modelProvider;
-    private final String primaryModel;
+    private final long tenantId;
+    private final long employeeId;
     private final long testUserId;
 
     public MeetingRoomRunService(AgentRuntime runtime, MeetingRoomSystem rooms, MeetingRoomRunStore store,
                                  MeetingRoomToolGateway toolGateway, Executor meetingRunExecutor,
-                                 String modelProvider, String primaryModel, long testUserId) {
+                                 AgentDefinitionRepository definitions, EffectiveCapabilitySetResolver capabilityResolver,
+                                 long testUserId) {
+        this(runtime, rooms, store, toolGateway, meetingRunExecutor, definitions, capabilityResolver, 1L, 1L, testUserId);
+    }
+
+    public MeetingRoomRunService(AgentRuntime runtime, MeetingRoomSystem rooms, MeetingRoomRunStore store,
+                                 MeetingRoomToolGateway toolGateway, Executor meetingRunExecutor,
+                                 AgentDefinitionRepository definitions, EffectiveCapabilitySetResolver capabilityResolver,
+                                 long tenantId, long employeeId, long testUserId) {
         this.runtime = runtime;
         this.rooms = rooms;
         this.store = store;
         this.toolGateway = toolGateway;
         this.executor = meetingRunExecutor;
-        this.modelProvider = modelProvider;
-        this.primaryModel = primaryModel;
+        this.definitions = definitions;
+        this.capabilityResolver = capabilityResolver;
+        this.tenantId = tenantId;
+        this.employeeId = employeeId;
         this.testUserId = testUserId;
     }
 
@@ -90,16 +104,22 @@ public class MeetingRoomRunService {
     private void execute(MeetingRoomRunStore.RunRecord accepted) {
         try {
             store.markRunning(accepted.runId());
-            var request = new AgentExecutionRequest(new TenantId(1), new UserId(testUserId), new SessionId(accepted.sessionId()),
-                    new RunId(accepted.runId()), TraceId.newId(), 1L, "会议室预定员工",
-                    "你是会议室预定员工。本轮只处理固定会议室 A-201，时间按 Asia/Shanghai 解释。只接受明确的未来日期、开始时间、结束时间和正整数参会人数；如果缺少任何条件、时间含糊、用户要多个预定或提出当前 Mock 不支持的条件，先简洁说明缺少什么或不支持什么，不调用预定工具。条件完整时必须先调用 meeting_room_search；仅当工具明确返回 available=true 且人数在容量内时，才可调用 meeting_room_reserve。预定结果以工具返回为准，不能声称未返回的 bookingId 或预定成功。",
-                    modelProvider, primaryModel,
-                    List.of(new RuntimeCapability("tool", "meeting_room.search", "1"), new RuntimeCapability("tool", "meeting_room.reserve", "1")),
-                    accepted.message());
+            // 中文注释：Run 启动时固定读取当前发布版本，并把用户权限交集持久化为该 Run 的能力快照。
+            PublishedEmployee published = definitions.findPublished(new TenantId(tenantId), employeeId)
+                    .orElseThrow(() -> new IllegalStateException("No enabled published Agent definition is available"));
+            EffectiveCapabilitySet effective = capabilityResolver.resolve(new RunId(accepted.runId()),
+                    new UserId(testUserId), published);
+            var request = new AgentExecutionRequest(new TenantId(tenantId), new UserId(testUserId), new SessionId(accepted.sessionId()),
+                    new RunId(accepted.runId()), TraceId.newId(), published.definition().id(), published.employee().displayName(),
+                    published.definition().instructions(), published.definition().modelProvider(), published.definition().modelName(),
+                    effective.snapshotHash(), effective.allowedCapabilities(), accepted.message());
 
             String modelAnswer = null;
             for (BrainAgentEvent event : runtime.execute(request).toIterable()) {
-                if (event instanceof AgentRunFailedEvent) throw new AgentRunFailure();
+                if (event instanceof AgentRunFailedEvent failed) {
+                    store.appendEvent(accepted.runId(), "AGENT_EXECUTION_FAILED", failed.message());
+                    throw new AgentRunFailure(failed.message());
+                }
                 if (event instanceof AgentRunCompletedEvent completed) modelAnswer = completed.result();
             }
             MeetingRoomSystem.Booking booking = rooms.findByOperationKey(operationKey(accepted.runId()));
@@ -143,7 +163,8 @@ public class MeetingRoomRunService {
 
     private static String safeFailure(Exception failure) {
         if (failure instanceof SecurityException) return "本次运行未获准执行相应动作，未确认生成预定。";
-        if (failure instanceof AgentRunFailure) return "数字员工执行失败，请检查模型服务状态和本地模型配置。";
+        if (failure instanceof AgentRunFailure runFailure) return "数字员工执行失败，请检查模型服务状态和本地模型配置。" +
+                (runFailure.diagnostic == null ? "" : "（" + runFailure.diagnostic + "）");
         return "会议室预定流程执行失败；系统未确认生成预定，请查询 Run 状态后再决定是否重试。";
     }
 
@@ -152,7 +173,10 @@ public class MeetingRoomRunService {
                 run.booking(), run.message(), run.createdAt());
     }
 
-    private static final class AgentRunFailure extends RuntimeException {}
+    private static final class AgentRunFailure extends RuntimeException {
+        private final String diagnostic;
+        private AgentRunFailure(String diagnostic) { this.diagnostic = diagnostic; }
+    }
 
     public record SessionView(String sessionId) {}
     public record RunView(String runId, String sessionId, String state, String businessOutcome,

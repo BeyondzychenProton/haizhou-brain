@@ -12,7 +12,7 @@
 
 本项目直接从 YAML 文件读取配置，不要求环境变量注入。为避免提交密钥和密码，上表中的实际配置文件由 Git 忽略；首次配置时复制 `.example` 模板，修改复制出的文件。
 
-Mock 演示使用 PowerShell 启动。启动脚本会同时激活 `local` 和 `meeting-mock` 配置，以使用本地 MySQL 持久化 Run 和预定：
+Mock 演示使用 PowerShell 启动。启动脚本会同时激活 `local` 和 `meeting-mock` 配置，以使用本地 MySQL 持久化 Run 和预定。`meeting-room` 节点可调整默认租户、员工、模拟用户和管理审计操作者 ID；首轮数据库迁移为 ID 1/1001 创建测试数据：
 
 ```powershell
 Copy-Item config/application-meeting-mock.yml.example config/application-meeting-mock.yml
