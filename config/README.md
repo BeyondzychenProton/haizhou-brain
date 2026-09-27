@@ -17,4 +17,17 @@ Copy-Item config/application-local.yml.example config/application-local.yml
 docker compose -f deploy/docker-compose.local.yml up -d
 ```
 
-运行前需 JDK 17 和 Maven 3.9 以上。本项目的 Redis 在本机映射为 `6380` 端口；不要复用其他项目在 `6379` 上的受保护实例。`application-local.yml` 的 MySQL 密码应与本地数据库一致。Flyway 在应用启动时迁移数据库。当前仅开放健康检查等基础端点；业务 Run 与管理端点等待真实身份认证后重新接入。原 `meeting-mock` Profile 和脚本已退出。
+运行前需 JDK 17 和 Maven 3.9 以上。本项目的 Redis 在本机映射为 `6380` 端口；不要复用其他项目在 `6379` 上的受保护实例。`application-local.yml` 的 MySQL 密码应与本地数据库一致。Flyway 在应用启动时迁移数据库。
+
+## Agent 运行时开关
+
+公共配置中的 `haizhuo.brain.run-worker.enabled` 默认为 `false`。关闭时不会注册 Agent 运行时，也不会发起模型调用；开启时才会装配 AgentScope Runtime。当前平台工具网关仍是拒绝执行的安全占位实现，因此不能把开启开关理解为业务能力已经可用。只有在身份认证、用户授权和真实工具网关完成后，才应在对应环境的外置配置中显式设置：
+
+```yaml
+haizhuo:
+  brain:
+    run-worker:
+      enabled: true
+```
+
+当前仅开放健康检查等基础端点；业务 Run 与管理端点等待真实身份认证后重新接入。原 `meeting-mock` Profile 和脚本已退出。
