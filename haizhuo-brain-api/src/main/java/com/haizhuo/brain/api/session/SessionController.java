@@ -5,6 +5,8 @@ import com.haizhuo.brain.platform.session.AgentSession;
 import com.haizhuo.brain.platform.session.SessionApplicationService;
 import com.haizhuo.brain.platform.run.AgentRun;
 import com.haizhuo.brain.platform.run.RunEvent;
+import com.haizhuo.brain.platform.run.SessionTimelineItem;
+import com.haizhuo.brain.platform.run.RunGuidance;
 import com.haizhuo.brain.kernel.identity.RunId;
 import com.haizhuo.brain.security.identity.AuthenticatedUser;
 import jakarta.validation.Valid;
@@ -54,16 +56,35 @@ public class SessionController {
         return blocking(() -> response(sessions.get(new SessionId(sessionId), user.userId())));
     }
 
+    @GetMapping("/{sessionId}/timeline")
+    public Mono<List<SessionTimelineItem>> timeline(@AuthenticationPrincipal AuthenticatedUser user, @PathVariable String sessionId,
+                                                    @RequestParam(defaultValue = "100") int limit) {
+        return blocking(() -> sessions.timeline(new SessionId(sessionId), user.userId(), limit));
+    }
+
+    @GetMapping("/{sessionId}/runs")
+    public Mono<List<RunResponse>> runs(@AuthenticationPrincipal AuthenticatedUser user, @PathVariable String sessionId,
+                                        @RequestParam(defaultValue = "20") int limit) {
+        return blocking(() -> sessions.runs(new SessionId(sessionId), user.userId(), limit).stream()
+                .map(run -> runResponse(run, sessions.queuePosition(run.id(), user.userId()))).toList());
+    }
+
     @PostMapping("/{sessionId}/runs")
     @ResponseStatus(HttpStatus.CREATED)
     public Mono<RunResponse> createRun(@AuthenticationPrincipal AuthenticatedUser user, @PathVariable String sessionId,
                                        @Valid @RequestBody CreateRunRequest request) {
-        return blocking(() -> runResponse(sessions.createRun(new SessionId(sessionId), user.userId(), request.clientRequestId(), request.input().trim())));
+        return blocking(() -> {
+            AgentRun run = sessions.createRun(new SessionId(sessionId), user.userId(), request.clientRequestId(), request.input().trim());
+            return runResponse(run, sessions.queuePosition(run.id(), user.userId()));
+        });
     }
 
     @GetMapping("/runs/{runId}")
     public Mono<RunResponse> getRun(@AuthenticationPrincipal AuthenticatedUser user, @PathVariable String runId) {
-        return blocking(() -> runResponse(sessions.getRun(new RunId(runId), user.userId())));
+        return blocking(() -> {
+            AgentRun run = sessions.getRun(new RunId(runId), user.userId());
+            return runResponse(run, sessions.queuePosition(run.id(), user.userId()));
+        });
     }
 
     @GetMapping("/runs/{runId}/events")
@@ -71,12 +92,25 @@ public class SessionController {
         return blocking(() -> sessions.events(new RunId(runId), user.userId(), after));
     }
 
+    @PostMapping("/runs/{runId}/cancel")
+    public Mono<RunResponse> cancel(@AuthenticationPrincipal AuthenticatedUser user, @PathVariable String runId) {
+        return blocking(() -> runResponse(sessions.cancel(new RunId(runId), user.userId()), 0));
+    }
+
+    @PostMapping("/runs/{runId}/guidance")
+    @ResponseStatus(HttpStatus.CREATED)
+    public Mono<GuidanceResponse> guide(@AuthenticationPrincipal AuthenticatedUser user, @PathVariable String runId,
+                                        @Valid @RequestBody GuidanceRequest request) {
+        return blocking(() -> guidanceResponse(sessions.guide(new RunId(runId), user.userId(), request.content())));
+    }
+
     private static SessionResponse response(AgentSession session) {
         return new SessionResponse(session.id().value(), session.employeeId(), session.status().name(), session.createdAt(), session.lastActiveAt());
     }
-    private static RunResponse runResponse(AgentRun run) {
-        return new RunResponse(run.id().value(), run.sessionId().value(), run.state().name(), run.definitionVersionId(), run.createdAt());
+    private static RunResponse runResponse(AgentRun run, int queuePosition) {
+        return new RunResponse(run.id().value(), run.sessionId().value(), run.state().name(), run.definitionVersionId(), run.createdAt(), queuePosition);
     }
+    private static GuidanceResponse guidanceResponse(RunGuidance guidance) { return new GuidanceResponse(guidance.id(), guidance.runId().value(), guidance.status().name(), guidance.createdAt()); }
     private static <T> Mono<T> blocking(java.util.concurrent.Callable<T> callable) {
         return Mono.fromCallable(callable).subscribeOn(Schedulers.boundedElastic());
     }
@@ -84,5 +118,7 @@ public class SessionController {
     public record CreateSessionRequest(@Positive long employeeId) { }
     public record CreateRunRequest(@NotBlank @Size(max = 128) String clientRequestId, @NotBlank @Size(max = 4000) String input) { }
     public record SessionResponse(String sessionId, long employeeId, String status, Instant createdAt, Instant lastActiveAt) { }
-    public record RunResponse(String runId, String sessionId, String state, long definitionVersionId, Instant createdAt) { }
+    public record RunResponse(String runId, String sessionId, String state, long definitionVersionId, Instant createdAt, int queuePosition) { }
+    public record GuidanceRequest(@NotBlank @Size(max = 4000) String content) { }
+    public record GuidanceResponse(String guidanceId, String runId, String status, Instant createdAt) { }
 }

@@ -6,6 +6,7 @@ import com.haizhuo.brain.platform.run.SessionRunStore;
 import com.haizhuo.brain.runtime.api.AgentRuntime;
 import com.haizhuo.brain.runtime.api.event.AgentRunCompletedEvent;
 import com.haizhuo.brain.runtime.api.event.AgentRunFailedEvent;
+import com.haizhuo.brain.runtime.api.event.AgentRunCancelledEvent;
 import com.haizhuo.brain.runtime.api.model.AgentExecutionRequest;
 import java.util.List;
 import org.slf4j.Logger;
@@ -37,6 +38,9 @@ class RunWorker {
                         } else if (event instanceof AgentRunFailedEvent failed) {
                             store.fail(failed.runId(), failed.message());
                             log.warn("run.worker.failed runId={} failureType=agent_runtime", failed.runId().value());
+                        } else if (event instanceof AgentRunCancelledEvent cancelled) {
+                            store.cancelled(cancelled.runId(), cancelled.message());
+                            log.info("run.worker.cancelled runId={}", cancelled.runId().value());
                         }
                     })
                     .doOnError(error -> {

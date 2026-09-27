@@ -8,6 +8,8 @@ import com.haizhuo.brain.platform.run.AgentRun;
 import com.haizhuo.brain.platform.run.RunState;
 import com.haizhuo.brain.platform.run.RunEvent;
 import com.haizhuo.brain.platform.run.SessionRunStore;
+import com.haizhuo.brain.platform.run.SessionTimelineItem;
+import com.haizhuo.brain.platform.run.RunGuidance;
 import com.haizhuo.brain.kernel.identity.RunId;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -51,9 +53,23 @@ public class SessionApplicationService {
     }
 
     public AgentRun getRun(RunId runId, UserId owner) { return store.findRun(runId, owner).orElseThrow(() -> new IllegalArgumentException("Run was not found")); }
+    public List<AgentRun> runs(SessionId sessionId, UserId owner, int limit) {
+        get(sessionId, owner);
+        return store.findRuns(sessionId, owner, limit);
+    }
     public java.util.List<RunEvent> events(RunId runId, UserId owner, int afterSequence) {
         getRun(runId, owner);
         return store.findEvents(runId, owner, Math.max(afterSequence, 0), 200);
+    }
+    public List<SessionTimelineItem> timeline(SessionId sessionId, UserId owner, int limit) {
+        get(sessionId, owner);
+        return store.findTimeline(sessionId, owner, limit);
+    }
+    public int queuePosition(RunId runId, UserId owner) { getRun(runId, owner); return store.queuePosition(runId, owner); }
+    public AgentRun cancel(RunId runId, UserId owner) { return store.cancel(runId, owner); }
+    public RunGuidance guide(RunId runId, UserId owner, String content) {
+        getRun(runId, owner);
+        return store.addGuidance(runId, owner, "USER", content.trim());
     }
 
     private static String digest(String input) {

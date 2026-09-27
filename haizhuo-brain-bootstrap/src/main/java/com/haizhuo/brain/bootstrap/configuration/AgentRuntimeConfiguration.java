@@ -5,6 +5,7 @@ import com.haizhuo.brain.runtime.agentscope.AgentScopeToolkitAssembler;
 import com.haizhuo.brain.runtime.agentscope.config.AgentScopeRuntimeProperties;
 import com.haizhuo.brain.runtime.api.AgentRuntime;
 import com.haizhuo.brain.runtime.api.ToolExecutionGateway;
+import com.haizhuo.brain.runtime.api.RunControlInbox;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
@@ -17,8 +18,8 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 public class AgentRuntimeConfiguration {
     @Bean
     @ConditionalOnProperty(prefix = "haizhuo.brain.run-worker", name = "enabled", havingValue = "true")
-    AgentRuntime agentRuntime(AgentScopeRuntimeProperties properties, ToolExecutionGateway gateway, AgentScopeToolkitAssembler assembler) {
-        return new AgentScopeRuntime(properties, gateway, assembler);
+    AgentRuntime agentRuntime(AgentScopeRuntimeProperties properties, ToolExecutionGateway gateway, AgentScopeToolkitAssembler assembler, RunControlInbox controlInbox) {
+        return new AgentScopeRuntime(properties, gateway, assembler, controlInbox);
     }
 
     /** No capability is executable until a separate platform tool gateway is implemented and authorized. */

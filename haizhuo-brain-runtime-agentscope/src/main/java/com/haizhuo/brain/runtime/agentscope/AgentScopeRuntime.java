@@ -4,7 +4,9 @@ import com.haizhuo.brain.runtime.api.AgentRuntime;
 import com.haizhuo.brain.runtime.api.event.BrainAgentEvent;
 import com.haizhuo.brain.runtime.api.model.AgentExecutionRequest;
 import com.haizhuo.brain.runtime.api.ToolExecutionGateway;
+import com.haizhuo.brain.runtime.api.RunControlInbox;
 import com.haizhuo.brain.runtime.api.event.AgentRunCompletedEvent;
+import com.haizhuo.brain.runtime.api.event.AgentRunCancelledEvent;
 import com.haizhuo.brain.runtime.api.event.AgentRunFailedEvent;
 import com.haizhuo.brain.runtime.agentscope.config.AgentScopeRuntimeProperties;
 import io.agentscope.core.agent.RuntimeContext;
@@ -23,10 +25,11 @@ public class AgentScopeRuntime implements AgentRuntime {
     private final AgentScopeRuntimeProperties properties;
     private final ToolExecutionGateway toolGateway;
     private final AgentScopeToolkitAssembler toolkitAssembler;
+    private final RunControlInbox controlInbox;
 
     public AgentScopeRuntime(AgentScopeRuntimeProperties properties, ToolExecutionGateway toolGateway,
-                             AgentScopeToolkitAssembler toolkitAssembler) {
-        this.properties = properties; this.toolGateway = toolGateway; this.toolkitAssembler = toolkitAssembler;
+                             AgentScopeToolkitAssembler toolkitAssembler, RunControlInbox controlInbox) {
+        this.properties = properties; this.toolGateway = toolGateway; this.toolkitAssembler = toolkitAssembler; this.controlInbox = controlInbox;
     }
 
     @Override
@@ -52,10 +55,13 @@ public class AgentScopeRuntime implements AgentRuntime {
             var toolkit = toolkitAssembler.assemble(request, toolGateway);
             String employeeDescription = request.employeeName() == null ? "Digital employee" : request.employeeName();
             try (ReActAgent agent = ReActAgent.builder().name("digital-employee").description(employeeDescription)
-                    .sysPrompt(request.instructions()).model(model).toolkit(toolkit).maxIters(6).build()) {
+                    .sysPrompt(request.instructions()).model(model).toolkit(toolkit).maxIters(6)
+                    .middleware(new RunControlMiddleware(controlInbox)).build()) {
                 RuntimeContext context = RuntimeContext.builder().sessionId(request.sessionId().value())
                         .userId(Long.toString(request.userId().value())).put(AgentExecutionRequest.class, request).build();
                 var answer = agent.call(request.prompt(), context).block();
+                if (controlInbox.isCancellationRequested(request.runId()))
+                    return (BrainAgentEvent) new AgentRunCancelledEvent(request.runId(), "运行已在安全检查点取消");
                 String text = answer == null ? "AgentScope returned no answer" : answer.getTextContent();
                 return (BrainAgentEvent) new AgentRunCompletedEvent(request.runId(), text == null ? "" : text);
             }
