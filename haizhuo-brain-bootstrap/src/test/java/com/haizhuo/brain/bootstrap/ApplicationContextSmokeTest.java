@@ -1,7 +1,9 @@
 package com.haizhuo.brain.bootstrap;
 
 import com.haizhuo.brain.platform.employee.AgentDefinitionManagementService;
+import com.haizhuo.brain.platform.employee.EmployeeCatalog;
 import com.haizhuo.brain.security.identity.ratelimit.AuthenticationRateLimiter;
+import java.util.Optional;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -36,6 +38,12 @@ class ApplicationContextSmokeTest {
 
     @TestConfiguration
     static class TestRateLimitConfiguration {
+        @Bean
+        EmployeeCatalog employeeCatalog() {
+            // 测试环境不加载 JDBC 员工仓储；匿名访问校验无需真实员工数据。
+            return (tenantId, employeeId) -> Optional.empty();
+        }
+
         @Bean
         AuthenticationRateLimiter authenticationRateLimiter() {
             return new AuthenticationRateLimiter() {
