@@ -5,30 +5,27 @@ import com.haizhuo.brain.kernel.identity.SessionId;
 import com.haizhuo.brain.kernel.identity.TenantId;
 import com.haizhuo.brain.kernel.identity.TraceId;
 import com.haizhuo.brain.kernel.identity.UserId;
-import java.util.List;
 import java.util.Objects;
 
-/** Snapshot chosen by the platform when a Run starts, never derived from a channel payload. */
-public record AgentExecutionRequest(TenantId tenantId, UserId userId, SessionId sessionId, RunId runId,
-                                    TraceId traceId, long definitionVersionId, String employeeName,
-                                    String instructions, String modelProvider, String modelName,
-                                    String effectiveCapabilityHash,
-                                    List<RuntimeCapability> capabilities, String prompt) {
+/**
+ * 由平台交给运行时的、完全冻结的执行请求（规格 §7.6）。
+ * 运行时所需的一切都在 definition/constraints/binding/input 里；
+ * 该请求绝不能携带 implementationKey、凭据、数据库实体或平台仓储。
+ */
+public record AgentExecutionRequest(TenantId tenantId, UserId userId, SessionId platformSessionId,
+                                    RunId runId, TraceId traceId, String attemptId, long fenceToken,
+                                    RuntimeDefinitionSnapshot definition, RuntimeRunConstraints constraints,
+                                    RuntimeSessionBinding binding, AgentExecutionInput input) {
     public AgentExecutionRequest {
         Objects.requireNonNull(tenantId);
         Objects.requireNonNull(userId);
-        Objects.requireNonNull(sessionId);
+        Objects.requireNonNull(platformSessionId);
         Objects.requireNonNull(runId);
         Objects.requireNonNull(traceId);
-        if (definitionVersionId <= 0) throw new IllegalArgumentException("definitionVersionId must be positive");
-        capabilities = List.copyOf(capabilities);
-    }
-
-    public AgentExecutionRequest(TenantId tenantId, UserId userId, SessionId sessionId, RunId runId,
-                                 TraceId traceId, long definitionVersionId, String employeeName,
-                                 String instructions, String modelProvider, String modelName,
-                                 List<RuntimeCapability> capabilities, String prompt) {
-        this(tenantId, userId, sessionId, runId, traceId, definitionVersionId, employeeName,
-                instructions, modelProvider, modelName, "", capabilities, prompt);
+        Objects.requireNonNull(attemptId);
+        Objects.requireNonNull(definition);
+        Objects.requireNonNull(constraints);
+        Objects.requireNonNull(binding);
+        Objects.requireNonNull(input);
     }
 }

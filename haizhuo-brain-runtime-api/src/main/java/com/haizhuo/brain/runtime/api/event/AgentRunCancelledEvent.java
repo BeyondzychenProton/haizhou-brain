@@ -2,5 +2,5 @@ package com.haizhuo.brain.runtime.api.event;
 
 import com.haizhuo.brain.kernel.identity.RunId;
 
-/** Runtime reached a safe checkpoint after a persisted cancellation request. */
+/** 运行时在持久化的取消请求之后抵达了安全检查点。 */
 public record AgentRunCancelledEvent(RunId runId, String message) implements BrainAgentEvent { }
