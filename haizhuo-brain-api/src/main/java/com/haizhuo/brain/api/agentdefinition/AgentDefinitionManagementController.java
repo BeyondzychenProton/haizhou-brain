@@ -27,7 +27,7 @@ import org.springframework.web.bind.annotation.RestController;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
-/** The security chain verifies PLATFORM_ADMIN; mutations derive their actor from authentication. */
+/** 安全链负责校验 PLATFORM_ADMIN；变更操作的操作者从认证信息中推导。 */
 @RestController
 @Validated
 @RequestMapping("/api/admin/v1")

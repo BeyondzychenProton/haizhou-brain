@@ -7,6 +7,7 @@ import com.haizhuo.brain.platform.run.AgentRun;
 import com.haizhuo.brain.platform.run.RunEvent;
 import com.haizhuo.brain.platform.run.SessionTimelineItem;
 import com.haizhuo.brain.platform.run.RunGuidance;
+import com.haizhuo.brain.platform.tool.ToolApprovalService;
 import com.haizhuo.brain.kernel.identity.RunId;
 import com.haizhuo.brain.security.identity.AuthenticatedUser;
 import jakarta.validation.Valid;
@@ -29,14 +30,18 @@ import org.springframework.web.bind.annotation.RestController;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
-/** Session ownership is derived exclusively from the authenticated principal. */
+/** 会话归属完全由已认证主体推导得出。 */
 @RestController
 @Validated
 @RequestMapping("/api/v1/sessions")
 public class SessionController {
     private final SessionApplicationService sessions;
+    private final ToolApprovalService toolApprovals;
 
-    public SessionController(SessionApplicationService sessions) { this.sessions = sessions; }
+    public SessionController(SessionApplicationService sessions, ToolApprovalService toolApprovals) {
+        this.sessions = sessions;
+        this.toolApprovals = toolApprovals;
+    }
 
     @GetMapping
     public Mono<List<SessionResponse>> list(@AuthenticationPrincipal AuthenticatedUser user,
@@ -104,6 +109,34 @@ public class SessionController {
         return blocking(() -> guidanceResponse(sessions.guide(new RunId(runId), user.userId(), request.content())));
     }
 
+    /** 规格 §39.2 的 GET：某个属主 Run 的持久化工具执行，附带未决审批状态。 */
+    @GetMapping("/runs/{runId}/tool-executions")
+    public Mono<List<ToolExecutionResponse>> toolExecutions(@AuthenticationPrincipal AuthenticatedUser user,
+                                                            @PathVariable String runId) {
+        return blocking(() -> toolApprovals.listForRun(new RunId(runId), user.userId()).stream()
+                .map(execution -> {
+                    var approval = toolApprovals.approvalOf(execution.id());
+                    return new ToolExecutionResponse(execution.id(), execution.toolName(),
+                            execution.state().name(), execution.inputJson(),
+                            approval.map(item -> item.decision().name()).orElse(null),
+                            execution.createdAt(), execution.updatedAt());
+                }).toList());
+    }
+
+    /**
+     * 规格 §39.2 的 POST：记录属主的决定。重复决定是幂等空操作（§84），
+     * 以 {@code decided=false} 返回，绝不产生错误风暴。
+     */
+    @PostMapping("/runs/{runId}/tool-executions/{toolExecutionId}/decision")
+    public Mono<ToolDecisionResponse> decideToolExecution(@AuthenticationPrincipal AuthenticatedUser user,
+                                                          @PathVariable String runId,
+                                                          @PathVariable String toolExecutionId,
+                                                          @Valid @RequestBody ToolDecisionRequest request) {
+        return blocking(() -> new ToolDecisionResponse(toolExecutionId,
+                toolApprovals.decide(new RunId(runId), toolExecutionId, user.userId(),
+                        request.approve(), request.reason())));
+    }
+
     private static SessionResponse response(AgentSession session) {
         return new SessionResponse(session.id().value(), session.employeeId(), session.status().name(), session.createdAt(), session.lastActiveAt());
     }
@@ -121,4 +154,8 @@ public class SessionController {
     public record RunResponse(String runId, String sessionId, String state, long definitionVersionId, Instant createdAt, int queuePosition) { }
     public record GuidanceRequest(@NotBlank @Size(max = 4000) String content) { }
     public record GuidanceResponse(String guidanceId, String runId, String status, Instant createdAt) { }
+    public record ToolExecutionResponse(String toolExecutionId, String toolName, String state, String inputJson,
+                                        String approvalDecision, Instant createdAt, Instant updatedAt) { }
+    public record ToolDecisionRequest(boolean approve, @Size(max = 500) String reason) { }
+    public record ToolDecisionResponse(String toolExecutionId, boolean decided) { }
 }

@@ -22,7 +22,7 @@ import org.springframework.web.bind.annotation.RestController;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
-/** The role and actor are sourced from the security context; request bodies cannot self-elevate. */
+/** 角色与操作者均取自安全上下文；请求体无法自我提权。 */
 @RestController
 @RequestMapping("/api/admin/v1/users")
 public class PlatformUserAdminController {
@@ -93,7 +93,7 @@ public class PlatformUserAdminController {
     public record StatusRequest(@NotNull PlatformUserStatus status, @NotBlank @Size(max = 500) String reason) {
     }
 
-    /** The one-time credential is intentionally returned exactly once to the authenticated administrator. */
+    /** 一次性凭据有意只向已认证的管理员返回一次。 */
     public record CreatedUserResponse(long userId, String mobileNormalized, String activationToken, Instant activationExpiresAt) {
     }
 

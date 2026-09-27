@@ -25,7 +25,7 @@ import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
-/** Authentication endpoints do not accept a current user ID from JSON or headers. */
+/** 认证端点不接受来自 JSON 或请求头的当前用户 ID。 */
 @RestController
 @RequestMapping("/api/v1/auth")
 public class AuthController {
