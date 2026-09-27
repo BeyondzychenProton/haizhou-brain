@@ -1,79 +1,112 @@
 package com.haizhuo.brain.runtime.agentscope;
 
+import com.haizhuo.brain.runtime.agentscope.context.RuntimeContextFactory;
+import com.haizhuo.brain.runtime.agentscope.event.AgentScopeEventTranslator;
+import com.haizhuo.brain.runtime.agentscope.factory.HarnessRuntimeTemplate;
+import com.haizhuo.brain.runtime.agentscope.factory.HarnessTemplateCache;
 import com.haizhuo.brain.runtime.api.AgentRuntime;
-import com.haizhuo.brain.runtime.api.event.BrainAgentEvent;
-import com.haizhuo.brain.runtime.api.model.AgentExecutionRequest;
-import com.haizhuo.brain.runtime.api.ToolExecutionGateway;
-import com.haizhuo.brain.runtime.api.RunControlInbox;
 import com.haizhuo.brain.runtime.api.event.AgentRunCompletedEvent;
-import com.haizhuo.brain.runtime.api.event.AgentRunCancelledEvent;
 import com.haizhuo.brain.runtime.api.event.AgentRunFailedEvent;
-import com.haizhuo.brain.runtime.agentscope.config.AgentScopeRuntimeProperties;
+import com.haizhuo.brain.runtime.api.event.AgentToolSuspendedEvent;
+import com.haizhuo.brain.runtime.api.event.BrainAgentEvent;
+import com.haizhuo.brain.runtime.api.model.AgentExecutionInput;
+import com.haizhuo.brain.runtime.api.model.AgentExecutionRequest;
+import com.haizhuo.brain.runtime.api.model.ExternalToolResultExecutionInput;
+import com.haizhuo.brain.runtime.api.model.UserPromptExecutionInput;
 import io.agentscope.core.agent.RuntimeContext;
-import io.agentscope.core.ReActAgent;
-import io.agentscope.extensions.model.dashscope.DashScopeChatModel;
-import io.agentscope.extensions.model.openai.OpenAIChatModel;
+import io.agentscope.core.event.AgentEvent;
+import io.agentscope.core.message.TextBlock;
+import io.agentscope.core.message.ToolResultBlock;
+import io.agentscope.core.message.ToolResultMessage;
+import io.agentscope.core.message.ToolResultState;
+import java.util.List;
+import java.util.Objects;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import reactor.core.scheduler.Schedulers;
-import reactor.core.publisher.Mono;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
-// 中文注释：真实业务网关与可信用户尚未接入，因此此运行时暂不注册为可自动调用的 Spring Bean。
+/**
+ * 运行时的最终职责（规格 §30）：1. 取 HarnessRuntimeTemplate；2. 创建 RuntimeContext；
+ * 3. 构建输入；4. 走 HarnessAgent 事件流；5. 翻译事件。
+ * 这里不做数据库查询、授权、凭据、工具副作用或版本解析。
+ * 企业工具调用以 RequireExternalExecutionEvent 的形式浮现，并被翻译成
+ * AgentToolSuspendedEvent——运行时绝不执行它们（§34，I-06）。
+ */
 public class AgentScopeRuntime implements AgentRuntime {
-    private static final Logger log = LoggerFactory.getLogger(AgentScopeRuntime.class);
-    private final AgentScopeRuntimeProperties properties;
-    private final ToolExecutionGateway toolGateway;
-    private final AgentScopeToolkitAssembler toolkitAssembler;
-    private final RunControlInbox controlInbox;
 
-    public AgentScopeRuntime(AgentScopeRuntimeProperties properties, ToolExecutionGateway toolGateway,
-                             AgentScopeToolkitAssembler toolkitAssembler, RunControlInbox controlInbox) {
-        this.properties = properties; this.toolGateway = toolGateway; this.toolkitAssembler = toolkitAssembler; this.controlInbox = controlInbox;
+    private static final Logger log = LoggerFactory.getLogger(AgentScopeRuntime.class);
+
+    private final HarnessTemplateCache templateCache;
+    private final RuntimeContextFactory contextFactory;
+    private final AgentScopeEventTranslator translator;
+
+    public AgentScopeRuntime(HarnessTemplateCache templateCache, RuntimeContextFactory contextFactory,
+                             AgentScopeEventTranslator translator) {
+        this.templateCache = Objects.requireNonNull(templateCache);
+        this.contextFactory = Objects.requireNonNull(contextFactory);
+        this.translator = Objects.requireNonNull(translator);
     }
 
     @Override
     public Flux<BrainAgentEvent> execute(AgentExecutionRequest request) {
-        return Mono.fromCallable(() -> {
-            if (properties.apiKey() == null || properties.apiKey().isBlank())
-                throw new IllegalStateException("LLM API key is missing from the configured agent model");
-            String provider = request.modelProvider() == null ? properties.provider() : request.modelProvider();
-            var model = switch (provider == null ? "" : provider.toLowerCase(java.util.Locale.ROOT)) {
-                case "openai", "openai-compatible" -> {
-                    if (properties.baseUrl() == null || properties.baseUrl().isBlank())
-                        throw new IllegalStateException("LLM base-url is missing from the configured agent model");
-                    yield OpenAIChatModel.builder().apiKey(properties.apiKey()).modelName(request.modelName())
-                            .baseUrl(properties.baseUrl()).stream(false).build();
-                }
-                case "dashscope" -> {
-                    var builder = DashScopeChatModel.builder().apiKey(properties.apiKey()).modelName(request.modelName()).stream(false);
-                    if (properties.baseUrl() != null && !properties.baseUrl().isBlank()) builder.baseUrl(properties.baseUrl());
-                    yield builder.build();
-                }
-                default -> throw new IllegalStateException("Unsupported LLM provider: " + provider);
-            };
-            var toolkit = toolkitAssembler.assemble(request, toolGateway);
-            String employeeDescription = request.employeeName() == null ? "Digital employee" : request.employeeName();
-            try (ReActAgent agent = ReActAgent.builder().name("digital-employee").description(employeeDescription)
-                    .sysPrompt(request.instructions()).model(model).toolkit(toolkit).maxIters(6)
-                    .middleware(new RunControlMiddleware(controlInbox)).build()) {
-                RuntimeContext context = RuntimeContext.builder().sessionId(request.sessionId().value())
-                        .userId(Long.toString(request.userId().value())).put(AgentExecutionRequest.class, request).build();
-                var answer = agent.call(request.prompt(), context).block();
-                if (controlInbox.isCancellationRequested(request.runId()))
-                    return (BrainAgentEvent) new AgentRunCancelledEvent(request.runId(), "运行已在安全检查点取消");
-                String text = answer == null ? "AgentScope returned no answer" : answer.getTextContent();
-                return (BrainAgentEvent) new AgentRunCompletedEvent(request.runId(), text == null ? "" : text);
-            }
-        }).subscribeOn(Schedulers.boundedElastic()).<BrainAgentEvent>map(event -> event)
+        return Flux.defer(() -> {
+                    HarnessRuntimeTemplate template = templateCache.getOrBuild(request.definition());
+                    RuntimeContext context = contextFactory.create(request);
+                    Flux<AgentEvent> events = stream(template, request.input(), context);
+                    // 一旦已经翻译出挂起事件，同一条流末尾的完成事件
+                    // 就不能再把 Run 翻回 SUCCEEDED（§34）。
+                    AtomicBoolean suspended = new AtomicBoolean();
+                    return events.concatMap(event -> translator.translate(request.runId(), event))
+                            .doOnNext(event -> {
+                                if (event instanceof AgentToolSuspendedEvent) {
+                                    suspended.set(true);
+                                }
+                            })
+                            .filter(event -> !(suspended.get() && event instanceof AgentRunCompletedEvent));
+                })
+                .subscribeOn(Schedulers.boundedElastic())
                 .onErrorResume(error -> {
                     Throwable root = error;
-                    while (root.getCause() != null && root.getCause() != root) root = root.getCause();
+                    while (root.getCause() != null && root.getCause() != root) {
+                        root = root.getCause();
+                    }
                     // 中文注释：只记录异常类型，不把上游响应正文、请求头或模型密钥写进日志。
                     log.error("AgentScope execution failed; errorType={}, rootCauseType={}",
                             error.getClass().getSimpleName(), root.getClass().getSimpleName());
                     return Mono.just(new AgentRunFailedEvent(request.runId(),
                             "AgentScope执行异常类型：" + root.getClass().getSimpleName()));
-                }).flux();
+                });
+    }
+
+    private Flux<AgentEvent> stream(HarnessRuntimeTemplate template, AgentExecutionInput input,
+                                    RuntimeContext context) {
+        if (input instanceof UserPromptExecutionInput prompt) {
+            return template.agent().streamEvents(prompt.content(), context);
+        }
+        if (input instanceof ExternalToolResultExecutionInput results) {
+            return template.agent().streamEvents(toToolResultMessage(results), context);
+        }
+        return Flux.error(new IllegalArgumentException(
+                "Unsupported execution input type: " + input.getClass().getName()));
+    }
+
+    /**
+     * 工具结果恢复（规格 §32）：保留原始的 toolUseId/toolName，
+     * 以便 AgentScope 把每个结果匹配到被挂起的调用。重复投递由平台侧的
+     * result_delivery_state 守卫（§45.1），不在这里处理。
+     */
+    private static ToolResultMessage toToolResultMessage(ExternalToolResultExecutionInput input) {
+        List<ToolResultBlock> blocks = input.results().stream()
+                .map(result -> ToolResultBlock.builder()
+                        .id(result.toolUseId())
+                        .name(result.toolName())
+                        .output(TextBlock.builder().text(result.content()).build())
+                        .state(result.success() ? ToolResultState.SUCCESS : ToolResultState.ERROR)
+                        .build())
+                .toList();
+        return new ToolResultMessage(blocks);
     }
 }
