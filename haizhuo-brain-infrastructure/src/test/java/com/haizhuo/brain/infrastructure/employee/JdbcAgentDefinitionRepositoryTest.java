@@ -9,6 +9,7 @@ import com.haizhuo.brain.kernel.identity.TenantId;
 import com.haizhuo.brain.kernel.identity.TraceId;
 import com.haizhuo.brain.kernel.identity.UserId;
 import com.haizhuo.brain.platform.capability.EffectiveCapabilitySetResolver;
+import com.haizhuo.brain.platform.employee.AgentDefinitionManagementAudit;
 import com.haizhuo.brain.platform.employee.CapabilitySelection;
 import com.haizhuo.brain.platform.employee.ToolInvocationAudit;
 import com.haizhuo.brain.runtime.api.model.AgentExecutionRequest;
@@ -38,15 +39,16 @@ class JdbcAgentDefinitionRepositoryTest {
     void savesDraftPublishesImmutableVersionSnapshotsEffectiveToolsAndRechecksRevocation() {
         var original = repository.findPublished(new TenantId(1), 1).orElseThrow();
         var saved = repository.saveDraft(1, 1, "只执行测试读取。", "openai-compatible", "test-model",
-                List.of(new CapabilitySelection("sample.read", "1")), 42);
+                List.of(new CapabilitySelection("sample.read", "1")), audit("DRAFT_SAVED", "DIGITAL_EMPLOYEE", "1", null));
         assertEquals(2, saved.draftRevision());
 
-        var published = repository.publish(1, 2, 42, "publish-1");
+        var published = repository.publish(1, 2, audit("DEFINITION_PUBLISHED", "DIGITAL_EMPLOYEE", "1", "publish-1"));
         assertEquals(2, published.definition().version());
         assertEquals("test-model", published.definition().modelName());
         assertEquals(List.of("sample.read"), published.capabilities().stream().map(c -> c.referenceId()).toList());
         assertEquals("旧指令", original.definition().instructions(), "发布记录应保持不可变");
-        assertEquals(published.definition().id(), repository.publish(1, 2, 42, "publish-1").definition().id(), "发布请求重放应返回同一不可变版本");
+        assertEquals(published.definition().id(), repository.publish(1, 2,
+                audit("DEFINITION_PUBLISHED", "DIGITAL_EMPLOYEE", "1", "publish-1")).definition().id(), "发布请求重放应返回同一不可变版本");
 
         jdbc.update("INSERT INTO agent_run(run_id) VALUES (?)", "run-jdbc-1");
         EffectiveCapabilitySetResolver resolver = new EffectiveCapabilitySetResolver(repository,
@@ -61,10 +63,19 @@ class JdbcAgentDefinitionRepositoryTest {
                 new RunId("run-jdbc-1"), TraceId.newId(), published.definition().id(), "测试员工", published.definition().instructions(),
                 published.definition().modelProvider(), published.definition().modelName(), set.snapshotHash(), set.allowedCapabilities(), "读取测试资料");
         assertTrue(resolver.isAllowedNow(run, "sample.read"));
-        repository.setUserCapabilityGrant(42, "sample.read", false, 42);
+        repository.setUserCapabilityGrant(42, "sample.read", false,
+                audit("USER_CAPABILITY_GRANT_CHANGED", "PLATFORM_USER", "42", null));
         assertFalse(resolver.isAllowedNow(run, "sample.read"), "已开始 Run 也应在执行边界即时检查撤权");
-        repository.setUserCapabilityGrant(42, "sample.read", true, 42);
+        repository.setUserCapabilityGrant(42, "sample.read", true,
+                audit("USER_CAPABILITY_GRANT_CHANGED", "PLATFORM_USER", "42", null));
         assertTrue(repository.hasUserCapabilityGrant(42, "sample.read"));
+        repository.setCapabilityEnabled("sample.write", false,
+                audit("CAPABILITY_STATUS_CHANGED", "CAPABILITY", "sample.write", null));
+        assertFalse(repository.isCapabilityEnabled("sample.write", "1"));
+        assertEquals(5, jdbc.queryForObject("SELECT COUNT(*) FROM agent_definition_management_audit", Integer.class));
+        assertEquals(42L, jdbc.queryForObject("SELECT actor_user_id FROM agent_definition_management_audit WHERE event_type='DRAFT_SAVED'", Long.class));
+        String draftAudit = jdbc.queryForObject("SELECT new_summary FROM agent_definition_management_audit WHERE event_type='DRAFT_SAVED'", String.class);
+        assertFalse(draftAudit.contains("只执行测试读取"), "审计不应保存完整 Agent 指令");
 
         repository.recordToolInvocation(new ToolInvocationAudit(UUID.randomUUID().toString(), "run-jdbc-1", "sample.read", "1",
                 42, "sample.read", "a".repeat(64), "ALLOW", "SUCCEEDED", "读取完成", Instant.now()));
@@ -80,6 +91,7 @@ class JdbcAgentDefinitionRepositoryTest {
         jdbc.execute("CREATE TABLE agent_definition_version(id BIGINT AUTO_INCREMENT PRIMARY KEY,employee_id BIGINT,version_no INT,instructions TEXT,model_provider VARCHAR(32),model_name VARCHAR(128),content_hash CHAR(64),publish_request_id VARCHAR(128),published_by BIGINT,published_at TIMESTAMP,UNIQUE(employee_id,version_no),UNIQUE(employee_id,publish_request_id),FOREIGN KEY(employee_id) REFERENCES digital_employee(id))");
         jdbc.execute("CREATE TABLE agent_definition_version_capability(definition_version_id BIGINT,capability_code VARCHAR(128),capability_revision VARCHAR(32),position_no INT,PRIMARY KEY(definition_version_id,capability_code),FOREIGN KEY(definition_version_id) REFERENCES agent_definition_version(id),FOREIGN KEY(capability_code,capability_revision) REFERENCES capability_revision(capability_code,revision))");
         jdbc.execute("CREATE TABLE agent_user_capability_grant(user_id BIGINT,capability_code VARCHAR(128),enabled BOOLEAN,updated_by BIGINT,updated_at TIMESTAMP,PRIMARY KEY(user_id,capability_code),FOREIGN KEY(capability_code) REFERENCES capability_definition(capability_code))");
+        jdbc.execute("CREATE TABLE agent_definition_management_audit(id BIGINT AUTO_INCREMENT PRIMARY KEY,actor_user_id BIGINT,event_type VARCHAR(64),target_type VARCHAR(64),target_id VARCHAR(128),request_id VARCHAR(128),reason VARCHAR(500),previous_summary TEXT,new_summary TEXT,occurred_at TIMESTAMP)");
         jdbc.execute("CREATE TABLE agent_run(run_id VARCHAR(36) PRIMARY KEY)");
         jdbc.execute("CREATE TABLE run_effective_capability_set(run_id VARCHAR(36) PRIMARY KEY,definition_version_id BIGINT,user_id BIGINT,snapshot_hash CHAR(64),resolved_at TIMESTAMP,FOREIGN KEY(run_id) REFERENCES agent_run(run_id),FOREIGN KEY(definition_version_id) REFERENCES agent_definition_version(id))");
         jdbc.execute("CREATE TABLE run_effective_capability_item(run_id VARCHAR(36),capability_code VARCHAR(128),capability_revision VARCHAR(32),allowed BOOLEAN,reason_code VARCHAR(64),runtime_capability_json TEXT,PRIMARY KEY(run_id,capability_code),FOREIGN KEY(run_id) REFERENCES run_effective_capability_set(run_id),FOREIGN KEY(capability_code,capability_revision) REFERENCES capability_revision(capability_code,revision))");
@@ -97,5 +109,9 @@ class JdbcAgentDefinitionRepositoryTest {
         jdbc.update("INSERT INTO agent_definition_version_capability VALUES(1,'sample.read','1',1),(1,'sample.write','1',2)");
         jdbc.update("UPDATE digital_employee SET current_published_version_id=1 WHERE id=1");
         jdbc.update("INSERT INTO agent_user_capability_grant VALUES(42,'sample.read',TRUE,42,CURRENT_TIMESTAMP),(42,'sample.write',TRUE,42,CURRENT_TIMESTAMP)");
+    }
+
+    private static AgentDefinitionManagementAudit audit(String eventType, String targetType, String targetId, String requestId) {
+        return AgentDefinitionManagementAudit.pending(42, eventType, targetType, targetId, requestId, "测试管理变更");
     }
 }

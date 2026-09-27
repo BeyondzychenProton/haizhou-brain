@@ -21,7 +21,7 @@ public class AgentDefinitionManagementService {
         return repository.findDraft(employeeId).orElseThrow(() -> new IllegalArgumentException("Agent draft not found"));
     }
 
-    public AgentDefinitionDraft saveDraft(long employeeId, int expectedRevision, DraftUpdate update, long actorId) {
+    public AgentDefinitionDraft saveDraft(long employeeId, int expectedRevision, DraftUpdate update, long actorId, String reason) {
         if (update.instructions() == null || update.instructions().isBlank() || update.instructions().length() > 12000)
             throw new IllegalArgumentException("instructions must be between 1 and 12000 characters");
         if (!Set.of("openai", "openai-compatible", "dashscope").contains(update.modelProvider()))
@@ -41,7 +41,9 @@ public class AgentDefinitionManagementService {
                 throw new IllegalArgumentException("Only registered tools are supported in this release");
         }
         return repository.saveDraft(employeeId, expectedRevision, update.instructions().trim(),
-                update.modelProvider(), update.modelName().trim(), update.capabilities(), actorId);
+                update.modelProvider(), update.modelName().trim(), update.capabilities(),
+                AgentDefinitionManagementAudit.pending(actorId, "DRAFT_SAVED", "DIGITAL_EMPLOYEE",
+                        String.valueOf(employeeId), null, reason));
     }
 
     public ValidationResult validateDraft(long employeeId) {
@@ -64,10 +66,12 @@ public class AgentDefinitionManagementService {
         return new ValidationResult(issues.isEmpty(), List.copyOf(issues), draft.draftRevision());
     }
 
-    public PublishedEmployee publish(long employeeId, int expectedRevision, String requestId, long actorId) {
+    public PublishedEmployee publish(long employeeId, int expectedRevision, String requestId, long actorId, String reason) {
         ValidationResult validation = validateDraft(employeeId);
         if (!validation.publishable()) throw new DefinitionNotPublishableException(validation);
-        return repository.publish(employeeId, expectedRevision, actorId, requestId);
+        return repository.publish(employeeId, expectedRevision,
+                AgentDefinitionManagementAudit.pending(actorId, "DEFINITION_PUBLISHED", "DIGITAL_EMPLOYEE",
+                        String.valueOf(employeeId), requestId, reason));
     }
 
     public void setCapabilityEnabled(String capabilityCode, boolean enabled, long actorId, String reason) {
@@ -75,13 +79,17 @@ public class AgentDefinitionManagementService {
             throw new IllegalArgumentException("Capability does not exist");
         if (reason == null || reason.isBlank() || reason.length() > 500)
             throw new IllegalArgumentException("A reason of at most 500 characters is required");
-        repository.setCapabilityEnabled(capabilityCode, enabled, actorId, reason.trim());
+        repository.setCapabilityEnabled(capabilityCode, enabled,
+                AgentDefinitionManagementAudit.pending(actorId, "CAPABILITY_STATUS_CHANGED", "CAPABILITY",
+                        capabilityCode, null, reason));
     }
 
-    public void setUserCapabilityGrant(long userId, String capabilityCode, boolean enabled, long actorId) {
+    public void setUserCapabilityGrant(long userId, String capabilityCode, boolean enabled, long actorId, String reason) {
         if (repository.listCapabilities().stream().noneMatch(entry -> entry.capabilityCode().equals(capabilityCode)))
             throw new IllegalArgumentException("Capability does not exist");
-        repository.setUserCapabilityGrant(userId, capabilityCode, enabled, actorId);
+        repository.setUserCapabilityGrant(userId, capabilityCode, enabled,
+                AgentDefinitionManagementAudit.pending(actorId, "USER_CAPABILITY_GRANT_CHANGED", "PLATFORM_USER",
+                        String.valueOf(userId), null, reason));
     }
 
     public record DraftUpdate(String instructions, String modelProvider, String modelName,

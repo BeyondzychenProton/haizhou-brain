@@ -13,13 +13,13 @@ public interface AgentDefinitionRepository extends EmployeeCatalog {
 
     AgentDefinitionDraft saveDraft(long employeeId, int expectedDraftRevision, String instructions,
                                    String modelProvider, String modelName,
-                                   List<CapabilitySelection> capabilities, long updatedBy);
+                                   List<CapabilitySelection> capabilities, AgentDefinitionManagementAudit audit);
 
-    PublishedEmployee publish(long employeeId, int expectedDraftRevision, long publishedBy, String requestId);
-    void setCapabilityEnabled(String capabilityCode, boolean enabled, long updatedBy, String reason);
+    PublishedEmployee publish(long employeeId, int expectedDraftRevision, AgentDefinitionManagementAudit audit);
+    void setCapabilityEnabled(String capabilityCode, boolean enabled, AgentDefinitionManagementAudit audit);
     boolean isCapabilityEnabled(String capabilityCode, String revision);
     boolean hasUserCapabilityGrant(long userId, String capabilityCode);
-    void setUserCapabilityGrant(long userId, String capabilityCode, boolean enabled, long updatedBy);
+    void setUserCapabilityGrant(long userId, String capabilityCode, boolean enabled, AgentDefinitionManagementAudit audit);
     void saveEffectiveCapabilitySet(EffectiveCapabilitySet set);
     Optional<EffectiveCapabilitySet> findEffectiveCapabilitySet(String runId);
     void recordToolInvocation(ToolInvocationAudit audit);

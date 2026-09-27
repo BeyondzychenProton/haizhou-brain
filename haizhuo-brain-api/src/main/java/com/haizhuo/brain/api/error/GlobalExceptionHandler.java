@@ -1,5 +1,6 @@
 package com.haizhuo.brain.api.error;
 
+import com.haizhuo.brain.platform.employee.AgentDefinitionManagementService;
 import com.haizhuo.brain.security.identity.AuthenticationRejectedException;
 import org.springframework.dao.DataAccessException;
 import org.springframework.http.HttpStatus;
@@ -33,6 +34,13 @@ public class GlobalExceptionHandler {
         return response(HttpStatus.CONFLICT, "STATE_CONFLICT", error.getMessage());
     }
 
+    @ExceptionHandler(AgentDefinitionManagementService.DefinitionNotPublishableException.class)
+    public Mono<ResponseEntity<DefinitionValidationError>> handleDefinitionNotPublishable(
+            AgentDefinitionManagementService.DefinitionNotPublishableException error) {
+        return Mono.just(ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY)
+                .body(new DefinitionValidationError("DEFINITION_NOT_PUBLISHABLE", error.validation())));
+    }
+
     @ExceptionHandler(DataAccessException.class)
     public Mono<ResponseEntity<ApiError>> handleDependencyFailure(DataAccessException error) {
         return response(HttpStatus.SERVICE_UNAVAILABLE, "IDENTITY_STORE_UNAVAILABLE", "身份服务暂不可用");
@@ -40,5 +48,8 @@ public class GlobalExceptionHandler {
 
     private static Mono<ResponseEntity<ApiError>> response(HttpStatus status, String code, String message) {
         return Mono.just(ResponseEntity.status(status).body(new ApiError(code, message)));
+    }
+
+    public record DefinitionValidationError(String code, AgentDefinitionManagementService.ValidationResult validation) {
     }
 }

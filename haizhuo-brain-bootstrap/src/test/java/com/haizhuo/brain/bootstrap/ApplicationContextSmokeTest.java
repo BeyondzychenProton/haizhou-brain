@@ -1,5 +1,6 @@
 package com.haizhuo.brain.bootstrap;
 
+import com.haizhuo.brain.platform.employee.AgentDefinitionManagementService;
 import com.haizhuo.brain.security.identity.ratelimit.AuthenticationRateLimiter;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.TestConfiguration;
@@ -18,10 +19,10 @@ class ApplicationContextSmokeTest {
     @LocalServerPort int port;
 
     @Test
-    void retiredUnauthenticatedApisAreRejected() {
+    void anonymousClientsCannotAccessBusinessOrAdministratorApis() {
         WebTestClient client = WebTestClient.bindToServer().baseUrl("http://localhost:" + port).build();
         client.post().uri("/api/v1/sessions").exchange().expectStatus().is4xxClientError();
-        client.get().uri("/api/admin/v1/capabilities").exchange().expectStatus().is4xxClientError();
+        client.get().uri("/api/admin/v1/capabilities").exchange().expectStatus().isUnauthorized();
         client.get().uri("/mock/api/v1/rooms/A-201/availability").exchange().expectStatus().is4xxClientError();
     }
 
@@ -45,6 +46,11 @@ class ApplicationContextSmokeTest {
                 @Override public void activationFailed(String activationCredential, String source) { }
                 @Override public void activationSucceeded(String activationCredential, String source) { }
             };
+        }
+
+        @Bean
+        AgentDefinitionManagementService agentDefinitionManagementService() {
+            return org.mockito.Mockito.mock(AgentDefinitionManagementService.class);
         }
     }
 }

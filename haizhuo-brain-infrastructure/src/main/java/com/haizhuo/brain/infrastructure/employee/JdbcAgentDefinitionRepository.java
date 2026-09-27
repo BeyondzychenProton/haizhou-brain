@@ -75,33 +75,40 @@ public class JdbcAgentDefinitionRepository implements AgentDefinitionRepository 
     }
 
     @Override public AgentDefinitionDraft saveDraft(long employeeId, int expectedDraftRevision, String instructions,
-            String modelProvider, String modelName, List<CapabilitySelection> capabilities, long updatedBy) {
+            String modelProvider, String modelName, List<CapabilitySelection> capabilities, AgentDefinitionManagementAudit audit) {
         return tx.execute(status -> {
             List<Integer> current = jdbc.query("SELECT draft_revision FROM agent_definition_draft WHERE employee_id=? FOR UPDATE",
                     (rs, n) -> rs.getInt(1), employeeId);
             if (current.isEmpty()) throw new IllegalArgumentException("Agent draft not found");
             if (current.get(0) != expectedDraftRevision) throw new IllegalStateException("Draft revision is stale");
+            AgentDefinitionDraft previous = findDraft(employeeId).orElseThrow(() -> new IllegalArgumentException("Agent draft not found"));
             int next = expectedDraftRevision + 1;
+            Instant now = Instant.now();
             jdbc.update("UPDATE agent_definition_draft SET draft_revision=?,instructions=?,model_provider=?,model_name=?,updated_by=?,updated_at=? WHERE employee_id=?",
-                    next, instructions, modelProvider, modelName, updatedBy, Timestamp.from(Instant.now()), employeeId);
+                    next, instructions, modelProvider, modelName, audit.actorUserId(), Timestamp.from(now), employeeId);
             jdbc.update("DELETE FROM agent_definition_draft_capability WHERE employee_id=?", employeeId);
             int position = 0;
             for (CapabilitySelection selection : capabilities) {
                 jdbc.update("INSERT INTO agent_definition_draft_capability(employee_id,capability_code,capability_revision,position_no) VALUES(?,?,?,?)",
                         employeeId, selection.capabilityCode(), selection.revision(), ++position);
             }
-            return new AgentDefinitionDraft(employeeId, next, instructions, modelProvider, modelName, capabilities, Instant.now());
+            AgentDefinitionDraft saved = new AgentDefinitionDraft(employeeId, next, instructions, modelProvider, modelName, capabilities, now);
+            appendManagementAudit(audit.completed(draftSummary(previous), draftSummary(saved), now));
+            return saved;
         });
     }
 
-    @Override public PublishedEmployee publish(long employeeId, int expectedDraftRevision, long publishedBy, String requestId) {
+    @Override public PublishedEmployee publish(long employeeId, int expectedDraftRevision, AgentDefinitionManagementAudit audit) {
+        String requestId = audit.requestId();
         if (requestId == null || requestId.isBlank() || requestId.length() > 128) throw new IllegalArgumentException("Invalid publish request id");
-        Long versionId = tx.execute(status -> {
-            List<Long> replay = jdbc.query("SELECT id FROM agent_definition_version WHERE employee_id=? AND publish_request_id=?",
-                    (rs, n) -> rs.getLong(1), employeeId, requestId);
-            if (!replay.isEmpty()) return replay.get(0);
+        PublishedEmployee published = tx.execute(status -> {
             List<Long> employees = jdbc.query("SELECT id FROM digital_employee WHERE id=? FOR UPDATE", (rs, n) -> rs.getLong(1), employeeId);
             if (employees.isEmpty()) throw new IllegalArgumentException("Digital employee not found");
+            // 中文注释：先锁定员工，再判断幂等重放；并发相同 requestId 不会越过该锁后重复插入版本。
+            List<Long> replay = jdbc.query("SELECT id FROM agent_definition_version WHERE employee_id=? AND publish_request_id=?",
+                    (rs, n) -> rs.getLong(1), employeeId, requestId);
+            if (!replay.isEmpty()) return findByVersionId(employeeId, replay.get(0));
+            String previousSummary = findPublished(employeeId).map(this::publishedSummary).orElse("{}");
             // 中文注释：与草稿保存共用同一行锁，确保发布读到的指令和能力绑定来自同一草稿修订。
             List<Integer> lockedDraftRevision = jdbc.query("SELECT draft_revision FROM agent_definition_draft WHERE employee_id=? FOR UPDATE",
                     (rs, n) -> rs.getInt(1), employeeId);
@@ -113,12 +120,13 @@ public class JdbcAgentDefinitionRepository implements AgentDefinitionRepository 
             Integer last = jdbc.query("SELECT COALESCE(MAX(version_no),0) FROM agent_definition_version WHERE employee_id=?", rs -> rs.next() ? rs.getInt(1) : 0, employeeId);
             int versionNo = (last == null ? 0 : last) + 1;
             String contentHash = definitionHash(draft);
+            Instant now = Instant.now();
             KeyHolder key = new GeneratedKeyHolder();
             jdbc.update(connection -> {
                 PreparedStatement statement = connection.prepareStatement("INSERT INTO agent_definition_version(employee_id,version_no,instructions,model_provider,model_name,content_hash,publish_request_id,published_by,published_at) VALUES(?,?,?,?,?,?,?,?,?)", new String[]{"id"});
                 statement.setLong(1, employeeId); statement.setInt(2, versionNo); statement.setString(3, draft.instructions());
                 statement.setString(4, draft.modelProvider()); statement.setString(5, draft.modelName()); statement.setString(6, contentHash);
-                statement.setString(7, requestId); statement.setLong(8, publishedBy); statement.setTimestamp(9, Timestamp.from(Instant.now()));
+                statement.setString(7, requestId); statement.setLong(8, audit.actorUserId()); statement.setTimestamp(9, Timestamp.from(now));
                 return statement;
             }, key);
             Number generated = key.getKey();
@@ -130,16 +138,24 @@ public class JdbcAgentDefinitionRepository implements AgentDefinitionRepository 
                         id, capability.capabilityCode(), capability.revision(), ++position);
             }
             jdbc.update("UPDATE digital_employee SET current_published_version_id=?,row_version=row_version+1 WHERE id=?", id, employeeId);
-            return id;
+            PublishedEmployee result = findByVersionId(employeeId, id);
+            appendManagementAudit(audit.completed(previousSummary, publishedSummary(result), now));
+            return result;
         });
-        if (versionId == null) throw new IllegalStateException("Unable to publish Agent definition");
-        return findByVersionId(employeeId, versionId);
+        if (published == null) throw new IllegalStateException("Unable to publish Agent definition");
+        return published;
     }
 
-    @Override public void setCapabilityEnabled(String code, boolean enabled, long updatedBy, String reason) {
-        int changed = jdbc.update("UPDATE capability_definition SET status=?,updated_by=?,updated_at=?,status_reason=? WHERE capability_code=?",
-                enabled ? "ACTIVE" : "DISABLED", updatedBy, Timestamp.from(Instant.now()), reason, code);
-        if (changed == 0) throw new IllegalArgumentException("Capability does not exist");
+    @Override public void setCapabilityEnabled(String code, boolean enabled, AgentDefinitionManagementAudit audit) {
+        tx.executeWithoutResult(status -> {
+            List<String> existing = jdbc.query("SELECT status FROM capability_definition WHERE capability_code=? FOR UPDATE",
+                    (rs, n) -> rs.getString(1), code);
+            if (existing.isEmpty()) throw new IllegalArgumentException("Capability does not exist");
+            Instant now = Instant.now();
+            jdbc.update("UPDATE capability_definition SET status=?,updated_by=?,updated_at=?,status_reason=? WHERE capability_code=?",
+                    enabled ? "ACTIVE" : "DISABLED", audit.actorUserId(), Timestamp.from(now), audit.reason(), code);
+            appendManagementAudit(audit.completed(capabilityStatusSummary(existing.get(0)), capabilityStatusSummary(enabled), now));
+        });
     }
 
     @Override public boolean isCapabilityEnabled(String code, String revision) {
@@ -154,9 +170,16 @@ public class JdbcAgentDefinitionRepository implements AgentDefinitionRepository 
         return count != null && count > 0;
     }
 
-    @Override public void setUserCapabilityGrant(long userId, String code, boolean enabled, long updatedBy) {
-        jdbc.update("INSERT INTO agent_user_capability_grant(user_id,capability_code,enabled,updated_by,updated_at) VALUES(?,?,?,?,?) ON DUPLICATE KEY UPDATE enabled=VALUES(enabled),updated_by=VALUES(updated_by),updated_at=VALUES(updated_at)",
-                userId, code, enabled, updatedBy, Timestamp.from(Instant.now()));
+    @Override public void setUserCapabilityGrant(long userId, String code, boolean enabled, AgentDefinitionManagementAudit audit) {
+        tx.executeWithoutResult(status -> {
+            List<Boolean> existing = jdbc.query("SELECT enabled FROM agent_user_capability_grant WHERE user_id=? AND capability_code=? FOR UPDATE",
+                    (rs, n) -> rs.getBoolean(1), userId, code);
+            Instant now = Instant.now();
+            jdbc.update("INSERT INTO agent_user_capability_grant(user_id,capability_code,enabled,updated_by,updated_at) VALUES(?,?,?,?,?) ON DUPLICATE KEY UPDATE enabled=VALUES(enabled),updated_by=VALUES(updated_by),updated_at=VALUES(updated_at)",
+                    userId, code, enabled, audit.actorUserId(), Timestamp.from(now));
+            appendManagementAudit(audit.completed(grantSummary(existing.isEmpty() ? null : existing.get(0), code),
+                    grantSummary(enabled, code), now));
+        });
     }
 
     @Override public void saveEffectiveCapabilitySet(EffectiveCapabilitySet set) {
@@ -194,6 +217,46 @@ public class JdbcAgentDefinitionRepository implements AgentDefinitionRepository 
         jdbc.update("INSERT INTO tool_invocation_audit(invocation_id,run_id,capability_code,capability_revision,user_id,business_action,arguments_hash,decision,result_status,result_summary,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 audit.invocationId(), audit.runId(), audit.capabilityCode(), audit.capabilityRevision(), audit.userId(), audit.businessAction(),
                 audit.argumentsHash(), audit.decision(), audit.resultStatus(), audit.resultSummary(), Timestamp.from(audit.createdAt()));
+    }
+
+    private void appendManagementAudit(AgentDefinitionManagementAudit audit) {
+        jdbc.update("INSERT INTO agent_definition_management_audit(actor_user_id,event_type,target_type,target_id,request_id,reason,previous_summary,new_summary,occurred_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                audit.actorUserId(), audit.eventType(), audit.targetType(), audit.targetId(), audit.requestId(), audit.reason(),
+                audit.previousSummary(), audit.newSummary(), Timestamp.from(audit.occurredAt()));
+    }
+
+    private String draftSummary(AgentDefinitionDraft draft) {
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("draftRevision", draft.draftRevision());
+        summary.put("modelProvider", draft.modelProvider());
+        summary.put("modelName", draft.modelName());
+        summary.put("capabilities", draft.capabilities().stream()
+                .map(item -> item.capabilityCode() + "@" + item.revision()).toList());
+        summary.put("contentHash", definitionHash(draft));
+        return writeJson(summary);
+    }
+
+    private String publishedSummary(PublishedEmployee published) {
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("definitionVersionId", published.definition().id());
+        summary.put("versionNo", published.definition().version());
+        summary.put("contentHash", published.definition().contentHash());
+        return writeJson(summary);
+    }
+
+    private String capabilityStatusSummary(String status) {
+        return capabilityStatusSummary("ACTIVE".equals(status));
+    }
+
+    private String capabilityStatusSummary(boolean enabled) {
+        return writeJson(Map.of("enabled", enabled));
+    }
+
+    private String grantSummary(Boolean enabled, String capabilityCode) {
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("capabilityCode", capabilityCode);
+        summary.put("enabled", enabled);
+        return writeJson(summary);
     }
 
     private PublishedEmployee findByVersionId(long employeeId, long versionId) {
