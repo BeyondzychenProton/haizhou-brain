@@ -10,9 +10,23 @@ spring:
   data:
     redis:
       host: 127.0.0.1
-      port: 6379
+      port: 6380
       password: ""
       database: 0
 logging:
   level:
     com.haizhuo.brain: DEBUG
+haizhuo:
+  brain:
+    agent:
+      provider: openai
+      primary-model: replace-with-model-id
+      api-key: replace-with-api-key
+      base-url: https://example.com/v1
+haizhuo:
+  brain:
+    agent:
+      provider: openai
+      primary-model: replace-with-model-id
+      api-key: replace-with-api-key
+      base-url: https://example.com/v1

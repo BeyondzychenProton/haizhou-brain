@@ -37,37 +37,37 @@ class JdbcAgentDefinitionRepositoryTest {
     @Test
     void savesDraftPublishesImmutableVersionSnapshotsEffectiveToolsAndRechecksRevocation() {
         var original = repository.findPublished(new TenantId(1), 1).orElseThrow();
-        var saved = repository.saveDraft(1, 1, "只执行会议室查询。", "openai-compatible", "mock-model",
-                List.of(new CapabilitySelection("meeting_room.search", "1")), 1001);
+        var saved = repository.saveDraft(1, 1, "只执行测试读取。", "openai-compatible", "test-model",
+                List.of(new CapabilitySelection("sample.read", "1")), 42);
         assertEquals(2, saved.draftRevision());
 
-        var published = repository.publish(1, 2, 1001, "publish-1");
+        var published = repository.publish(1, 2, 42, "publish-1");
         assertEquals(2, published.definition().version());
-        assertEquals("mock-model", published.definition().modelName());
-        assertEquals(List.of("meeting_room.search"), published.capabilities().stream().map(c -> c.referenceId()).toList());
+        assertEquals("test-model", published.definition().modelName());
+        assertEquals(List.of("sample.read"), published.capabilities().stream().map(c -> c.referenceId()).toList());
         assertEquals("旧指令", original.definition().instructions(), "发布记录应保持不可变");
-        assertEquals(published.definition().id(), repository.publish(1, 2, 1001, "publish-1").definition().id(), "发布请求重放应返回同一不可变版本");
+        assertEquals(published.definition().id(), repository.publish(1, 2, 42, "publish-1").definition().id(), "发布请求重放应返回同一不可变版本");
 
         jdbc.update("INSERT INTO agent_run(run_id) VALUES (?)", "run-jdbc-1");
         EffectiveCapabilitySetResolver resolver = new EffectiveCapabilitySetResolver(repository,
-                (implementationKey, capabilityCode) -> "meeting-room-v1".equals(implementationKey) && "meeting_room.search".equals(capabilityCode));
-        var set = resolver.resolve(new RunId("run-jdbc-1"), new UserId(1001), published);
+                (implementationKey, capabilityCode) -> "sample-v1".equals(implementationKey) && "sample.read".equals(capabilityCode));
+        var set = resolver.resolve(new RunId("run-jdbc-1"), new UserId(42), published);
         assertEquals(1, set.allowedCapabilities().size());
         var restored = repository.findEffectiveCapabilitySet("run-jdbc-1").orElseThrow();
         assertEquals(set.snapshotHash(), restored.snapshotHash());
         assertEquals(set.allowedCapabilities(), restored.allowedCapabilities());
 
-        AgentExecutionRequest run = new AgentExecutionRequest(new TenantId(1), new UserId(1001), new SessionId("session-1"),
-                new RunId("run-jdbc-1"), TraceId.newId(), published.definition().id(), "会议室预定员工", published.definition().instructions(),
-                published.definition().modelProvider(), published.definition().modelName(), set.snapshotHash(), set.allowedCapabilities(), "查询空闲");
-        assertTrue(resolver.isAllowedNow(run, "meeting_room.search"));
-        repository.setUserCapabilityGrant(1001, "meeting_room.search", false, 1001);
-        assertFalse(resolver.isAllowedNow(run, "meeting_room.search"), "已开始 Run 也应在执行边界即时检查撤权");
-        repository.setUserCapabilityGrant(1001, "meeting_room.search", true, 1001);
-        assertTrue(repository.hasUserCapabilityGrant(1001, "meeting_room.search"));
+        AgentExecutionRequest run = new AgentExecutionRequest(new TenantId(1), new UserId(42), new SessionId("session-1"),
+                new RunId("run-jdbc-1"), TraceId.newId(), published.definition().id(), "测试员工", published.definition().instructions(),
+                published.definition().modelProvider(), published.definition().modelName(), set.snapshotHash(), set.allowedCapabilities(), "读取测试资料");
+        assertTrue(resolver.isAllowedNow(run, "sample.read"));
+        repository.setUserCapabilityGrant(42, "sample.read", false, 42);
+        assertFalse(resolver.isAllowedNow(run, "sample.read"), "已开始 Run 也应在执行边界即时检查撤权");
+        repository.setUserCapabilityGrant(42, "sample.read", true, 42);
+        assertTrue(repository.hasUserCapabilityGrant(42, "sample.read"));
 
-        repository.recordToolInvocation(new ToolInvocationAudit(UUID.randomUUID().toString(), "run-jdbc-1", "meeting_room.search", "1",
-                1001, "meeting_room.availability.read", "a".repeat(64), "ALLOW", "SUCCEEDED", "查询完成", Instant.now()));
+        repository.recordToolInvocation(new ToolInvocationAudit(UUID.randomUUID().toString(), "run-jdbc-1", "sample.read", "1",
+                42, "sample.read", "a".repeat(64), "ALLOW", "SUCCEEDED", "读取完成", Instant.now()));
         assertEquals(1, jdbc.queryForObject("SELECT COUNT(*) FROM tool_invocation_audit WHERE run_id=?", Integer.class, "run-jdbc-1"));
     }
 
@@ -84,18 +84,18 @@ class JdbcAgentDefinitionRepositoryTest {
         jdbc.execute("CREATE TABLE run_effective_capability_set(run_id VARCHAR(36) PRIMARY KEY,definition_version_id BIGINT,user_id BIGINT,snapshot_hash CHAR(64),resolved_at TIMESTAMP,FOREIGN KEY(run_id) REFERENCES agent_run(run_id),FOREIGN KEY(definition_version_id) REFERENCES agent_definition_version(id))");
         jdbc.execute("CREATE TABLE run_effective_capability_item(run_id VARCHAR(36),capability_code VARCHAR(128),capability_revision VARCHAR(32),allowed BOOLEAN,reason_code VARCHAR(64),runtime_capability_json TEXT,PRIMARY KEY(run_id,capability_code),FOREIGN KEY(run_id) REFERENCES run_effective_capability_set(run_id),FOREIGN KEY(capability_code,capability_revision) REFERENCES capability_revision(capability_code,revision))");
         jdbc.execute("CREATE TABLE tool_invocation_audit(invocation_id VARCHAR(36) PRIMARY KEY,run_id VARCHAR(36),capability_code VARCHAR(128),capability_revision VARCHAR(32),user_id BIGINT,business_action VARCHAR(128),arguments_hash CHAR(64),decision VARCHAR(24),result_status VARCHAR(24),result_summary VARCHAR(1000),created_at TIMESTAMP,FOREIGN KEY(run_id) REFERENCES agent_run(run_id),FOREIGN KEY(capability_code,capability_revision) REFERENCES capability_revision(capability_code,revision))");
-        jdbc.update("INSERT INTO digital_employee VALUES(1,1,'meeting-room','会议室预定员工',TRUE,1,0)");
-        jdbc.update("INSERT INTO capability_definition VALUES('meeting_room.search','TOOL','ACTIVE',1001,CURRENT_TIMESTAMP,NULL),('meeting_room.reserve','TOOL','ACTIVE',1001,CURRENT_TIMESTAMP,NULL)");
+        jdbc.update("INSERT INTO digital_employee VALUES(1,1,'sample-employee','测试员工',TRUE,1,0)");
+        jdbc.update("INSERT INTO capability_definition VALUES('sample.read','TOOL','ACTIVE',42,CURRENT_TIMESTAMP,NULL),('sample.write','TOOL','ACTIVE',42,CURRENT_TIMESTAMP,NULL)");
         String schema = "{\"type\":\"object\",\"properties\":{\"startAt\":{\"type\":\"string\"},\"endAt\":{\"type\":\"string\"},\"attendees\":{\"type\":\"integer\"}},\"required\":[\"startAt\",\"endAt\",\"attendees\"],\"additionalProperties\":false}";
-        for (String code : List.of("meeting_room.search", "meeting_room.reserve")) {
-            jdbc.update("INSERT INTO capability_revision VALUES(?,?,?,?,?,?,?,?,?)", code, "1", code, "会议室能力", code.replace('.', '_'),
-                    "meeting-room-v1", code.endsWith("search") ? "meeting_room.availability.read" : "meeting_room.booking.create", schema, "f".repeat(64));
+        for (String code : List.of("sample.read", "sample.write")) {
+            jdbc.update("INSERT INTO capability_revision VALUES(?,?,?,?,?,?,?,?,?)", code, "1", code, "测试能力", code.replace('.', '_'),
+                    "sample-v1", code.endsWith("read") ? "sample.read" : "sample.write", schema, "f".repeat(64));
         }
-        jdbc.update("INSERT INTO agent_definition_draft VALUES(1,1,'旧指令','openai','qwen3.7-max',1001,CURRENT_TIMESTAMP)");
-        jdbc.update("INSERT INTO agent_definition_draft_capability VALUES(1,'meeting_room.search','1',1),(1,'meeting_room.reserve','1',2)");
-        jdbc.update("INSERT INTO agent_definition_version VALUES(1,1,1,'旧指令','openai','qwen3.7-max',?,'bootstrap',1001,CURRENT_TIMESTAMP)", "f".repeat(64));
-        jdbc.update("INSERT INTO agent_definition_version_capability VALUES(1,'meeting_room.search','1',1),(1,'meeting_room.reserve','1',2)");
+        jdbc.update("INSERT INTO agent_definition_draft VALUES(1,1,'旧指令','openai','test-model',42,CURRENT_TIMESTAMP)");
+        jdbc.update("INSERT INTO agent_definition_draft_capability VALUES(1,'sample.read','1',1),(1,'sample.write','1',2)");
+        jdbc.update("INSERT INTO agent_definition_version VALUES(1,1,1,'旧指令','openai','test-model',?,'bootstrap',42,CURRENT_TIMESTAMP)", "f".repeat(64));
+        jdbc.update("INSERT INTO agent_definition_version_capability VALUES(1,'sample.read','1',1),(1,'sample.write','1',2)");
         jdbc.update("UPDATE digital_employee SET current_published_version_id=1 WHERE id=1");
-        jdbc.update("INSERT INTO agent_user_capability_grant VALUES(1001,'meeting_room.search',TRUE,1001,CURRENT_TIMESTAMP),(1001,'meeting_room.reserve',TRUE,1001,CURRENT_TIMESTAMP)");
+        jdbc.update("INSERT INTO agent_user_capability_grant VALUES(42,'sample.read',TRUE,42,CURRENT_TIMESTAMP),(42,'sample.write',TRUE,42,CURRENT_TIMESTAMP)");
     }
 }

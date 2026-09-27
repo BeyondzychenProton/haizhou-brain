@@ -11,16 +11,13 @@ import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.ReActAgent;
 import io.agentscope.extensions.model.dashscope.DashScopeChatModel;
 import io.agentscope.extensions.model.openai.OpenAIChatModel;
-import org.springframework.context.annotation.Profile;
-import org.springframework.stereotype.Component;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import reactor.core.scheduler.Schedulers;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.Flux;
 
-@Component
-@Profile("meeting-mock | test")
+// 中文注释：真实业务网关与可信用户尚未接入，因此此运行时暂不注册为可自动调用的 Spring Bean。
 public class AgentScopeRuntime implements AgentRuntime {
     private static final Logger log = LoggerFactory.getLogger(AgentScopeRuntime.class);
     private final AgentScopeRuntimeProperties properties;
@@ -36,12 +33,12 @@ public class AgentScopeRuntime implements AgentRuntime {
     public Flux<BrainAgentEvent> execute(AgentExecutionRequest request) {
         return Mono.fromCallable(() -> {
             if (properties.apiKey() == null || properties.apiKey().isBlank())
-                throw new IllegalStateException("LLM API key is missing; configure config/application-meeting-mock.yml");
+                throw new IllegalStateException("LLM API key is missing from the configured agent model");
             String provider = request.modelProvider() == null ? properties.provider() : request.modelProvider();
             var model = switch (provider == null ? "" : provider.toLowerCase(java.util.Locale.ROOT)) {
                 case "openai", "openai-compatible" -> {
                     if (properties.baseUrl() == null || properties.baseUrl().isBlank())
-                        throw new IllegalStateException("LLM base-url is missing; configure config/application-meeting-mock.yml");
+                        throw new IllegalStateException("LLM base-url is missing from the configured agent model");
                     yield OpenAIChatModel.builder().apiKey(properties.apiKey()).modelName(request.modelName())
                             .baseUrl(properties.baseUrl()).stream(false).build();
                 }
@@ -53,7 +50,8 @@ public class AgentScopeRuntime implements AgentRuntime {
                 default -> throw new IllegalStateException("Unsupported LLM provider: " + provider);
             };
             var toolkit = toolkitAssembler.assemble(request, toolGateway);
-            try (ReActAgent agent = ReActAgent.builder().name("meeting-room-agent").description("Mock meeting-room reservation agent")
+            String employeeDescription = request.employeeName() == null ? "Digital employee" : request.employeeName();
+            try (ReActAgent agent = ReActAgent.builder().name("digital-employee").description(employeeDescription)
                     .sysPrompt(request.instructions()).model(model).toolkit(toolkit).maxIters(6).build()) {
                 RuntimeContext context = RuntimeContext.builder().sessionId(request.sessionId().value())
                         .userId(Long.toString(request.userId().value())).put(AgentExecutionRequest.class, request).build();

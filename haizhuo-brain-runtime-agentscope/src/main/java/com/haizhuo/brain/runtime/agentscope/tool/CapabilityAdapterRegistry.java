@@ -9,12 +9,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
 import java.util.stream.Collectors;
-import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Component;
 
 /** 白名单提供者注册表；发布校验和 Toolkit 装配共用同一组实现映射。 */
 @Component
-@Profile("meeting-mock | test")
 public class CapabilityAdapterRegistry implements RuntimeCapabilityProviderCatalog {
     private final Map<String, RuntimeToolProvider> providers;
 

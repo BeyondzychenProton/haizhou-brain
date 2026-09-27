@@ -27,7 +27,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 /** MySQL implementation for published agent definitions, grants, runtime snapshots and tool audit. */
 @Repository
-@Profile("meeting-mock")
+@Profile("!test")
 public class JdbcAgentDefinitionRepository implements AgentDefinitionRepository {
     private static final TypeReference<Map<String, Object>> JSON_MAP = new TypeReference<>() {};
     private final JdbcTemplate jdbc;

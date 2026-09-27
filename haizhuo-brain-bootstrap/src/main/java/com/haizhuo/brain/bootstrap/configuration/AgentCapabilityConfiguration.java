@@ -10,7 +10,7 @@ import org.springframework.context.annotation.Profile;
 
 /** 在应用边界装配领域服务，保持 platform 模块不依赖 Spring 容器。 */
 @Configuration
-@Profile("meeting-mock | test")
+@Profile("!test")
 public class AgentCapabilityConfiguration {
     @Bean
     EffectiveCapabilitySetResolver effectiveCapabilitySetResolver(AgentDefinitionRepository definitions,

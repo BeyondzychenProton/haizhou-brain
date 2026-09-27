@@ -8,12 +8,10 @@ import io.agentscope.core.tool.AgentTool;
 import io.agentscope.core.tool.Toolkit;
 import java.util.HashSet;
 import java.util.Set;
-import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Component;
 
 /** 仅把平台计算并冻结的有效能力集合装入本 Run 的 Toolkit。 */
 @Component
-@Profile("meeting-mock | test")
 public class AgentScopeToolkitAssembler {
     private final CapabilityAdapterRegistry registry;
 
