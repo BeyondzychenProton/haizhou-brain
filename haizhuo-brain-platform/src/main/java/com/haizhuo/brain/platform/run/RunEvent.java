@@ -3,5 +3,5 @@ package com.haizhuo.brain.platform.run;
 import com.haizhuo.brain.kernel.identity.RunId;
 import java.time.Instant;
 
-/** Persisted user-visible event; sequence is the reconnect cursor. */
+/** 持久化的用户可见事件；sequence 即重连游标。 */
 public record RunEvent(RunId runId, int sequenceNo, String type, String content, Instant createdAt) { }

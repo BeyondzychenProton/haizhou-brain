@@ -5,7 +5,7 @@ import com.haizhuo.brain.kernel.identity.SessionId;
 import com.haizhuo.brain.kernel.identity.UserId;
 import java.time.Instant;
 
-/** Immutable ownership and published-definition snapshot for one execution attempt. */
+/** 一次执行尝试的不可变属主与已发布定义快照。 */
 public record AgentRun(RunId id, SessionId sessionId, UserId userId, long employeeId,
                        long definitionVersionId, String clientRequestId, String inputDigest,
                        RunState state, Instant createdAt, Instant startedAt, Instant finishedAt) {
