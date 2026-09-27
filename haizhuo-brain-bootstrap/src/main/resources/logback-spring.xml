@@ -2,5 +2,21 @@
     <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
     <property name="CONSOLE_LOG_PATTERN" value="%clr(%d{yyyy-MM-dd HH:mm:ss.SSS}){faint} %clr(${PID:- }){magenta} %clr([%thread]){faint} %clr(%-5level) %logger{36} - %msg%n"/>
     <include resource="org/springframework/boot/logging/logback/console-appender.xml"/>
-    <root level="INFO"><appender-ref ref="CONSOLE"/></root>
+    <property name="LOG_PATH" value="${LOG_PATH:-logs}"/>
+
+    <appender name="ROLLING_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_PATH}/haizhuo-brain.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>${LOG_PATH}/archive/haizhuo-brain.%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
+            <maxFileSize>50MB</maxFileSize>
+            <maxHistory>30</maxHistory>
+            <totalSizeCap>2GB</totalSizeCap>
+        </rollingPolicy>
+        <encoder><pattern>${CONSOLE_LOG_PATTERN}</pattern></encoder>
+    </appender>
+
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+        <appender-ref ref="ROLLING_FILE"/>
+    </root>
 </configuration>

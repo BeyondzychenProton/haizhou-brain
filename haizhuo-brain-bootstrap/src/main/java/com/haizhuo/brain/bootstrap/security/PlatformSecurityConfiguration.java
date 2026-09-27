@@ -72,6 +72,7 @@ public class PlatformSecurityConfiguration {
                 .authorizeExchange(spec -> spec
                         .pathMatchers("/actuator/health/**", "/api/v1/auth/csrf", "/api/v1/auth/login", "/api/v1/auth/activate").permitAll()
                         .pathMatchers("/api/admin/**").hasRole(PlatformRole.PLATFORM_ADMIN.name())
+                        .pathMatchers("/api/v1/employees").authenticated()
                         .pathMatchers("/api/v1/sessions/**").authenticated()
                         .pathMatchers("/api/v1/auth/password/change", "/api/v1/auth/logout", "/api/v1/auth/me").authenticated()
                         .anyExchange().denyAll())

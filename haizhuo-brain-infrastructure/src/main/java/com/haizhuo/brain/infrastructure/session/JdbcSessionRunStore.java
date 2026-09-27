@@ -12,6 +12,7 @@ import com.haizhuo.brain.platform.session.AgentSession;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.Optional;
+import java.util.List;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Repository;
@@ -38,6 +39,12 @@ public class JdbcSessionRunStore implements SessionRunStore {
                 (rs, row) -> new AgentSession(new SessionId(rs.getString("session_id")), new UserId(rs.getLong("user_id")), rs.getLong("employee_id"),
                         AgentSession.Status.valueOf(rs.getString("status")), instant(rs.getTimestamp("created_at")), instant(rs.getTimestamp("last_active_at")), rs.getLong("row_version")),
                 sessionId.value(), owner.value()).stream().findFirst();
+    }
+
+    @Override public List<AgentSession> findSessions(UserId owner, int limit) {
+        int safeLimit = Math.max(1, Math.min(limit, 100));
+        return jdbc.query("SELECT session_id,user_id,employee_id,status,created_at,last_active_at,row_version FROM platform_agent_session WHERE user_id=? ORDER BY last_active_at DESC LIMIT ?",
+                (rs, row) -> new AgentSession(new SessionId(rs.getString("session_id")), new UserId(rs.getLong("user_id")), rs.getLong("employee_id"), AgentSession.Status.valueOf(rs.getString("status")), instant(rs.getTimestamp("created_at")), instant(rs.getTimestamp("last_active_at")), rs.getLong("row_version")), owner.value(), safeLimit);
     }
 
     @Override @Transactional

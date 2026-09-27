@@ -13,6 +13,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.Clock;
 import java.time.Instant;
+import java.util.List;
 
 /** Creates and reads only sessions owned by the authenticated platform user. */
 public class SessionApplicationService {
@@ -39,6 +40,8 @@ public class SessionApplicationService {
         return store.findSession(sessionId, owner)
                 .orElseThrow(() -> new IllegalArgumentException("Session was not found"));
     }
+
+    public List<AgentSession> list(UserId owner, int limit) { return store.findSessions(owner, limit); }
 
     public AgentRun createRun(SessionId sessionId, UserId owner, String clientRequestId, String input) {
         AgentSession session = get(sessionId, owner);

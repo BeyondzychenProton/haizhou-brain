@@ -12,6 +12,7 @@ public interface SessionRunStore {
     AgentSession createSession(AgentSession session);
 
     Optional<AgentSession> findSession(SessionId sessionId, UserId owner);
+    default List<AgentSession> findSessions(UserId owner, int limit) { return List.of(); }
 
     /** Atomically claims the only active Run slot for the owned Session, or returns an idempotent replay. */
     AgentRun createRun(AgentRun run, String input);

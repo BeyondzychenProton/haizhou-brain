@@ -98,6 +98,11 @@ public class JdbcAgentDefinitionRepository implements AgentDefinitionRepository 
         });
     }
 
+    @Override public List<DigitalEmployee> listEnabled(TenantId tenantId) {
+        return jdbc.query("SELECT id,tenant_id,employee_code,display_name,enabled FROM digital_employee WHERE tenant_id=? AND enabled=TRUE AND current_published_version_id IS NOT NULL ORDER BY display_name",
+                (rs, n) -> new DigitalEmployee(rs.getLong("id"), new TenantId(rs.getLong("tenant_id")), rs.getString("employee_code"), rs.getString("display_name"), rs.getBoolean("enabled")), tenantId.value());
+    }
+
     @Override public PublishedEmployee publish(long employeeId, int expectedDraftRevision, AgentDefinitionManagementAudit audit) {
         String requestId = audit.requestId();
         if (requestId == null || requestId.isBlank() || requestId.length() > 128) throw new IllegalArgumentException("Invalid publish request id");

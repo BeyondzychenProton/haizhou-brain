@@ -12,6 +12,7 @@ import jakarta.validation.constraints.Positive;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
 import java.time.Instant;
+import java.util.List;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.validation.annotation.Validated;
@@ -34,6 +35,12 @@ public class SessionController {
     private final SessionApplicationService sessions;
 
     public SessionController(SessionApplicationService sessions) { this.sessions = sessions; }
+
+    @GetMapping
+    public Mono<List<SessionResponse>> list(@AuthenticationPrincipal AuthenticatedUser user,
+                                            @RequestParam(defaultValue = "20") int limit) {
+        return blocking(() -> sessions.list(user.userId(), limit).stream().map(SessionController::response).toList());
+    }
 
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
