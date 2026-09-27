@@ -1,6 +1,6 @@
 package com.haizhuo.brain.platform.channel;
 
-/** Provider-specific sender called only by a future outbox worker. */
+/** 面向具体供应商的发送器，只由后续的 outbox worker 调用。 */
 public interface ChannelOutboundSender {
     String provider();
     DeliveryResult send(ChannelDelivery delivery);

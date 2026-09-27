@@ -1,6 +1,6 @@
 package com.haizhuo.brain.platform.channel;
 
-/** Only a channel adapter may create this after authenticating the Web user or webhook. */
+/** 只有渠道适配器在认证 Web 用户或 webhook 之后才能创建该对象。 */
 public record VerifiedChannelMessage(String bindingId, String provider, String providerEventId,
                                      String externalConversationId, String externalUserId,
                                      String text, String replyTarget) {

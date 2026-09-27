@@ -4,7 +4,7 @@ import com.haizhuo.brain.kernel.identity.SessionId;
 import com.haizhuo.brain.kernel.identity.UserId;
 import java.time.Instant;
 
-/** Persistent business conversation ownership; this is deliberately distinct from a browser WebSession. */
+/** 持久化的业务会话属主关系；刻意与浏览器 WebSession 区分开。 */
 public record AgentSession(SessionId id, UserId userId, long employeeId, Status status,
                            Instant createdAt, Instant lastActiveAt, long rowVersion) {
     public AgentSession {

@@ -5,7 +5,7 @@ import com.haizhuo.brain.platform.employee.EmployeeCatalog;
 import com.haizhuo.brain.platform.employee.PublishedEmployee;
 import java.util.Objects;
 
-/** Platform validation and routing before any inbox record or Agent execution. */
+/** 在写入任何收件箱记录或执行 Agent 之前完成的平台校验与路由。 */
 public final class ChannelIngressService {
     private final ChannelAccountDirectory accounts;
     private final ChannelIdentityDirectory identities;
