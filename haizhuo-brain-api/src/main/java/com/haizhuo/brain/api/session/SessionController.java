@@ -4,6 +4,8 @@ import com.haizhuo.brain.kernel.identity.SessionId;
 import com.haizhuo.brain.platform.session.AgentSession;
 import com.haizhuo.brain.platform.session.SessionApplicationService;
 import com.haizhuo.brain.platform.run.AgentRun;
+import com.haizhuo.brain.platform.run.RunEvent;
+import com.haizhuo.brain.kernel.identity.RunId;
 import com.haizhuo.brain.security.identity.AuthenticatedUser;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Positive;
@@ -18,6 +20,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 import reactor.core.publisher.Mono;
@@ -49,6 +52,16 @@ public class SessionController {
     public Mono<RunResponse> createRun(@AuthenticationPrincipal AuthenticatedUser user, @PathVariable String sessionId,
                                        @Valid @RequestBody CreateRunRequest request) {
         return blocking(() -> runResponse(sessions.createRun(new SessionId(sessionId), user.userId(), request.clientRequestId(), request.input().trim())));
+    }
+
+    @GetMapping("/runs/{runId}")
+    public Mono<RunResponse> getRun(@AuthenticationPrincipal AuthenticatedUser user, @PathVariable String runId) {
+        return blocking(() -> runResponse(sessions.getRun(new RunId(runId), user.userId())));
+    }
+
+    @GetMapping("/runs/{runId}/events")
+    public Mono<java.util.List<RunEvent>> events(@AuthenticationPrincipal AuthenticatedUser user, @PathVariable String runId, @RequestParam(defaultValue = "0") int after) {
+        return blocking(() -> sessions.events(new RunId(runId), user.userId(), after));
     }
 
     private static SessionResponse response(AgentSession session) {

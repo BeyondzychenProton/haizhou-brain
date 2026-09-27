@@ -6,6 +6,7 @@ import com.haizhuo.brain.kernel.identity.UserId;
 import com.haizhuo.brain.platform.employee.EmployeeCatalog;
 import com.haizhuo.brain.platform.run.AgentRun;
 import com.haizhuo.brain.platform.run.RunState;
+import com.haizhuo.brain.platform.run.RunEvent;
 import com.haizhuo.brain.platform.run.SessionRunStore;
 import com.haizhuo.brain.kernel.identity.RunId;
 import java.nio.charset.StandardCharsets;
@@ -44,6 +45,12 @@ public class SessionApplicationService {
         var published = employees.findPublished(DEFAULT_TENANT, session.employeeId()).orElseThrow(() -> new IllegalStateException("Session employee is no longer published"));
         Instant now = clock.instant();
         return store.createRun(new AgentRun(RunId.newId(), session.id(), owner, session.employeeId(), published.definition().id(), clientRequestId, digest(input), RunState.QUEUED, now, null, null), input);
+    }
+
+    public AgentRun getRun(RunId runId, UserId owner) { return store.findRun(runId, owner).orElseThrow(() -> new IllegalArgumentException("Run was not found")); }
+    public java.util.List<RunEvent> events(RunId runId, UserId owner, int afterSequence) {
+        getRun(runId, owner);
+        return store.findEvents(runId, owner, Math.max(afterSequence, 0), 200);
     }
 
     private static String digest(String input) {
