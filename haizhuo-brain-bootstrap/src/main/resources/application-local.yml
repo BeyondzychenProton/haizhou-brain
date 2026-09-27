@@ -16,3 +16,8 @@ logging:
   level:
     com.haizhuo.brain: DEBUG
     com.haizhuo.brain.infrastructure.persistence: DEBUG
+haizhuo:
+  brain:
+    security:
+      session:
+        secure-cookie: false

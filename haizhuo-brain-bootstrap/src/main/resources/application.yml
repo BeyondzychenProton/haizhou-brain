@@ -5,6 +5,8 @@ spring:
     active: local
   lifecycle:
     timeout-per-shutdown-phase: 30s
+  session:
+    timeout: 8h
   jackson:
     default-property-inclusion: non_null
     time-zone: Asia/Shanghai
@@ -41,6 +43,13 @@ management:
       probability: 0.1
 haizhuo:
   brain:
+    security:
+      session:
+        store: redis
+        secure-cookie: true
+        same-site: Lax
+    bootstrap-admin:
+      enabled: false
     agent:
       provider: dashscope
       primary-model: qwen-plus

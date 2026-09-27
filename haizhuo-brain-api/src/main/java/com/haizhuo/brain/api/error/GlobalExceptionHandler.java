@@ -1,19 +1,44 @@
 package com.haizhuo.brain.api.error;
 
+import com.haizhuo.brain.security.identity.AuthenticationRejectedException;
+import org.springframework.dao.DataAccessException;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
-import org.springframework.http.HttpStatus;
-import org.springframework.web.bind.annotation.ResponseStatus;
+import org.springframework.web.bind.support.WebExchangeBindException;
 import reactor.core.publisher.Mono;
 
 @RestControllerAdvice
 public class GlobalExceptionHandler {
-    @ExceptionHandler(IllegalArgumentException.class)
-    public Mono<String> handleIllegalArgument(IllegalArgumentException error) {
-        return Mono.just(error.getMessage());
+    @ExceptionHandler(AuthenticationRejectedException.class)
+    public Mono<ResponseEntity<ApiError>> handleAuthentication(AuthenticationRejectedException error) {
+        return response(HttpStatus.UNAUTHORIZED, "AUTHENTICATION_FAILED", "认证失败或会话已失效");
+    }
+
+    @ExceptionHandler(AccessDeniedException.class)
+    public Mono<ResponseEntity<ApiError>> handleForbidden(AccessDeniedException error) {
+        return response(HttpStatus.FORBIDDEN, "ACCESS_DENIED", "没有访问该资源的权限");
+    }
+
+    @ExceptionHandler({IllegalArgumentException.class, WebExchangeBindException.class})
+    public Mono<ResponseEntity<ApiError>> handleBadRequest(Exception error) {
+        String message = error instanceof IllegalArgumentException ? error.getMessage() : "请求参数不正确";
+        return response(HttpStatus.BAD_REQUEST, "INVALID_REQUEST", message);
     }
 
     @ExceptionHandler(IllegalStateException.class)
-    @ResponseStatus(HttpStatus.CONFLICT)
-    public Mono<String> handleConflict(IllegalStateException error) { return Mono.just(error.getMessage()); }
+    public Mono<ResponseEntity<ApiError>> handleConflict(IllegalStateException error) {
+        return response(HttpStatus.CONFLICT, "STATE_CONFLICT", error.getMessage());
+    }
+
+    @ExceptionHandler(DataAccessException.class)
+    public Mono<ResponseEntity<ApiError>> handleDependencyFailure(DataAccessException error) {
+        return response(HttpStatus.SERVICE_UNAVAILABLE, "IDENTITY_STORE_UNAVAILABLE", "身份服务暂不可用");
+    }
+
+    private static Mono<ResponseEntity<ApiError>> response(HttpStatus status, String code, String message) {
+        return Mono.just(ResponseEntity.status(status).body(new ApiError(code, message)));
+    }
 }
