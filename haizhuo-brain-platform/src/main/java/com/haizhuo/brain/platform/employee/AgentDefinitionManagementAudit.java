@@ -3,7 +3,7 @@ package com.haizhuo.brain.platform.employee;
 import java.time.Instant;
 import java.util.Objects;
 
-/** A redacted, successful management change record. Configuration bodies and credentials never belong here. */
+/** 脱敏后的管理变更成功记录。配置正文与凭据绝不能落在这里。 */
 public record AgentDefinitionManagementAudit(long actorUserId, String eventType, String targetType,
                                              String targetId, String requestId, String reason,
                                              String previousSummary, String newSummary, Instant occurredAt) {
