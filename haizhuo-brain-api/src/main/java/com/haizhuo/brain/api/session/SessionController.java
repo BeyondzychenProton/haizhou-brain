@@ -3,9 +3,12 @@ package com.haizhuo.brain.api.session;
 import com.haizhuo.brain.kernel.identity.SessionId;
 import com.haizhuo.brain.platform.session.AgentSession;
 import com.haizhuo.brain.platform.session.SessionApplicationService;
+import com.haizhuo.brain.platform.run.AgentRun;
 import com.haizhuo.brain.security.identity.AuthenticatedUser;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Positive;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Size;
 import java.time.Instant;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
@@ -41,13 +44,25 @@ public class SessionController {
         return blocking(() -> response(sessions.get(new SessionId(sessionId), user.userId())));
     }
 
+    @PostMapping("/{sessionId}/runs")
+    @ResponseStatus(HttpStatus.CREATED)
+    public Mono<RunResponse> createRun(@AuthenticationPrincipal AuthenticatedUser user, @PathVariable String sessionId,
+                                       @Valid @RequestBody CreateRunRequest request) {
+        return blocking(() -> runResponse(sessions.createRun(new SessionId(sessionId), user.userId(), request.clientRequestId(), request.input().trim())));
+    }
+
     private static SessionResponse response(AgentSession session) {
         return new SessionResponse(session.id().value(), session.employeeId(), session.status().name(), session.createdAt(), session.lastActiveAt());
+    }
+    private static RunResponse runResponse(AgentRun run) {
+        return new RunResponse(run.id().value(), run.sessionId().value(), run.state().name(), run.definitionVersionId(), run.createdAt());
     }
     private static <T> Mono<T> blocking(java.util.concurrent.Callable<T> callable) {
         return Mono.fromCallable(callable).subscribeOn(Schedulers.boundedElastic());
     }
 
     public record CreateSessionRequest(@Positive long employeeId) { }
+    public record CreateRunRequest(@NotBlank @Size(max = 128) String clientRequestId, @NotBlank @Size(max = 4000) String input) { }
     public record SessionResponse(String sessionId, long employeeId, String status, Instant createdAt, Instant lastActiveAt) { }
+    public record RunResponse(String runId, String sessionId, String state, long definitionVersionId, Instant createdAt) { }
 }

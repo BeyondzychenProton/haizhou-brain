@@ -11,7 +11,9 @@ import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.Optional;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Repository;
+import org.springframework.transaction.annotation.Transactional;
 
 /** Blocking JDBC adapter. Callers must keep it off the WebFlux event loop. */
 @Repository
@@ -36,6 +38,25 @@ public class JdbcSessionRunStore implements SessionRunStore {
                 sessionId.value(), owner.value()).stream().findFirst();
     }
 
+    @Override @Transactional
+    public AgentRun createRun(AgentRun run, String input) {
+        Optional<AgentRun> replay = findByRequest(run.userId(), run.clientRequestId());
+        if (replay.isPresent()) {
+            AgentRun existing = replay.get();
+            if (!existing.sessionId().equals(run.sessionId()) || !existing.inputDigest().equals(run.inputDigest())) throw new IllegalStateException("Client request id conflicts with an existing run");
+            return existing;
+        }
+        var sessions = jdbc.query("SELECT employee_id FROM platform_agent_session WHERE session_id=? AND user_id=? AND status='ACTIVE' FOR UPDATE", (rs, row) -> rs.getLong(1), run.sessionId().value(), run.userId().value());
+        if (sessions.isEmpty()) throw new IllegalArgumentException("Active session was not found");
+        if (sessions.get(0) != run.employeeId()) throw new IllegalStateException("Run employee does not match session employee");
+        try {
+            jdbc.update("INSERT INTO platform_agent_run(run_id,session_id,user_id,employee_id,definition_version_id,client_request_id,input_digest,state,created_at) VALUES(?,?,?,?,?,?,?,?,?)", run.id().value(), run.sessionId().value(), run.userId().value(), run.employeeId(), run.definitionVersionId(), run.clientRequestId(), run.inputDigest(), run.state().name(), Timestamp.from(run.createdAt()));
+        } catch (DuplicateKeyException error) { throw new IllegalStateException("Session already has an active run", error); }
+        jdbc.update("INSERT INTO platform_agent_run_event(run_id,sequence_no,event_type,content,created_at) VALUES(?,?,?,?,?)", run.id().value(), 1, "USER_INPUT", input, Timestamp.from(run.createdAt()));
+        jdbc.update("UPDATE platform_agent_session SET last_active_at=?,row_version=row_version+1 WHERE session_id=? AND user_id=?", Timestamp.from(run.createdAt()), run.sessionId().value(), run.userId().value());
+        return run;
+    }
+
     @Override
     public Optional<AgentRun> findRun(RunId runId, UserId owner) {
         return jdbc.query("SELECT run_id,session_id,user_id,employee_id,definition_version_id,client_request_id,input_digest,state,created_at,started_at,finished_at FROM platform_agent_run WHERE run_id=? AND user_id=?",
@@ -43,6 +64,10 @@ public class JdbcSessionRunStore implements SessionRunStore {
                         rs.getLong("employee_id"), rs.getLong("definition_version_id"), rs.getString("client_request_id"), rs.getString("input_digest"),
                         RunState.valueOf(rs.getString("state")), instant(rs.getTimestamp("created_at")), nullableInstant(rs.getTimestamp("started_at")),
                         nullableInstant(rs.getTimestamp("finished_at"))), runId.value(), owner.value()).stream().findFirst();
+    }
+
+    private Optional<AgentRun> findByRequest(UserId owner, String clientRequestId) {
+        return jdbc.query("SELECT run_id,session_id,user_id,employee_id,definition_version_id,client_request_id,input_digest,state,created_at,started_at,finished_at FROM platform_agent_run WHERE user_id=? AND client_request_id=?", (rs, row) -> new AgentRun(new RunId(rs.getString("run_id")), new SessionId(rs.getString("session_id")), new UserId(rs.getLong("user_id")), rs.getLong("employee_id"), rs.getLong("definition_version_id"), rs.getString("client_request_id"), rs.getString("input_digest"), RunState.valueOf(rs.getString("state")), instant(rs.getTimestamp("created_at")), nullableInstant(rs.getTimestamp("started_at")), nullableInstant(rs.getTimestamp("finished_at"))), owner.value(), clientRequestId).stream().findFirst();
     }
 
     private static Instant instant(Timestamp timestamp) { return timestamp.toInstant(); }

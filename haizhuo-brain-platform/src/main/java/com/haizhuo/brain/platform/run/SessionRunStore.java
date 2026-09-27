@@ -12,5 +12,8 @@ public interface SessionRunStore {
 
     Optional<AgentSession> findSession(SessionId sessionId, UserId owner);
 
+    /** Atomically claims the only active Run slot for the owned Session, or returns an idempotent replay. */
+    AgentRun createRun(AgentRun run, String input);
+
     Optional<AgentRun> findRun(RunId runId, UserId owner);
 }
