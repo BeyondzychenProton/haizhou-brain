@@ -53,5 +53,7 @@ haizhuo:
     agent:
       provider: dashscope
       primary-model: qwen-plus
+    run-worker:
+      enabled: false
     persistence:
       enabled: true
