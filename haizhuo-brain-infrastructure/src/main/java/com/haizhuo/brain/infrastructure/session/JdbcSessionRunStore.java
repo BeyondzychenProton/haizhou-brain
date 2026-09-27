@@ -6,6 +6,7 @@ import com.haizhuo.brain.kernel.identity.UserId;
 import com.haizhuo.brain.platform.run.AgentRun;
 import com.haizhuo.brain.platform.run.RunState;
 import com.haizhuo.brain.platform.run.RunEvent;
+import com.haizhuo.brain.platform.run.ClaimedRun;
 import com.haizhuo.brain.platform.run.SessionRunStore;
 import com.haizhuo.brain.platform.session.AgentSession;
 import java.sql.Timestamp;
@@ -70,6 +71,17 @@ public class JdbcSessionRunStore implements SessionRunStore {
     @Override public java.util.List<RunEvent> findEvents(RunId runId, UserId owner, int afterSequence, int limit) {
         return jdbc.query("SELECT event.sequence_no,event.event_type,event.content,event.created_at FROM platform_agent_run_event event JOIN platform_agent_run run ON run.run_id=event.run_id WHERE event.run_id=? AND run.user_id=? AND event.sequence_no>? ORDER BY event.sequence_no LIMIT ?", (rs, row) -> new RunEvent(runId, rs.getInt("sequence_no"), rs.getString("event_type"), rs.getString("content"), instant(rs.getTimestamp("created_at"))), runId.value(), owner.value(), afterSequence, limit);
     }
+
+    @Override @Transactional
+    public Optional<ClaimedRun> claimNextQueuedRun() {
+        Instant now = Instant.now();
+        var claimed = jdbc.query("SELECT r.run_id,r.session_id,r.user_id,r.employee_id,r.definition_version_id,r.client_request_id,r.input_digest,r.created_at,e.display_name,v.instructions,v.model_provider,v.model_name,i.content FROM platform_agent_run r JOIN digital_employee e ON e.id=r.employee_id JOIN agent_definition_version v ON v.id=r.definition_version_id JOIN platform_agent_run_event i ON i.run_id=r.run_id AND i.sequence_no=1 WHERE r.state='QUEUED' ORDER BY r.created_at LIMIT 1 FOR UPDATE SKIP LOCKED", (rs,n) -> new ClaimedRun(new AgentRun(new RunId(rs.getString("run_id")),new SessionId(rs.getString("session_id")),new UserId(rs.getLong("user_id")),rs.getLong("employee_id"),rs.getLong("definition_version_id"),rs.getString("client_request_id"),rs.getString("input_digest"),RunState.RUNNING,instant(rs.getTimestamp("created_at")),now,null),rs.getString("display_name"),rs.getString("instructions"),rs.getString("model_provider"),rs.getString("model_name"),rs.getString("content"))).stream().findFirst();
+        claimed.ifPresent(run -> { jdbc.update("UPDATE platform_agent_run SET state='RUNNING',started_at=? WHERE run_id=? AND state='QUEUED'",Timestamp.from(now),run.run().id().value()); jdbc.update("INSERT INTO platform_agent_run_event(run_id,sequence_no,event_type,content,created_at) VALUES(?,2,'RUN_STARTED','执行已开始',?)",run.run().id().value(),Timestamp.from(now)); });
+        return claimed;
+    }
+    @Override @Transactional public void complete(RunId id,String result) { finish(id,"SUCCEEDED","RUN_COMPLETED",result); }
+    @Override @Transactional public void fail(RunId id,String reason) { finish(id,"FAILED","RUN_FAILED",reason); }
+    private void finish(RunId id,String state,String type,String text) { Instant now=Instant.now(); jdbc.update("UPDATE platform_agent_run SET state=?,finished_at=? WHERE run_id=? AND state='RUNNING'",state,Timestamp.from(now),id.value()); jdbc.update("INSERT INTO platform_agent_run_event(run_id,sequence_no,event_type,content,created_at) SELECT ?,COALESCE(MAX(sequence_no),0)+1,?,?,? FROM platform_agent_run_event WHERE run_id=?",id.value(),type,text,Timestamp.from(now),id.value()); }
 
     private Optional<AgentRun> findByRequest(UserId owner, String clientRequestId) {
         return jdbc.query("SELECT run_id,session_id,user_id,employee_id,definition_version_id,client_request_id,input_digest,state,created_at,started_at,finished_at FROM platform_agent_run WHERE user_id=? AND client_request_id=?", (rs, row) -> new AgentRun(new RunId(rs.getString("run_id")), new SessionId(rs.getString("session_id")), new UserId(rs.getLong("user_id")), rs.getLong("employee_id"), rs.getLong("definition_version_id"), rs.getString("client_request_id"), rs.getString("input_digest"), RunState.valueOf(rs.getString("state")), instant(rs.getTimestamp("created_at")), nullableInstant(rs.getTimestamp("started_at")), nullableInstant(rs.getTimestamp("finished_at"))), owner.value(), clientRequestId).stream().findFirst();

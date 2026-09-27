@@ -19,4 +19,8 @@ public interface SessionRunStore {
     Optional<AgentRun> findRun(RunId runId, UserId owner);
 
     List<RunEvent> findEvents(RunId runId, UserId owner, int afterSequence, int limit);
+
+    Optional<ClaimedRun> claimNextQueuedRun();
+    void complete(RunId runId, String result);
+    void fail(RunId runId, String reason);
 }
