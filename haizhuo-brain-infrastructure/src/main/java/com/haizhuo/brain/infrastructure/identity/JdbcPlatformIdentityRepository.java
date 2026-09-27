@@ -21,7 +21,7 @@ import org.springframework.jdbc.support.GeneratedKeyHolder;
 import org.springframework.jdbc.support.KeyHolder;
 import org.springframework.stereotype.Repository;
 
-/** Blocking JDBC adapter. WebFlux callers schedule service calls on boundedElastic before entering it. */
+/** 阻塞式 JDBC 适配器。WebFlux 调用方需先把服务调用调度到 boundedElastic 再进入本类。 */
 @Repository
 public class JdbcPlatformIdentityRepository implements PlatformIdentityRepository {
     private static final RowMapper<PlatformUser> USER_MAPPER = (rs, row) -> new PlatformUser(

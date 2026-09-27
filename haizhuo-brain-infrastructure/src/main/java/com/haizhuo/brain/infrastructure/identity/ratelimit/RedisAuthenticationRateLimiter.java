@@ -8,7 +8,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
 
-/** Fixed-window Redis throttle; keys contain SHA-256 digests rather than mobile or token source text. */
+/** 基于 Redis 的固定窗口限流；键里放的是 SHA-256 摘要，而不是手机号或令牌原文。 */
 @Component
 @ConditionalOnProperty(prefix = "haizhuo.brain.security.rate-limit", name = "enabled", havingValue = "true", matchIfMissing = true)
 public class RedisAuthenticationRateLimiter implements AuthenticationRateLimiter {

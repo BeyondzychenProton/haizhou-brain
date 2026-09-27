@@ -3,10 +3,7 @@ package com.haizhuo.brain.infrastructure.employee;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.haizhuo.brain.kernel.identity.TenantId;
-import com.haizhuo.brain.platform.capability.CapabilityExclusion;
-import com.haizhuo.brain.platform.capability.EffectiveCapabilitySet;
 import com.haizhuo.brain.platform.employee.*;
-import com.haizhuo.brain.runtime.api.model.RuntimeCapability;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.sql.PreparedStatement;
@@ -25,7 +22,7 @@ import org.springframework.stereotype.Repository;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
-/** MySQL implementation for published agent definitions, grants, runtime snapshots and tool audit. */
+/** 已发布 Agent 定义、授权、运行时快照与工具审计的 MySQL 实现。 */
 @Repository
 @Profile("!test")
 public class JdbcAgentDefinitionRepository implements AgentDefinitionRepository {
@@ -64,13 +61,19 @@ public class JdbcAgentDefinitionRepository implements AgentDefinitionRepository 
     }
 
     @Override public List<CapabilityCatalogEntry> listCapabilities() {
-        return jdbc.query("SELECT d.capability_code,d.capability_type,d.status,r.revision,r.display_name,r.description,r.tool_name,r.implementation_key,r.business_action,r.input_schema_json FROM capability_definition d JOIN capability_revision r ON r.capability_code=d.capability_code ORDER BY d.capability_code,r.revision",
+        return jdbc.query("SELECT r.capability_revision_id,d.capability_code,d.capability_type,d.status,r.revision,r.display_name,r.description,r.tool_name,r.implementation_key,r.business_action,r.input_schema_json,r.requires_confirmation FROM capability_definition d JOIN capability_revision r ON r.capability_code=d.capability_code ORDER BY d.capability_code,r.revision",
                 (rs, n) -> mapCapability(rs));
     }
 
     @Override public Optional<CapabilityCatalogEntry> findCapability(String code, String revision) {
-        List<CapabilityCatalogEntry> rows = jdbc.query("SELECT d.capability_code,d.capability_type,d.status,r.revision,r.display_name,r.description,r.tool_name,r.implementation_key,r.business_action,r.input_schema_json FROM capability_definition d JOIN capability_revision r ON r.capability_code=d.capability_code WHERE d.capability_code=? AND r.revision=?",
+        List<CapabilityCatalogEntry> rows = jdbc.query("SELECT r.capability_revision_id,d.capability_code,d.capability_type,d.status,r.revision,r.display_name,r.description,r.tool_name,r.implementation_key,r.business_action,r.input_schema_json,r.requires_confirmation FROM capability_definition d JOIN capability_revision r ON r.capability_code=d.capability_code WHERE d.capability_code=? AND r.revision=?",
                 (rs, n) -> mapCapability(rs), code, revision);
+        return rows.stream().findFirst();
+    }
+
+    @Override public Optional<CapabilityCatalogEntry> findCapabilityByRevisionId(long capabilityRevisionId) {
+        List<CapabilityCatalogEntry> rows = jdbc.query("SELECT r.capability_revision_id,d.capability_code,d.capability_type,d.status,r.revision,r.display_name,r.description,r.tool_name,r.implementation_key,r.business_action,r.input_schema_json,r.requires_confirmation FROM capability_definition d JOIN capability_revision r ON r.capability_code=d.capability_code WHERE r.capability_revision_id=?",
+                (rs, n) -> mapCapability(rs), capabilityRevisionId);
         return rows.stream().findFirst();
     }
 
@@ -187,37 +190,6 @@ public class JdbcAgentDefinitionRepository implements AgentDefinitionRepository 
         });
     }
 
-    @Override public void saveEffectiveCapabilitySet(EffectiveCapabilitySet set) {
-        tx.executeWithoutResult(status -> {
-            jdbc.update("INSERT INTO run_effective_capability_set(run_id,definition_version_id,user_id,snapshot_hash,resolved_at) VALUES(?,?,?,?,?) ON DUPLICATE KEY UPDATE definition_version_id=VALUES(definition_version_id),user_id=VALUES(user_id),snapshot_hash=VALUES(snapshot_hash),resolved_at=VALUES(resolved_at)",
-                    set.runId(), set.definitionVersionId(), set.userId(), set.snapshotHash(), Timestamp.from(set.resolvedAt()));
-            jdbc.update("DELETE FROM run_effective_capability_item WHERE run_id=?", set.runId());
-            for (RuntimeCapability capability : set.allowedCapabilities()) {
-                jdbc.update("INSERT INTO run_effective_capability_item(run_id,capability_code,capability_revision,allowed,reason_code,runtime_capability_json) VALUES(?,?,?,TRUE,NULL,?)",
-                        set.runId(), capability.referenceId(), capability.revision(), writeJson(capability));
-            }
-            for (CapabilityExclusion exclusion : set.exclusions()) {
-                jdbc.update("INSERT INTO run_effective_capability_item(run_id,capability_code,capability_revision,allowed,reason_code,runtime_capability_json) VALUES(?,?,?,FALSE,?,NULL)",
-                        set.runId(), exclusion.capabilityCode(), exclusion.revision(), exclusion.reasonCode());
-            }
-        });
-    }
-
-    @Override public Optional<EffectiveCapabilitySet> findEffectiveCapabilitySet(String runId) {
-        List<EffectiveCapabilitySet> headers = jdbc.query("SELECT definition_version_id,user_id,snapshot_hash,resolved_at FROM run_effective_capability_set WHERE run_id=?",
-                (rs, n) -> new EffectiveCapabilitySet(runId, rs.getLong(1), rs.getLong(2), rs.getString(3), List.of(), List.of(), rs.getTimestamp(4).toInstant()), runId);
-        if (headers.isEmpty()) return Optional.empty();
-        EffectiveCapabilitySet header = headers.get(0);
-        List<RuntimeCapability> allowed = new ArrayList<>();
-        List<CapabilityExclusion> excluded = new ArrayList<>();
-        jdbc.query("SELECT capability_code,capability_revision,allowed,reason_code,runtime_capability_json FROM run_effective_capability_item WHERE run_id=? ORDER BY capability_code",
-                rs -> {
-                    if (rs.getBoolean("allowed")) allowed.add(readRuntimeCapability(rs.getString("runtime_capability_json")));
-                    else excluded.add(new CapabilityExclusion(rs.getString("capability_code"), rs.getString("capability_revision"), rs.getString("reason_code")));
-                }, runId);
-        return Optional.of(new EffectiveCapabilitySet(runId, header.definitionVersionId(), header.userId(), header.snapshotHash(), allowed, excluded, header.resolvedAt()));
-    }
-
     @Override public void recordToolInvocation(ToolInvocationAudit audit) {
         jdbc.update("INSERT INTO tool_invocation_audit(invocation_id,run_id,capability_code,capability_revision,user_id,business_action,arguments_hash,decision,result_status,result_summary,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 audit.invocationId(), audit.runId(), audit.capabilityCode(), audit.capabilityRevision(), audit.userId(), audit.businessAction(),
@@ -279,9 +251,11 @@ public class JdbcAgentDefinitionRepository implements AgentDefinitionRepository 
         Map<String, Object> schema;
         try { schema = json.readValue(rs.getString("input_schema_json"), JSON_MAP); }
         catch (Exception e) { throw new IllegalStateException("Invalid capability input schema JSON", e); }
-        return new CapabilityCatalogEntry(rs.getString("capability_code"), CapabilityBinding.CapabilityType.valueOf(rs.getString("capability_type")),
+        return new CapabilityCatalogEntry(rs.getLong("capability_revision_id"), rs.getString("capability_code"),
+                CapabilityBinding.CapabilityType.valueOf(rs.getString("capability_type")),
                 rs.getString("revision"), rs.getString("display_name"), rs.getString("description"), rs.getString("tool_name"),
-                rs.getString("implementation_key"), rs.getString("business_action"), schema, "ACTIVE".equals(rs.getString("status")));
+                rs.getString("implementation_key"), rs.getString("business_action"), schema,
+                "ACTIVE".equals(rs.getString("status")), rs.getBoolean("requires_confirmation"));
     }
     private DefinitionRow definitionRow(ResultSet rs) throws SQLException {
         return new DefinitionRow(rs.getLong("employee_id"), rs.getLong("tenant_id"), rs.getString("employee_code"), rs.getString("display_name"),
@@ -290,9 +264,6 @@ public class JdbcAgentDefinitionRepository implements AgentDefinitionRepository 
     }
     private String writeJson(Object value) {
         try { return json.writeValueAsString(value); } catch (Exception e) { throw new IllegalStateException("Could not serialize runtime capability snapshot", e); }
-    }
-    private RuntimeCapability readRuntimeCapability(String value) {
-        try { return json.readValue(value, RuntimeCapability.class); } catch (Exception e) { throw new IllegalStateException("Could not read runtime capability snapshot", e); }
     }
     private String definitionHash(AgentDefinitionDraft draft) {
         String caps = draft.capabilities().stream().map(c -> c.capabilityCode() + "@" + c.revision()).sorted().reduce((a,b) -> a + "|" + b).orElse("");
