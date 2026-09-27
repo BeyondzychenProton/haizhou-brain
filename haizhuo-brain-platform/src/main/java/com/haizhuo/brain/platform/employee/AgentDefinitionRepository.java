@@ -1,7 +1,6 @@
 package com.haizhuo.brain.platform.employee;
 
 import com.haizhuo.brain.kernel.identity.TenantId;
-import com.haizhuo.brain.platform.capability.EffectiveCapabilitySet;
 import java.util.List;
 import java.util.Optional;
 
@@ -10,6 +9,7 @@ public interface AgentDefinitionRepository extends EmployeeCatalog {
     Optional<AgentDefinitionDraft> findDraft(long employeeId);
     List<CapabilityCatalogEntry> listCapabilities();
     Optional<CapabilityCatalogEntry> findCapability(String capabilityCode, String revision);
+    Optional<CapabilityCatalogEntry> findCapabilityByRevisionId(long capabilityRevisionId);
 
     AgentDefinitionDraft saveDraft(long employeeId, int expectedDraftRevision, String instructions,
                                    String modelProvider, String modelName,
@@ -20,8 +20,6 @@ public interface AgentDefinitionRepository extends EmployeeCatalog {
     boolean isCapabilityEnabled(String capabilityCode, String revision);
     boolean hasUserCapabilityGrant(long userId, String capabilityCode);
     void setUserCapabilityGrant(long userId, String capabilityCode, boolean enabled, AgentDefinitionManagementAudit audit);
-    void saveEffectiveCapabilitySet(EffectiveCapabilitySet set);
-    Optional<EffectiveCapabilitySet> findEffectiveCapabilitySet(String runId);
     void recordToolInvocation(ToolInvocationAudit audit);
 
     default Optional<PublishedEmployee> findPublished(long employeeId) {

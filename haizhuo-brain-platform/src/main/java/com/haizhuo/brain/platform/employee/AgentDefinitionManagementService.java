@@ -1,18 +1,22 @@
 package com.haizhuo.brain.platform.employee;
 
-import com.haizhuo.brain.runtime.api.RuntimeCapabilityProviderCatalog;
+import com.haizhuo.brain.platform.employee.runtime.HarnessDefinitionPublisher;
+import com.haizhuo.brain.platform.tool.CapabilityExecutorRegistry;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 public class AgentDefinitionManagementService {
     private final AgentDefinitionRepository repository;
-    private final RuntimeCapabilityProviderCatalog providers;
+    private final CapabilityExecutorRegistry executors;
+    private final HarnessDefinitionPublisher publisher;
 
     public AgentDefinitionManagementService(AgentDefinitionRepository repository,
-                                            RuntimeCapabilityProviderCatalog providers) {
+                                            CapabilityExecutorRegistry executors,
+                                            HarnessDefinitionPublisher publisher) {
         this.repository = repository;
-        this.providers = providers;
+        this.executors = executors;
+        this.publisher = publisher;
     }
 
     public List<CapabilityCatalogEntry> listCapabilities() { return repository.listCapabilities(); }
@@ -58,7 +62,7 @@ public class AgentDefinitionManagementService {
             }
             if (!entry.enabled() || !repository.isCapabilityEnabled(entry.capabilityCode(), entry.revision()))
                 issues.add(new ValidationIssue("CAPABILITY_DISABLED", selection.capabilityCode() + " 当前已停用"));
-            if (!providers.supports(entry.implementationKey(), entry.capabilityCode()))
+            if (!executors.supports(entry.implementationKey(), entry.capabilityCode()))
                 issues.add(new ValidationIssue("PROVIDER_UNAVAILABLE", selection.capabilityCode() + " 没有可用的运行时提供者"));
             if (entry.toolName() == null || entry.toolName().isBlank() || entry.inputSchema().isEmpty())
                 issues.add(new ValidationIssue("TOOL_SCHEMA_INVALID", selection.capabilityCode() + " 缺少工具名称或参数 Schema"));
@@ -69,7 +73,9 @@ public class AgentDefinitionManagementService {
     public PublishedEmployee publish(long employeeId, int expectedRevision, String requestId, long actorId, String reason) {
         ValidationResult validation = validateDraft(employeeId);
         if (!validation.publishable()) throw new DefinitionNotPublishableException(validation);
-        return repository.publish(employeeId, expectedRevision,
+        // Tx-01（规格 §64）：版本插入 + 运行时能力包编译 + 指针切换都经由 publisher 完成，
+        // 因此已发布的定义一定带有自己的能力包。
+        return publisher.publish(employeeId, expectedRevision,
                 AgentDefinitionManagementAudit.pending(actorId, "DEFINITION_PUBLISHED", "DIGITAL_EMPLOYEE",
                         String.valueOf(employeeId), requestId, reason));
     }
