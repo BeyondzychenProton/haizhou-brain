@@ -14,6 +14,7 @@ application-secrets.yml
 # 运行期产物：应用日志与 Harness 物化出来的本地工作区
 logs/
 /haizhuo-brain-runtime-agentscope/haizhuo/
+/data/definition-workspace/
 
 # 本地 Agent 工具的临时记忆目录
 .workbuddy/
