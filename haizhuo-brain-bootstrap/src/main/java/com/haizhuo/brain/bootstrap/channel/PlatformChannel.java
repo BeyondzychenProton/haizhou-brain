@@ -36,7 +36,15 @@ public class PlatformChannel implements Channel {
     private final ChannelAccountDirectory accounts;
     private final ChannelIngressService ingress;
     private final ChannelOutboundConsumer outbound;
-    private final ChannelConfig config;
+
+    /**
+     * 渠道配置由运行时装配层提供，并可在管理侧改动绑定后热更新，
+     * 因此不是 final；{@code ChannelManager} 可能在其它线程读取它。
+     */
+    private volatile ChannelConfig config;
+
+    /** 启动状态。ChannelManager 没有单渠道的启动判断，因此由渠道自己记账保证幂等。 */
+    private volatile boolean started;
 
     /**
      * @param outbound 框架侧的直接投递落点；平台侧的出站投递走 outbox worker，
@@ -59,6 +67,47 @@ public class PlatformChannel implements Channel {
     @Override
     public ChannelConfig config() {
         return config;
+    }
+
+    @Override
+    public void start() {
+        // ChannelManager#startAll 无"是否已启动"判断，装配层每次刷新都会调用它，
+        // 因此这里保证幂等，避免重复启动把同一批日志刷成噪音。
+        if (started) {
+            return;
+        }
+        started = true;
+        ChannelConfig current = config;
+        log.info("Channel {} started: sessionScope={}, routes={}", channelId,
+                current == null || current.dmScope() == null ? null : current.dmScope(),
+                current == null || current.bindings() == null ? 0 : current.bindings().size());
+    }
+
+    @Override
+    public void stop() {
+        started = false;
+        log.info("Channel {} stopped", channelId);
+    }
+
+    /**
+     * 框架提供的路由配置热更新钩子：管理侧改了绑定或会话粒度后由装配层调用，
+     * 避免为了换一份配置而重建渠道实例。
+     *
+     * <p>注意入站受理始终按 bindingId 实时查库，因此这里更新的是注册表与配置的可见性，
+     * 不是受理行为的前提；配置不匹配时返回 false，由装配层换实例兜底。</p>
+     */
+    @Override
+    public boolean applyRoutingConfig(ChannelConfig next) {
+        if (next == null || !channelId.equals(next.channelId())) {
+            return false;
+        }
+        ChannelConfig previous = this.config;
+        this.config = next;
+        log.info("Channel {} routing config updated: routes {} -> {}, sessionScope {} -> {}", channelId,
+                previous == null || previous.bindings() == null ? 0 : previous.bindings().size(),
+                next.bindings() == null ? 0 : next.bindings().size(),
+                previous == null ? null : previous.dmScope(), next.dmScope());
+        return true;
     }
 
     @Override

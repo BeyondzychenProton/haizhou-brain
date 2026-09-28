@@ -16,6 +16,7 @@ import com.haizhuo.brain.platform.channel.ChannelAcceptance;
 import com.haizhuo.brain.platform.channel.ChannelAccountBinding;
 import com.haizhuo.brain.platform.channel.ChannelAccountDirectory;
 import com.haizhuo.brain.platform.channel.ChannelIngressService;
+import com.haizhuo.brain.platform.channel.SessionScope;
 import java.util.HexFormat;
 import java.util.Optional;
 import javax.crypto.Mac;
@@ -36,7 +37,7 @@ class ChannelWebhookControllerTest {
     private static final String SECRET = "e2e-webhook-secret";
     private static final String PROVIDER = "simulated";
     private static final ChannelAccountBinding BINDING = new ChannelAccountBinding("sim-account", new TenantId(1),
-            PROVIDER, "sim-key", "env:sim", 2L, true);
+            PROVIDER, "sim-key", "env:sim", 2L, SessionScope.PER_PEER, true);
 
     @Mock ChannelIngressService ingress;
     @Mock ChannelAccountDirectory accounts;

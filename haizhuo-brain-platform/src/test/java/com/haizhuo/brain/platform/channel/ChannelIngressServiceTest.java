@@ -20,7 +20,8 @@ import org.junit.jupiter.api.Test;
 class ChannelIngressServiceTest {
     private static final TenantId TENANT = new TenantId(7);
     private static final ChannelAccountBinding BINDING =
-            new ChannelAccountBinding("feishu-main", TENANT, "feishu", "cli_app", "env:feishu-main", 11, true);
+            new ChannelAccountBinding("feishu-main", TENANT, "feishu", "cli_app", "env:feishu-main", 11,
+                    SessionScope.PER_PEER, true);
 
     @Test
     void providerMismatchCannotReachInbox() {

@@ -15,6 +15,7 @@ import com.haizhuo.brain.platform.channel.ChannelDeliveryWorker;
 import com.haizhuo.brain.platform.channel.ChannelIngressService;
 import com.haizhuo.brain.platform.channel.ChannelOutboundSender;
 import com.haizhuo.brain.platform.channel.ChannelReplyEnqueuer;
+import com.haizhuo.brain.platform.channel.SessionScope;
 import com.haizhuo.brain.platform.channel.VerifiedChannelMessage;
 import com.haizhuo.brain.kernel.identity.TenantId;
 import com.haizhuo.brain.kernel.identity.UserId;
@@ -100,7 +101,7 @@ class ChannelIngressProbe {
     @Test
     void inboundIsDeduplicatedAndOutboundFlowsThroughTheOutbox() {
         ChannelAccountBinding binding = new ChannelAccountBinding(BINDING, new TenantId(1), PROVIDER,
-                "probe-account", "env:probe", EMPLOYEE, true);
+                "probe-account", "env:probe", EMPLOYEE, SessionScope.PER_PEER, true);
         assertTrue(binding.enabled(), "探针绑定必须启用");
 
         // 1) 首次受理：建会话、建 Run、写收件箱
@@ -136,7 +137,7 @@ class ChannelIngressProbe {
     @Test
     void replyIsEnqueuedOnceAndUncertainDeliveryIsNeverResent() {
         ChannelAccountBinding binding = new ChannelAccountBinding(BINDING, new TenantId(1), PROVIDER,
-                "probe-account", "env:probe", EMPLOYEE, true);
+                "probe-account", "env:probe", EMPLOYEE, SessionScope.PER_PEER, true);
         ChannelAcceptance accepted = ingress.accept(message("event-reply"));
         RunId runId = accepted.runId().orElseThrow();
 

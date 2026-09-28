@@ -4,6 +4,8 @@ import com.haizhuo.brain.platform.employee.AgentDefinitionManagementService;
 import com.haizhuo.brain.platform.employee.AgentDefinitionRepository;
 import com.haizhuo.brain.security.identity.ratelimit.AuthenticationRateLimiter;
 import org.junit.jupiter.api.Test;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.ActiveProfiles;
@@ -33,6 +35,27 @@ class ApplicationContextSmokeTest {
         client.get().uri("/api/v1/auth/csrf").exchange().expectStatus().isOk()
                 .expectBody().jsonPath("$.headerName").isEqualTo("X-XSRF-TOKEN")
                 .jsonPath("$.token").isNotEmpty();
+    }
+
+    /**
+     * CSRF 豁免必须只落在渠道回调上，且不能破坏"安全方法不参与校验"这条默认语义。
+     * 这三条断言各自对应一种回归：豁免失效、豁免过度、以及授权被 CSRF 抢先。
+     */
+    @Test
+    void csrfExemptionIsLimitedToChannelCallbacksAndLeavesSafeMethodsAlone() {
+        WebTestClient client = WebTestClient.bindToServer().baseUrl("http://localhost:" + port).build();
+
+        // 安全方法不参与 CSRF 校验：匿名也必须能取到 token。
+        // 一旦匹配器被整体替换（丢掉默认语义），这里会变成 403。
+        client.get().uri("/api/v1/auth/csrf").exchange().expectStatus().isOk();
+        // 受保护资源对匿名请求仍应是 401，而不是被 CSRF 过滤抢先判成 403。
+        client.get().uri("/api/v1/employees").exchange().expectStatus().isUnauthorized();
+        // 渠道回调豁免 CSRF，无 token 的 POST 也能抵达控制器；未配置验签密钥时控制器返回 503。
+        // 若豁免失效，请求会在 CSRF 过滤处被挡下并返回 403。
+        client.post().uri("/api/v1/channels/simulated/webhook")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("{}")
+                .exchange().expectStatus().isEqualTo(HttpStatus.SERVICE_UNAVAILABLE.value());
     }
 
     @TestConfiguration

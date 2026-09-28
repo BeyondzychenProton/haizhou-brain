@@ -24,7 +24,9 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.server.SecurityWebFilterChain;
 import org.springframework.security.web.server.context.ServerSecurityContextRepository;
 import org.springframework.security.web.server.context.WebSessionServerSecurityContextRepository;
+import org.springframework.security.web.server.csrf.CsrfWebFilter;
 import org.springframework.security.web.server.csrf.CookieServerCsrfTokenRepository;
+import org.springframework.security.web.server.util.matcher.AndServerWebExchangeMatcher;
 import org.springframework.security.web.server.util.matcher.ServerWebExchangeMatcher;
 import org.springframework.web.server.ServerWebExchange;
 import org.springframework.web.server.WebFilter;
@@ -38,6 +40,25 @@ import org.springframework.security.core.context.ReactiveSecurityContextHolder;
 @Configuration
 @EnableWebFluxSecurity
 public class PlatformSecurityConfiguration {
+
+    /**
+     * 渠道回调的 CSRF 豁免条件。
+     *
+     * <p>回调没有浏览器会话，无法持有 CSRF token，它的自证方式是请求签名。但这里
+     * <b>不能整体替换匹配器</b>：框架默认匹配器还承担"安全方法（GET/HEAD/OPTIONS/TRACE）
+     * 不参与校验"这条语义，一旦替换掉，匿名 GET 也会被要求带 token——连
+     * {@code /api/v1/auth/csrf} 本身都取不到 token（返回 403），且 CSRF 过滤在授权之前，
+     * 本应 401 的匿名请求也会变成 403。因此这里只追加豁免，默认语义交给
+     * {@link CsrfWebFilter#DEFAULT_CSRF_MATCHER}。</p>
+     */
+    private static final ServerWebExchangeMatcher CHANNEL_CALLBACK_CSRF_EXEMPTION = exchange -> {
+        String path = exchange.getRequest().getPath().value();
+        boolean webhook = path.startsWith("/api/v1/channels/") && path.endsWith("/webhook");
+        return webhook
+                ? ServerWebExchangeMatcher.MatchResult.notMatch()
+                : ServerWebExchangeMatcher.MatchResult.match();
+    };
+
     @Bean
     PasswordEncoder passwordEncoder() {
         return PasswordEncoderFactories.createDelegatingPasswordEncoder();
@@ -69,14 +90,8 @@ public class PlatformSecurityConfiguration {
         return http
                 .securityContextRepository(securityContextRepository)
                 .csrf(spec -> spec.csrfTokenRepository(csrf)
-                        // 渠道回调没有浏览器会话，无法持有 CSRF token；它的自证方式是请求签名，
-                        // 因此这里必须豁免 CSRF，与上面的 permitAll 和控制器内的强制验签成对出现。
-                        .requireCsrfProtectionMatcher(exchange -> {
-                            String path = exchange.getRequest().getPath().value();
-                            return path.startsWith("/api/v1/channels/") && path.endsWith("/webhook")
-                                    ? ServerWebExchangeMatcher.MatchResult.notMatch()
-                                    : ServerWebExchangeMatcher.MatchResult.match();
-                        }))
+                        .requireCsrfProtectionMatcher(new AndServerWebExchangeMatcher(
+                                CsrfWebFilter.DEFAULT_CSRF_MATCHER, CHANNEL_CALLBACK_CSRF_EXEMPTION)))
                 .addFilterAfter(platformIdentityRefreshFilter, SecurityWebFiltersOrder.AUTHENTICATION)
                 .authorizeExchange(spec -> spec
                         .pathMatchers("/actuator/health/**", "/api/v1/auth/csrf", "/api/v1/auth/login", "/api/v1/auth/activate").permitAll()
