@@ -2,6 +2,7 @@ package com.haizhuo.brain.api.error;
 
 import com.haizhuo.brain.platform.employee.AgentDefinitionManagementService;
 import com.haizhuo.brain.security.identity.AuthenticationRejectedException;
+import jakarta.validation.ConstraintViolationException;
 import org.springframework.dao.DataAccessException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -9,6 +10,7 @@ import org.springframework.security.access.AccessDeniedException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.bind.support.WebExchangeBindException;
+import org.springframework.web.method.annotation.HandlerMethodValidationException;
 import reactor.core.publisher.Mono;
 
 @RestControllerAdvice
@@ -27,6 +29,16 @@ public class GlobalExceptionHandler {
     public Mono<ResponseEntity<ApiError>> handleBadRequest(Exception error) {
         String message = error instanceof IllegalArgumentException ? error.getMessage() : "请求参数不正确";
         return response(HttpStatus.BAD_REQUEST, "INVALID_REQUEST", message);
+    }
+
+    /**
+     * 方法参数上的约束（{@code @Min} / {@code @Max} / 枚举等）校验失败。
+     * 若不在此收口，异常会冒泡到安全过滤链的兜底分支，被统一报成 503，
+     * 调用方因此无法区分「参数错」与「依赖不可用」。
+     */
+    @ExceptionHandler({HandlerMethodValidationException.class, ConstraintViolationException.class})
+    public Mono<ResponseEntity<ApiError>> handleParameterValidation(Exception error) {
+        return response(HttpStatus.BAD_REQUEST, "INVALID_REQUEST", "请求参数不正确");
     }
 
     @ExceptionHandler(IllegalStateException.class)

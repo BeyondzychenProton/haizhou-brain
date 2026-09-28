@@ -95,17 +95,22 @@ public class PlatformSecurityConfiguration {
                     if (isPublicPath(exchange) || !(authentication != null && authentication.getPrincipal() instanceof PlatformSessionPrincipal session)) {
                         return chain.filter(exchange);
                     }
+                    // 兜底只包住身份刷新本身：下游（控制器与业务层）的异常一旦被这里吞掉，
+                    // 会被统一报成 503，调用方就无法区分「参数错」与「依赖不可用」。
                     return Mono.fromCallable(() -> identityService.refresh(new UserId(session.userId()), session.authVersion()))
                             .subscribeOn(Schedulers.boundedElastic())
+                            .onErrorResume(AuthenticationRejectedException.class,
+                                    error -> invalidateAndComplete(exchange, HttpStatus.UNAUTHORIZED)
+                                            .then(Mono.<AuthenticatedUser>empty()))
+                            .onErrorResume(error -> complete(exchange, HttpStatus.SERVICE_UNAVAILABLE)
+                                            .then(Mono.<AuthenticatedUser>empty()))
                             .flatMap(user -> {
                                 if (user.mustChangePassword() && !isAllowedDuringForcedPasswordChange(exchange)) {
                                     return complete(exchange, HttpStatus.FORBIDDEN);
                                 }
                                 Authentication refreshed = new UsernamePasswordAuthenticationToken(user, null, authorities(user));
                                 return chain.filter(exchange).contextWrite(ReactiveSecurityContextHolder.withAuthentication(refreshed));
-                            })
-                            .onErrorResume(AuthenticationRejectedException.class, error -> invalidateAndComplete(exchange, HttpStatus.UNAUTHORIZED))
-                            .onErrorResume(error -> complete(exchange, HttpStatus.SERVICE_UNAVAILABLE));
+                            });
                 });
     }
 
