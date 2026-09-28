@@ -80,14 +80,6 @@ public class RunExecutionService {
     public RunExecutionService(RunExecutionStore executionStore, HarnessDefinitionBundleRepository bundles,
                                SessionBridgeService bridgeService, SessionBridgeSnapshotRepository snapshots,
                                SessionRunStore runs, ToolExecutionRepository toolExecutions,
-                               AgentRuntime runtime, Clock clock) {
-        this(executionStore, bundles, bridgeService, snapshots, runs, toolExecutions, runtime,
-                RunRealtimeEventPublisher.NOOP, clock);
-    }
-
-    public RunExecutionService(RunExecutionStore executionStore, HarnessDefinitionBundleRepository bundles,
-                               SessionBridgeService bridgeService, SessionBridgeSnapshotRepository snapshots,
-                               SessionRunStore runs, ToolExecutionRepository toolExecutions,
                                AgentRuntime runtime, RunRealtimeEventPublisher realtimeEvents, Clock clock) {
         this.executionStore = Objects.requireNonNull(executionStore);
         this.bundles = Objects.requireNonNull(bundles);

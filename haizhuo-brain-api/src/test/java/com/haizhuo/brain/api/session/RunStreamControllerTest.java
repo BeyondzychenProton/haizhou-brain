@@ -1,7 +1,9 @@
 package com.haizhuo.brain.api.session;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -48,7 +50,7 @@ class RunStreamControllerTest {
                 "request-1", "d".repeat(64), RunState.RUNNING, T0, T0, null);
         RunEvent completed = new RunEvent(RUN, 4, "RUN_COMPLETED", "完成", T0.plusSeconds(1));
         when(sessions.getRun(RUN, OWNER)).thenReturn(run);
-        when(sessions.events(RUN, OWNER, 3, 200)).thenReturn(List.of(completed));
+        when(sessions.eventsOfOwnedRun(RUN, OWNER, 3, 200)).thenReturn(List.of(completed));
         var exchange = MockServerWebExchange.from(MockServerHttpRequest.get(
                 "/api/v1/sessions/runs/run-1/stream?after=1"));
 
@@ -62,7 +64,7 @@ class RunStreamControllerTest {
                 .verifyComplete();
 
         verify(sessions).getRun(RUN, OWNER);
-        verify(sessions).events(RUN, OWNER, 3, 200);
+        verify(sessions).eventsOfOwnedRun(RUN, OWNER, 3, 200);
         assertEquals("no-cache", exchange.getResponse().getHeaders().getCacheControl());
         assertEquals("no", exchange.getResponse().getHeaders().getFirst("X-Accel-Buffering"));
     }
@@ -78,6 +80,44 @@ class RunStreamControllerTest {
                         && "Run was not found".equals(error.getMessage()))
                 .verify();
 
-        verify(sessions, never()).events(RUN, OWNER, 0, 200);
+        verify(sessions, never()).eventsOfOwnedRun(RUN, OWNER, 0, 200);
+    }
+
+    @Test
+    void retriesTransientDatabaseFailureBeforeYieldingTerminalEvent() {
+        AgentRun run = new AgentRun(RUN, new SessionId("session-1"), OWNER, 1L, 7L,
+                "request-1", "d".repeat(64), RunState.RUNNING, T0, T0, null);
+        RunEvent completed = new RunEvent(RUN, 2, "RUN_COMPLETED", "完成", T0.plusSeconds(1));
+        when(sessions.getRun(RUN, OWNER)).thenReturn(run);
+        when(sessions.eventsOfOwnedRun(RUN, OWNER, 0, 200))
+                .thenThrow(new IllegalStateException("database unavailable"))
+                .thenReturn(List.of(completed));
+        var exchange = MockServerWebExchange.from(MockServerHttpRequest.get(
+                "/api/v1/sessions/runs/run-1/stream"));
+
+        StepVerifier.create(controller.stream(user, RUN.value(), null, null, exchange))
+                .assertNext(event -> assertEquals("RUN_COMPLETED", event.data().type()))
+                .verifyComplete();
+
+        verify(sessions, atLeast(2)).eventsOfOwnedRun(RUN, OWNER, 0, 200);
+    }
+
+    @Test
+    void terminatesStreamWhenDatabaseKeepsFailing() {
+        AgentRun run = new AgentRun(RUN, new SessionId("session-1"), OWNER, 1L, 7L,
+                "request-1", "d".repeat(64), RunState.RUNNING, T0, T0, null);
+        when(sessions.getRun(RUN, OWNER)).thenReturn(run);
+        when(sessions.eventsOfOwnedRun(RUN, OWNER, 0, 200))
+                .thenThrow(new IllegalStateException("database unavailable"));
+        var exchange = MockServerWebExchange.from(MockServerHttpRequest.get(
+                "/api/v1/sessions/runs/run-1/stream"));
+
+        StepVerifier.create(controller.stream(user, RUN.value(), null, null, exchange))
+                .expectErrorMatches(error -> error.getCause() instanceof IllegalStateException
+                        && "database unavailable".equals(error.getCause().getMessage()))
+                .verify();
+
+        // 有界重试：三次尝试（首次 + 两次重试）后放弃，不会无限循环。
+        verify(sessions, times(3)).eventsOfOwnedRun(RUN, OWNER, 0, 200);
     }
 }

@@ -78,6 +78,17 @@ public class SessionApplicationService {
     }
     public java.util.List<RunEvent> events(RunId runId, UserId owner, int afterSequence, int limit) {
         getRun(runId, owner);
+        return findEvents(runId, owner, afterSequence, limit);
+    }
+    /**
+     * 归属已在本次 SSE 订阅建立时校验过，轮询补读不再重复加载 run 行。
+     * 仓储查询本身仍按 owner 过滤，所以跳过校验不会放宽可见性；代价是 run 行被移除时
+     * 该流只会静默返回空批次，终止判定交给前端的状态刷新而不是本方法。
+     */
+    public java.util.List<RunEvent> eventsOfOwnedRun(RunId runId, UserId owner, int afterSequence, int limit) {
+        return findEvents(runId, owner, afterSequence, limit);
+    }
+    private java.util.List<RunEvent> findEvents(RunId runId, UserId owner, int afterSequence, int limit) {
         int boundedLimit = Math.max(1, Math.min(limit, 200));
         return store.findEvents(runId, owner, Math.max(afterSequence, 0), boundedLimit);
     }

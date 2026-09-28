@@ -22,6 +22,7 @@ import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
+import reactor.util.retry.Retry;
 
 /** Run 级持久补读与瞬时文本增量流；SSE 断开不会改变 Run 状态。 */
 @RestController
@@ -30,6 +31,10 @@ public class RunStreamController {
     private static final int BATCH_SIZE = 200;
     private static final Duration DATABASE_POLL_INTERVAL = Duration.ofMillis(500);
     private static final Duration HEARTBEAT_INTERVAL = Duration.ofSeconds(15);
+    /** 单次补读失败后最多重试的次数（共 1 + 本值 次尝试）；耗尽后整条流按错误结束，由浏览器重连继续。 */
+    private static final int DATABASE_MAX_RETRIES = 2;
+    private static final Duration DATABASE_RETRY_MIN_BACKOFF = Duration.ofMillis(200);
+    private static final Duration DATABASE_RETRY_MAX_BACKOFF = Duration.ofSeconds(2);
 
     private final SessionApplicationService sessions;
     private final RunRealtimeEventHub realtimeEvents;
@@ -61,8 +66,15 @@ public class RunStreamController {
         AtomicInteger cursor = new AtomicInteger(resumeAfter);
         Flux<ServerSentEvent<StreamEventResponse>> durable = Flux
                 .interval(Duration.ZERO, DATABASE_POLL_INTERVAL)
-                .concatMap(ignored -> blocking(() -> sessions.events(
-                        runId, user.userId(), cursor.get(), BATCH_SIZE)))
+                // 上一次补读尚未结束（含重试退避）时丢弃本次 tick：interval 无法缓冲，
+                // 否则会以 OverflowException 终止整条流，慢数据库反而比断线更致命。
+                .onBackpressureDrop()
+                .concatMap(ignored -> blocking(() -> sessions.eventsOfOwnedRun(
+                                runId, user.userId(), cursor.get(), BATCH_SIZE))
+                        // 数据库抖动不应终止整条 SSE；重试耗尽后仍失败才把错误交给浏览器，
+                        // 届时前端按退避重连并在补读窗口内自愈。
+                        .retryWhen(Retry.backoff(DATABASE_MAX_RETRIES, DATABASE_RETRY_MIN_BACKOFF)
+                                .maxBackoff(DATABASE_RETRY_MAX_BACKOFF)))
                 .flatMapIterable(events -> events)
                 .filter(event -> event.sequenceNo() > cursor.get())
                 .doOnNext(event -> cursor.accumulateAndGet(event.sequenceNo(), Math::max))
