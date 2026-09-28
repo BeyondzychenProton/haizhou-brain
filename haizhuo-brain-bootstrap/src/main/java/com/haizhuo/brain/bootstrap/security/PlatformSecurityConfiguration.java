@@ -33,7 +33,7 @@ import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 import org.springframework.security.core.context.ReactiveSecurityContextHolder;
 
-/** WebFlux security wiring: Redis holds only a session identifier and the minimal session principal. */
+/** WebFlux 安全接线：Redis 只保存会话标识与最小化的会话主体。 */
 @Configuration
 @EnableWebFluxSecurity
 public class PlatformSecurityConfiguration {
@@ -83,8 +83,8 @@ public class PlatformSecurityConfiguration {
     }
 
     /**
-     * Refreshes account status, auth version and roles for every authenticated request. It is after
-     * session authentication but before authorization, so an old Redis session cannot retain a role.
+     * 为每个已认证请求刷新账号状态、认证版本与角色。它位于会话认证之后、授权之前，
+     * 因此一个旧的 Redis 会话无法继续持有某个角色。
      */
     @Bean
     WebFilter platformIdentityRefreshFilter(PlatformIdentityService identityService) {

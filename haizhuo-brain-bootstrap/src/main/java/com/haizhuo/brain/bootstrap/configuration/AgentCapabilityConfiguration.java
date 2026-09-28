@@ -1,9 +1,9 @@
 package com.haizhuo.brain.bootstrap.configuration;
 
-import com.haizhuo.brain.platform.capability.EffectiveCapabilitySetResolver;
 import com.haizhuo.brain.platform.employee.AgentDefinitionManagementService;
 import com.haizhuo.brain.platform.employee.AgentDefinitionRepository;
-import com.haizhuo.brain.runtime.api.RuntimeCapabilityProviderCatalog;
+import com.haizhuo.brain.platform.employee.runtime.HarnessDefinitionPublisher;
+import com.haizhuo.brain.platform.tool.CapabilityExecutorRegistry;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
@@ -12,15 +12,11 @@ import org.springframework.context.annotation.Profile;
 @Configuration
 @Profile("!test")
 public class AgentCapabilityConfiguration {
-    @Bean
-    EffectiveCapabilitySetResolver effectiveCapabilitySetResolver(AgentDefinitionRepository definitions,
-                                                                    RuntimeCapabilityProviderCatalog providers) {
-        return new EffectiveCapabilitySetResolver(definitions, providers);
-    }
 
     @Bean
     AgentDefinitionManagementService agentDefinitionManagementService(AgentDefinitionRepository definitions,
-                                                                        RuntimeCapabilityProviderCatalog providers) {
-        return new AgentDefinitionManagementService(definitions, providers);
+                                                                      CapabilityExecutorRegistry executors,
+                                                                      HarnessDefinitionPublisher publisher) {
+        return new AgentDefinitionManagementService(definitions, executors, publisher);
     }
 }

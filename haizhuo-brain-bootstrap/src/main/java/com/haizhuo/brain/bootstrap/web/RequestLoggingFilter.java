@@ -13,8 +13,8 @@ import org.springframework.web.server.WebFilterChain;
 import reactor.core.publisher.Mono;
 
 /**
- * Logs one safe, correlated line for each HTTP request. Query strings, request bodies, cookies,
- * authorization headers and response bodies are deliberately excluded.
+ * 为每个 HTTP 请求打印一行安全且带关联标识的日志。查询串、请求体、Cookie、
+ * 授权头与响应体都被有意排除。
  */
 @Component
 @Order(Ordered.HIGHEST_PRECEDENCE)

@@ -11,9 +11,9 @@ import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.stereotype.Component;
 
 /**
- * Explicit, offline-only bootstrap path. Invoke with a terminal and
+ * 显式的、仅离线使用的初始化路径。在终端中带上以下参数调用：
  * --haizhuo.brain.bootstrap-admin.enabled=true --haizhuo.brain.security.session.store=memory
- * --spring.main.web-application-type=none.
+ * --spring.main.web-application-type=none。
  */
 @Component
 @ConditionalOnProperty(prefix = "haizhuo.brain.bootstrap-admin", name = "enabled", havingValue = "true")
