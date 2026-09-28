@@ -1,2 +1,32 @@
-<template><AppLayout><div class="page-head"><div><h2>管理中心</h2><p class="muted">查看和维护平台配置</p></div></div><el-tabs v-model="tab"><el-tab-pane label="能力目录" name="capabilities"><el-table :data="items"><el-table-column prop="displayName" label="能力"/><el-table-column prop="description" label="说明"/><el-table-column prop="revision" label="版本"/><el-table-column label="状态"><template #default="scope"><el-tag :type="scope.row.enabled?'success':'info'">{{scope.row.enabled?'启用':'停用'}}</el-tag></template></el-table-column></el-table></el-tab-pane><el-tab-pane label="说明" name="guide"><el-alert title="管理员页面按真实后端接口逐步展开" type="info" :closable="false" description="当前已接入能力目录；用户列表、审计查询等接口会在后端查询能力补齐后接入。"/></el-tab-pane></el-tabs></AppLayout></template>
-<script setup lang="ts">import { onMounted, ref } from 'vue'; import AppLayout from '../../layouts/AppLayout.vue'; import * as api from '../../api/admin'; const tab=ref('capabilities'); const items=ref<api.Capability[]>([]); onMounted(async()=>{items.value=await api.capabilities();});</script>
+<template>
+  <AppLayout>
+    <div class="page-head">
+      <div>
+        <h2>管理中心</h2>
+        <p class="muted">能力启停、员工定义编排与发布、平台账号管理</p>
+      </div>
+    </div>
+    <el-tabs v-model="tab">
+      <el-tab-pane label="能力目录" name="capabilities">
+        <CapabilityPanel v-if="tab === 'capabilities'" />
+      </el-tab-pane>
+      <el-tab-pane label="员工定义编排" name="definitions">
+        <DefinitionPanel v-if="tab === 'definitions'" />
+      </el-tab-pane>
+      <el-tab-pane label="用户管理" name="users">
+        <UserPanel v-if="tab === 'users'" />
+      </el-tab-pane>
+    </el-tabs>
+  </AppLayout>
+</template>
+
+<script setup lang="ts">
+import { ref } from 'vue'
+import AppLayout from '../../layouts/AppLayout.vue'
+import CapabilityPanel from './CapabilityPanel.vue'
+import DefinitionPanel from './DefinitionPanel.vue'
+import UserPanel from './UserPanel.vue'
+
+// 用 v-if 强制每次切换都重新挂载，保证看到的是最新数据而不是缓存的旧列表。
+const tab = ref('capabilities')
+</script>
