@@ -1,5 +1,6 @@
 package com.haizhuo.brain.platform.run;
 
+import com.haizhuo.brain.kernel.identity.RunId;
 import com.haizhuo.brain.kernel.identity.TenantId;
 import com.haizhuo.brain.kernel.identity.TraceId;
 import com.haizhuo.brain.kernel.json.CanonicalJson;
@@ -19,6 +20,7 @@ import com.haizhuo.brain.runtime.api.AgentRuntime;
 import com.haizhuo.brain.runtime.api.event.AgentRunCancelledEvent;
 import com.haizhuo.brain.runtime.api.event.AgentRunCompletedEvent;
 import com.haizhuo.brain.runtime.api.event.AgentRunFailedEvent;
+import com.haizhuo.brain.runtime.api.event.AgentTextDeltaEvent;
 import com.haizhuo.brain.runtime.api.event.AgentToolSuspendedEvent;
 import com.haizhuo.brain.runtime.api.event.BrainAgentEvent;
 import com.haizhuo.brain.runtime.api.event.PendingExternalToolCall;
@@ -46,6 +48,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -70,6 +73,7 @@ public class RunExecutionService {
     private final SessionRunStore runs;
     private final ToolExecutionRepository toolExecutions;
     private final AgentRuntime runtime;
+    private final RunRealtimeEventPublisher realtimeEvents;
     private final Clock clock;
     private final ScheduledExecutorService heartbeats;
 
@@ -77,6 +81,14 @@ public class RunExecutionService {
                                SessionBridgeService bridgeService, SessionBridgeSnapshotRepository snapshots,
                                SessionRunStore runs, ToolExecutionRepository toolExecutions,
                                AgentRuntime runtime, Clock clock) {
+        this(executionStore, bundles, bridgeService, snapshots, runs, toolExecutions, runtime,
+                RunRealtimeEventPublisher.NOOP, clock);
+    }
+
+    public RunExecutionService(RunExecutionStore executionStore, HarnessDefinitionBundleRepository bundles,
+                               SessionBridgeService bridgeService, SessionBridgeSnapshotRepository snapshots,
+                               SessionRunStore runs, ToolExecutionRepository toolExecutions,
+                               AgentRuntime runtime, RunRealtimeEventPublisher realtimeEvents, Clock clock) {
         this.executionStore = Objects.requireNonNull(executionStore);
         this.bundles = Objects.requireNonNull(bundles);
         this.bridgeService = Objects.requireNonNull(bridgeService);
@@ -84,6 +96,7 @@ public class RunExecutionService {
         this.runs = Objects.requireNonNull(runs);
         this.toolExecutions = Objects.requireNonNull(toolExecutions);
         this.runtime = Objects.requireNonNull(runtime);
+        this.realtimeEvents = Objects.requireNonNull(realtimeEvents);
         this.clock = Objects.requireNonNull(clock);
         this.heartbeats = Executors.newSingleThreadScheduledExecutor(runnable -> {
             Thread thread = new Thread(runnable, "run-execution-heartbeat");
@@ -128,7 +141,14 @@ public class RunExecutionService {
         AtomicReference<AgentRunCompletedEvent> completed = new AtomicReference<>();
         AtomicReference<AgentRunCancelledEvent> cancelled = new AtomicReference<>();
         AtomicReference<AgentRunFailedEvent> failed = new AtomicReference<>();
-        runtime.execute(request).doOnNext(event -> classify(event, suspended, completed, cancelled, failed))
+        AtomicLong streamOffset = new AtomicLong();
+        runtime.execute(request).doOnNext(event -> {
+                    if (event instanceof AgentTextDeltaEvent delta) {
+                        publishTextDelta(claim.run().id(), claim.attempt().attemptId(),
+                                streamOffset.incrementAndGet(), delta.text());
+                    }
+                    classify(event, suspended, completed, cancelled, failed);
+                })
                 .blockLast();
         return new DrivenRun(claim, request, deliverables.stream().map(PlatformToolExecution::id).toList(),
                 suspended.get(), completed.get(), cancelled.get(), failed.get());
@@ -257,6 +277,14 @@ public class RunExecutionService {
         }
     }
 
+    private void publishTextDelta(RunId runId, String attemptId, long streamOffset, String text) {
+        try {
+            realtimeEvents.publishTextDelta(runId, attemptId, streamOffset, text, clock.instant());
+        } catch (RuntimeException ignored) {
+            // 实时投递是可降级展示链路，不能反向改变 Run 的业务结果。
+        }
+    }
+
     private void classify(BrainAgentEvent event, AtomicReference<AgentToolSuspendedEvent> suspended,
                           AtomicReference<AgentRunCompletedEvent> completed,
                           AtomicReference<AgentRunCancelledEvent> cancelled,
@@ -270,8 +298,8 @@ public class RunExecutionService {
         } else if (event instanceof AgentRunFailedEvent runFailed) {
             failed.set(runFailed);
         }
-        // AgentTextDeltaEvent：P0 不落 token 增量（§50 数据量）；最终答案文本
-        // 由 RUN_COMPLETED 事件承载。
+        // AgentTextDeltaEvent 只经实时端口投递，不落 token 增量；最终答案文本仍由
+        // RUN_COMPLETED 持久事件承载并用于断线后的整体校准。
     }
 
     private ScheduledFuture<?> scheduleHeartbeat(ExecutionClaim claim, Duration leaseTtl) {

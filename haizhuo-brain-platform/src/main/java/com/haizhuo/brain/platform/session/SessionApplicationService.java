@@ -74,8 +74,12 @@ public class SessionApplicationService {
         return store.findRuns(sessionId, owner, limit);
     }
     public java.util.List<RunEvent> events(RunId runId, UserId owner, int afterSequence) {
+        return events(runId, owner, afterSequence, 200);
+    }
+    public java.util.List<RunEvent> events(RunId runId, UserId owner, int afterSequence, int limit) {
         getRun(runId, owner);
-        return store.findEvents(runId, owner, Math.max(afterSequence, 0), 200);
+        int boundedLimit = Math.max(1, Math.min(limit, 200));
+        return store.findEvents(runId, owner, Math.max(afterSequence, 0), boundedLimit);
     }
     public List<SessionTimelineItem> timeline(SessionId sessionId, UserId owner, int limit) {
         get(sessionId, owner);

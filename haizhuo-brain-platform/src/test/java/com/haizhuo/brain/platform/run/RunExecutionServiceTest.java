@@ -64,6 +64,7 @@ class RunExecutionServiceTest {
     private FakeToolExecutions toolExecutions;
     private AtomicReference<Function<AgentExecutionRequest, Flux<BrainAgentEvent>>> runtimeBehavior;
     private AtomicReference<AgentExecutionRequest> capturedRequest;
+    private FakeRealtimeEvents realtimeEvents;
     private RunExecutionService service;
 
     @BeforeEach
@@ -77,8 +78,10 @@ class RunExecutionServiceTest {
             capturedRequest.set(request);
             return runtimeBehavior.get().apply(request);
         };
+        realtimeEvents = new FakeRealtimeEvents();
         service = new RunExecutionService(store, new FakeBundles(), bridgeService(), new FakeSnapshots(),
-                new FakeRuns(), toolExecutions, runtime, Clock.fixed(T0, ZoneOffset.UTC));
+                new FakeRuns(), toolExecutions, runtime, realtimeEvents,
+                Clock.fixed(T0, ZoneOffset.UTC));
     }
 
     @Test
@@ -93,6 +96,10 @@ class RunExecutionServiceTest {
 
         assertEquals("你好，已完成。", store.completedResult);
         assertEquals(List.of(), store.completedDeliveredIds);
+        assertEquals(List.of("你"), realtimeEvents.textDeltas,
+                "文本增量只走瞬时实时端口，不改变持久终态内容");
+        assertEquals(List.of("attempt-1"), realtimeEvents.attemptIds);
+        assertEquals(List.of(1L), realtimeEvents.streamOffsets);
 
         AgentExecutionRequest request = capturedRequest.get();
         assertEquals(1L, request.tenantId().value(), "P0 单租户");
@@ -111,6 +118,16 @@ class RunExecutionServiceTest {
         assertEquals("ws-1", request.binding().workspaceRuntimeKey());
         assertEquals("h".repeat(64), request.binding().bridgeSnapshotHash());
         assertEquals("用户要订明天下午的会议室。", request.binding().bridgeContext());
+        assertNull(store.failedCode);
+    }
+
+    @Test
+    void realtimePublisherFailureDoesNotChangeDurableRunOutcome() {
+        realtimeEvents.failPublish = true;
+
+        assertTrue(service.executeNext("worker-1", TTL));
+
+        assertEquals("你好，已完成。", store.completedResult);
         assertNull(store.failedCode);
     }
 
@@ -319,6 +336,23 @@ class RunExecutionServiceTest {
         }
         @Override public void completeExecution(PlatformToolExecution outcome) { }
         @Override public void requeueRunIfSettled(RunId runId) { }
+    }
+
+    private static final class FakeRealtimeEvents implements RunRealtimeEventPublisher {
+        final List<String> textDeltas = new ArrayList<>();
+        final List<String> attemptIds = new ArrayList<>();
+        final List<Long> streamOffsets = new ArrayList<>();
+        boolean failPublish;
+
+        @Override public void publishTextDelta(RunId runId, String attemptId, long streamOffset,
+                                               String text, Instant occurredAt) {
+            if (failPublish) throw new IllegalStateException("realtime unavailable");
+            assertEquals(RUN, runId);
+            assertEquals(T0, occurredAt);
+            attemptIds.add(attemptId);
+            streamOffsets.add(streamOffset);
+            textDeltas.add(text);
+        }
     }
 
     private static final class FakeExecutionStore implements RunExecutionStore {

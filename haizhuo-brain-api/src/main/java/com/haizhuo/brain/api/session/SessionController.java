@@ -93,8 +93,11 @@ public class SessionController {
     }
 
     @GetMapping("/runs/{runId}/events")
-    public Mono<java.util.List<RunEvent>> events(@AuthenticationPrincipal AuthenticatedUser user, @PathVariable String runId, @RequestParam(defaultValue = "0") int after) {
-        return blocking(() -> sessions.events(new RunId(runId), user.userId(), after));
+    public Mono<java.util.List<RunEvent>> events(@AuthenticationPrincipal AuthenticatedUser user,
+                                                 @PathVariable String runId,
+                                                 @RequestParam(defaultValue = "0") int after,
+                                                 @RequestParam(defaultValue = "200") int limit) {
+        return blocking(() -> sessions.events(new RunId(runId), user.userId(), after, limit));
     }
 
     @PostMapping("/runs/{runId}/cancel")

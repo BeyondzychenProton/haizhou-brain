@@ -10,6 +10,7 @@ import com.haizhuo.brain.platform.harness.SessionHarnessBindingRepository;
 import com.haizhuo.brain.platform.run.HarnessRunSpecFactory;
 import com.haizhuo.brain.platform.run.HarnessRunSpecRepository;
 import com.haizhuo.brain.platform.run.RunExecutionService;
+import com.haizhuo.brain.platform.run.RunRealtimeEventPublisher;
 import com.haizhuo.brain.platform.run.RunExecutionStore;
 import com.haizhuo.brain.platform.run.SessionRunStore;
 import com.haizhuo.brain.platform.tool.CapabilityExecutor;
@@ -99,9 +100,10 @@ public class HarnessRuntimeConfiguration {
                                             SessionBridgeSnapshotRepository snapshots,
                                             SessionRunStore runs,
                                             ToolExecutionRepository toolExecutions,
-                                            AgentRuntime runtime, Clock clock) {
+                                            AgentRuntime runtime, RunRealtimeEventPublisher realtimeEvents,
+                                            Clock clock) {
         return new RunExecutionService(executionStore, bundles, bridgeService, snapshots, runs,
-                toolExecutions, runtime, clock);
+                toolExecutions, runtime, realtimeEvents, clock);
     }
 
     @Bean

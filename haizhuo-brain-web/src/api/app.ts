@@ -11,7 +11,7 @@ export async function listRuns(sessionId:string){return(await httpClient.get<Run
 export async function createSession(employeeId:number){return(await httpClient.post<Session>('/api/v1/sessions',{employeeId})).data}
 export async function createRun(sessionId:string,input:string){return(await httpClient.post<Run>(`/api/v1/sessions/${sessionId}/runs`,{clientRequestId:crypto.randomUUID(),input})).data}
 export async function getRun(runId:string){return(await httpClient.get<Run>(`/api/v1/sessions/runs/${runId}`)).data}
-export async function getEvents(runId:string,after:number){return(await httpClient.get<RunEvent[]>(`/api/v1/sessions/runs/${runId}/events`,{params:{after}})).data}
+export async function getEvents(runId:string,after:number,limit=200){return(await httpClient.get<RunEvent[]>(`/api/v1/sessions/runs/${runId}/events`,{params:{after,limit}})).data}
 export async function timeline(sessionId:string){return(await httpClient.get<TimelineItem[]>(`/api/v1/sessions/${sessionId}/timeline`)).data}
 export async function cancelRun(runId:string){return(await httpClient.post<Run>(`/api/v1/sessions/runs/${runId}/cancel`)).data}
 export async function guideRun(runId:string,content:string){return(await httpClient.post(`/api/v1/sessions/runs/${runId}/guidance`,{content})).data}
