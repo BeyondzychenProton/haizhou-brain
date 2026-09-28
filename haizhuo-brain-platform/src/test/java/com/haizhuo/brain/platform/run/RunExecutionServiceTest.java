@@ -7,6 +7,7 @@ import com.haizhuo.brain.kernel.identity.SessionId;
 import com.haizhuo.brain.kernel.identity.UserId;
 import com.haizhuo.brain.kernel.json.CanonicalJson;
 import com.haizhuo.brain.platform.channel.ChannelReplyEnqueuer;
+import com.haizhuo.brain.platform.channel.ChannelTurnPromoter;
 import com.haizhuo.brain.platform.employee.runtime.HarnessDefinitionBundle;
 import com.haizhuo.brain.platform.employee.runtime.HarnessDefinitionBundleRepository;
 import com.haizhuo.brain.platform.employee.runtime.PublishedToolSchema;
@@ -68,6 +69,7 @@ class RunExecutionServiceTest {
     private AtomicReference<AgentExecutionRequest> capturedRequest;
     private FakeRealtimeEvents realtimeEvents;
     private FakeChannelReplies channelReplies;
+    private FakeChannelTurns channelTurns;
     private RunExecutionService service;
 
     @BeforeEach
@@ -83,8 +85,9 @@ class RunExecutionServiceTest {
         };
         realtimeEvents = new FakeRealtimeEvents();
         channelReplies = new FakeChannelReplies();
+        channelTurns = new FakeChannelTurns();
         service = new RunExecutionService(store, new FakeBundles(), bridgeService(), new FakeSnapshots(),
-                new FakeRuns(), toolExecutions, runtime, realtimeEvents, channelReplies,
+                new FakeRuns(), toolExecutions, runtime, realtimeEvents, channelReplies, channelTurns,
                 Clock.fixed(T0, ZoneOffset.UTC));
     }
 
@@ -132,6 +135,21 @@ class RunExecutionServiceTest {
         assertTrue(service.executeNext("worker-1", TTL));
 
         assertEquals("你好，已完成。", store.completedResult);
+        assertNull(store.failedCode);
+    }
+
+    @Test
+    void terminalRunAttemptsToPromoteWaitingChannelTurns() {
+        runtimeBehavior.set(request -> Flux.just(new AgentRunCompletedEvent(RUN, "答复")));
+
+        assertTrue(service.executeNext("worker-1", TTL));
+
+        assertEquals(List.of(SESSION.value()), channelTurns.promoted,
+                "Run 进入终态后必须尝试提升该会话的等待消息");
+
+        channelTurns.fail = true;
+        assertTrue(service.executeNext("worker-1", TTL));
+        assertEquals("答复", store.completedResult, "提升失败不得改写已经落定的终态");
         assertNull(store.failedCode);
     }
 
@@ -469,6 +487,18 @@ class RunExecutionServiceTest {
             return true;
         }
         @Override public int reclaimExpiredLeases() { return 0; }
+    }
+
+    private static final class FakeChannelTurns implements ChannelTurnPromoter {
+        final List<String> promoted = new ArrayList<>();
+        boolean fail;
+
+        @Override public void promoteWaitingTurn(SessionId sessionId) {
+            if (fail) {
+                throw new IllegalStateException("promotion unavailable");
+            }
+            promoted.add(sessionId.value());
+        }
     }
 
     private static final class FakeChannelReplies implements ChannelReplyEnqueuer {

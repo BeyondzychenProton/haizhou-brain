@@ -6,6 +6,7 @@ import com.haizhuo.brain.kernel.identity.TenantId;
 import com.haizhuo.brain.kernel.identity.TraceId;
 import com.haizhuo.brain.kernel.json.CanonicalJson;
 import com.haizhuo.brain.platform.channel.ChannelReplyEnqueuer;
+import com.haizhuo.brain.platform.channel.ChannelTurnPromoter;
 import com.haizhuo.brain.platform.employee.runtime.HarnessDefinitionBundle;
 import com.haizhuo.brain.platform.employee.runtime.HarnessDefinitionBundleRepository;
 import com.haizhuo.brain.platform.employee.runtime.PublishedToolSchema;
@@ -78,6 +79,7 @@ public class RunExecutionService {
     private final AgentRuntime runtime;
     private final RunRealtimeEventPublisher realtimeEvents;
     private final ChannelReplyEnqueuer replies;
+    private final ChannelTurnPromoter channelTurns;
     private final Clock clock;
     private final ScheduledExecutorService heartbeats;
 
@@ -85,7 +87,7 @@ public class RunExecutionService {
                                SessionBridgeService bridgeService, SessionBridgeSnapshotRepository snapshots,
                                SessionRunStore runs, ToolExecutionRepository toolExecutions,
                                AgentRuntime runtime, RunRealtimeEventPublisher realtimeEvents,
-                               ChannelReplyEnqueuer replies, Clock clock) {
+                               ChannelReplyEnqueuer replies, ChannelTurnPromoter channelTurns, Clock clock) {
         this.executionStore = Objects.requireNonNull(executionStore);
         this.bundles = Objects.requireNonNull(bundles);
         this.bridgeService = Objects.requireNonNull(bridgeService);
@@ -95,6 +97,7 @@ public class RunExecutionService {
         this.runtime = Objects.requireNonNull(runtime);
         this.realtimeEvents = Objects.requireNonNull(realtimeEvents);
         this.replies = Objects.requireNonNull(replies);
+        this.channelTurns = Objects.requireNonNull(channelTurns);
         this.clock = Objects.requireNonNull(clock);
         this.heartbeats = Executors.newSingleThreadScheduledExecutor(runnable -> {
             Thread thread = new Thread(runnable, "run-execution-heartbeat");
@@ -119,6 +122,8 @@ public class RunExecutionService {
         } finally {
             heartbeat.cancel(false);
         }
+        // Run 已进入终态（或走了失败兜底），该会话可能空出来了：尝试提升它的等待消息。
+        promoteWaitingTurn(claim);
         return true;
     }
 
@@ -317,6 +322,18 @@ public class RunExecutionService {
             executionStore.recordPlanSnapshot(claim, plan.plan());
         } catch (RuntimeException ignored) {
             // 与实时投递一致：投递/投影失败只影响展示，不反向改写业务终态。
+        }
+    }
+
+    /**
+     * 等待消息提升（P3 补全）：Run 进入终态后该会话可能空闲，把最早的一条等待中入站消息提升为 Run。
+     * 提升失败不回写已落定的终态——渠道队列由收件箱与提升机制自行兜底。
+     */
+    private void promoteWaitingTurn(ExecutionClaim claim) {
+        try {
+            channelTurns.promoteWaitingTurn(claim.run().sessionId());
+        } catch (RuntimeException ignored) {
+            // 与渠道回投一致：可降级链路不得影响 Run 的业务结果。
         }
     }
 

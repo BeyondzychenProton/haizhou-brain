@@ -25,6 +25,7 @@ import org.springframework.security.web.server.SecurityWebFilterChain;
 import org.springframework.security.web.server.context.ServerSecurityContextRepository;
 import org.springframework.security.web.server.context.WebSessionServerSecurityContextRepository;
 import org.springframework.security.web.server.csrf.CookieServerCsrfTokenRepository;
+import org.springframework.security.web.server.util.matcher.ServerWebExchangeMatcher;
 import org.springframework.web.server.ServerWebExchange;
 import org.springframework.web.server.WebFilter;
 import org.springframework.web.server.session.CookieWebSessionIdResolver;
@@ -67,10 +68,20 @@ public class PlatformSecurityConfiguration {
         CookieServerCsrfTokenRepository csrf = CookieServerCsrfTokenRepository.withHttpOnlyFalse();
         return http
                 .securityContextRepository(securityContextRepository)
-                .csrf(spec -> spec.csrfTokenRepository(csrf))
+                .csrf(spec -> spec.csrfTokenRepository(csrf)
+                        // 渠道回调没有浏览器会话，无法持有 CSRF token；它的自证方式是请求签名，
+                        // 因此这里必须豁免 CSRF，与上面的 permitAll 和控制器内的强制验签成对出现。
+                        .requireCsrfProtectionMatcher(exchange -> {
+                            String path = exchange.getRequest().getPath().value();
+                            return path.startsWith("/api/v1/channels/") && path.endsWith("/webhook")
+                                    ? ServerWebExchangeMatcher.MatchResult.notMatch()
+                                    : ServerWebExchangeMatcher.MatchResult.match();
+                        }))
                 .addFilterAfter(platformIdentityRefreshFilter, SecurityWebFiltersOrder.AUTHENTICATION)
                 .authorizeExchange(spec -> spec
                         .pathMatchers("/actuator/health/**", "/api/v1/auth/csrf", "/api/v1/auth/login", "/api/v1/auth/activate").permitAll()
+                        // 渠道回调没有平台会话，只能靠请求签名自证；控制器内强制验签，失败一律 401。
+                        .pathMatchers("/api/v1/channels/*/webhook").permitAll()
                         .pathMatchers("/api/admin/**").hasRole(PlatformRole.PLATFORM_ADMIN.name())
                         .pathMatchers("/api/v1/employees").authenticated()
                         .pathMatchers("/api/v1/sessions/**").authenticated()
