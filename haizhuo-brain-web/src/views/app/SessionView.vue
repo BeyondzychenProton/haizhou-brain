@@ -12,7 +12,11 @@
       <div class="conversation">
         <el-empty v-if="!messages.length" description="输入第一条消息，开始工作" />
         <div v-for="item in messages" :key="item.key" :class="['message', item.role]">
-          <div class="bubble">{{ item.text }}<span v-if="item.pending" class="stream-caret">▋</span></div>
+          <div v-if="item.eventType === 'PLAN_SNAPSHOT'" class="bubble plan">
+            <div class="plan-title">执行计划</div>
+            <pre class="plan-body">{{ item.text }}</pre>
+          </div>
+          <div v-else class="bubble">{{ item.text }}<span v-if="item.pending" class="stream-caret">▋</span></div>
         </div>
         <div v-if="active" class="progress">
           {{ stateLabel(run?.state) }}<span v-if="run?.queuePosition">，队列第 {{ run.queuePosition }} 位</span>
@@ -160,13 +164,30 @@ function appendSessionEvents(next: SessionEvent[]) {
   events.value.sort((left, right) => (left.sessionCursor ?? 0) - (right.sessionCursor ?? 0))
 }
 
-/** 按会话游标补读历史，直到取空为止；会话流与降级复用同一条路径。 */
+/** 丢弃本地时间线，回到从游标 0 的全量恢复；只在服务端宣告游标失效时使用。 */
+function resetSessionEvents() {
+  events.value = []
+  messages.value = []
+}
+
+/**
+ * 按会话游标补读历史，直到取空为止；会话流与降级复用同一条路径。
+ * 服务端宣告游标失效时必须清空本地时间线再全量补读——否则中间被裁剪的事件
+ * 永远不会补回来，界面会停在过期快照上。
+ */
 async function syncSessionEvents() {
-  let batch: SessionEvent[]
-  do {
-    batch = await api.getSessionEvents(sessionId(), lastCursor(), 200)
-    appendSessionEvents(batch)
-  } while (batch.length === 200)
+  let after = lastCursor()
+  for (;;) {
+    const page = await api.getSessionEvents(sessionId(), after, 200)
+    if (page.cursorExpired) {
+      resetSessionEvents()
+      after = 0
+      continue
+    }
+    appendSessionEvents(page.events)
+    if (page.events.length < 200) return
+    after = lastCursor()
+  }
 }
 
 async function loadToolExecutions() {
@@ -469,6 +490,9 @@ onBeforeUnmount(stopTransport)
 </script>
 
 <style scoped>
+.plan { background: #f1f5f9; border: 1px solid #e2e8f0; }
+.plan-title { font-weight: 500; font-size: 13px; color: #334155; margin-bottom: 6px; }
+.plan-body { margin: 0; font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
 .approvals { margin: 16px 0; }
 .approval-card { margin-top: 10px; }
 .approval-head { display: flex; justify-content: space-between; align-items: baseline; }

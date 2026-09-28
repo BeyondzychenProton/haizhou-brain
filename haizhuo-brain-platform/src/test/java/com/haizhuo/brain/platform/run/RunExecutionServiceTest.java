@@ -6,6 +6,7 @@ import com.haizhuo.brain.kernel.identity.RunId;
 import com.haizhuo.brain.kernel.identity.SessionId;
 import com.haizhuo.brain.kernel.identity.UserId;
 import com.haizhuo.brain.kernel.json.CanonicalJson;
+import com.haizhuo.brain.platform.channel.ChannelReplyEnqueuer;
 import com.haizhuo.brain.platform.employee.runtime.HarnessDefinitionBundle;
 import com.haizhuo.brain.platform.employee.runtime.HarnessDefinitionBundleRepository;
 import com.haizhuo.brain.platform.employee.runtime.PublishedToolSchema;
@@ -20,6 +21,7 @@ import com.haizhuo.brain.platform.tool.ToolApproval;
 import com.haizhuo.brain.platform.tool.ToolExecutionRepository;
 import com.haizhuo.brain.platform.tool.ToolExecutionState;
 import com.haizhuo.brain.runtime.api.AgentRuntime;
+import com.haizhuo.brain.runtime.api.event.AgentPlanUpdatedEvent;
 import com.haizhuo.brain.runtime.api.event.AgentRunCancelledEvent;
 import com.haizhuo.brain.runtime.api.event.AgentRunCompletedEvent;
 import com.haizhuo.brain.runtime.api.event.AgentRunFailedEvent;
@@ -65,6 +67,7 @@ class RunExecutionServiceTest {
     private AtomicReference<Function<AgentExecutionRequest, Flux<BrainAgentEvent>>> runtimeBehavior;
     private AtomicReference<AgentExecutionRequest> capturedRequest;
     private FakeRealtimeEvents realtimeEvents;
+    private FakeChannelReplies channelReplies;
     private RunExecutionService service;
 
     @BeforeEach
@@ -79,8 +82,9 @@ class RunExecutionServiceTest {
             return runtimeBehavior.get().apply(request);
         };
         realtimeEvents = new FakeRealtimeEvents();
+        channelReplies = new FakeChannelReplies();
         service = new RunExecutionService(store, new FakeBundles(), bridgeService(), new FakeSnapshots(),
-                new FakeRuns(), toolExecutions, runtime, realtimeEvents,
+                new FakeRuns(), toolExecutions, runtime, realtimeEvents, channelReplies,
                 Clock.fixed(T0, ZoneOffset.UTC));
     }
 
@@ -128,6 +132,50 @@ class RunExecutionServiceTest {
         assertTrue(service.executeNext("worker-1", TTL));
 
         assertEquals("你好，已完成。", store.completedResult);
+        assertNull(store.failedCode);
+    }
+
+    @Test
+    void completedRunEnqueuesChannelReplyAndEnqueueFailureStaysIsolated() {
+        runtimeBehavior.set(request -> Flux.just(new AgentRunCompletedEvent(RUN, "答复正文")));
+
+        assertTrue(service.executeNext("worker-1", TTL));
+
+        assertEquals(List.of("run-1:答复正文"), channelReplies.enqueued,
+                "Run 有最终答复时必须排进出站队列；Web 会话由实现自行忽略");
+
+        channelReplies.fail = true;
+        assertTrue(service.executeNext("worker-1", TTL));
+        assertEquals("答复正文", store.completedResult, "入队失败不得改写已经落定的终态");
+        assertNull(store.failedCode);
+    }
+
+    @Test
+    void planWritesArePersistedButPhaseOnlyEventsAreNot() {
+        runtimeBehavior.set(request -> Flux.just(
+                new AgentPlanUpdatedEvent(RUN, AgentPlanUpdatedEvent.Phase.ENTER, null),
+                new AgentPlanUpdatedEvent(RUN, AgentPlanUpdatedEvent.Phase.WRITE, "第一步：确认需求\n第二步：执行"),
+                new AgentPlanUpdatedEvent(RUN, AgentPlanUpdatedEvent.Phase.WRITE, "   "),
+                new AgentPlanUpdatedEvent(RUN, AgentPlanUpdatedEvent.Phase.EXIT, null),
+                new AgentRunCompletedEvent(RUN, "按计划完成")));
+
+        assertTrue(service.executeNext("worker-1", TTL));
+
+        assertEquals(List.of("第一步：确认需求\n第二步：执行"), store.planSnapshots,
+                "只有带正文的写入落库；ENTER/EXIT 与空内容不产生快照");
+        assertEquals("按计划完成", store.completedResult);
+    }
+
+    @Test
+    void planSnapshotFailureDoesNotChangeDurableRunOutcome() {
+        store.failPlanSnapshot = true;
+        runtimeBehavior.set(request -> Flux.just(
+                new AgentPlanUpdatedEvent(RUN, AgentPlanUpdatedEvent.Phase.WRITE, "计划正文"),
+                new AgentRunCompletedEvent(RUN, "完成")));
+
+        assertTrue(service.executeNext("worker-1", TTL));
+
+        assertEquals("完成", store.completedResult, "计划投影失败只影响展示，不得改写业务终态");
         assertNull(store.failedCode);
     }
 
@@ -367,6 +415,8 @@ class RunExecutionServiceTest {
         String failedCode;
         String failedMessage;
         String cancelledMessage;
+        List<String> planSnapshots = new ArrayList<>();
+        boolean failPlanSnapshot;
 
         void reset() {
             suspendedExecutions = new ArrayList<>();
@@ -378,6 +428,8 @@ class RunExecutionServiceTest {
             failedCode = null;
             failedMessage = null;
             cancelledMessage = null;
+            planSnapshots = new ArrayList<>();
+            failPlanSnapshot = false;
         }
 
         @Override public Optional<ExecutionClaim> claimNext(String workerId, Duration leaseTtl) {
@@ -409,6 +461,25 @@ class RunExecutionServiceTest {
             cancelledMessage = safeMessage;
             return true;
         }
+        @Override public boolean recordPlanSnapshot(ExecutionClaim c, String content) {
+            if (failPlanSnapshot) {
+                throw new IllegalStateException("plan projection unavailable");
+            }
+            planSnapshots.add(content);
+            return true;
+        }
         @Override public int reclaimExpiredLeases() { return 0; }
+    }
+
+    private static final class FakeChannelReplies implements ChannelReplyEnqueuer {
+        final List<String> enqueued = new ArrayList<>();
+        boolean fail;
+
+        @Override public void enqueueReply(RunId runId, SessionId sessionId, String text) {
+            if (fail) {
+                throw new IllegalStateException("outbox unavailable");
+            }
+            enqueued.add(runId.value() + ":" + text);
+        }
     }
 }

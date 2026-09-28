@@ -98,4 +98,49 @@ class JdbcSessionEventProjectionTest {
                 Integer.class, SESSION.value());
         assertEquals(4000, length, "投影内容必须与列宽一致，不能让插入失败");
     }
+
+    @Test
+    void retentionWindowExposesFloorAndTrimsOnlyTheOldestHistory() {
+        insertSession(jdbc, SESSION.value(), OWNER.value(), 1L, "ACTIVE");
+        insertRun(jdbc, "run-1", SESSION.value(), "RUNNING");
+        JdbcSessionRunStore store = new JdbcSessionRunStore(jdbc, projector);
+        for (int sequence = 1; sequence <= 5; sequence++) {
+            projector.project(SESSION, new RunId("run-1"), sequence, "RUN_COMPLETED", "第" + sequence + "条",
+                    T0.plusSeconds(sequence));
+        }
+
+        assertEquals(1L, store.oldestSessionCursor(SESSION, OWNER), "未裁剪时下界是第一条事件");
+        assertEquals(5, store.findSessionEvents(SESSION, OWNER, 0L, 200).size());
+
+        assertEquals(3, store.trimSessionEvents(SESSION, OWNER, 2), "保留最近 2 条，其余最旧优先删除");
+
+        assertEquals(4L, store.oldestSessionCursor(SESSION, OWNER), "裁剪后下界必须前移");
+        assertEquals(List.of(4L, 5L),
+                store.findSessionEvents(SESSION, OWNER, 0L, 200).stream().map(SessionEvent::sessionCursor).toList(),
+                "裁剪只能从最旧一侧切");
+        assertEquals(0, store.trimSessionEvents(SESSION, OWNER, 10), "保留条数超过现有条数时不应删除任何行");
+    }
+
+    @Test
+    void trimmingNeverTouchesAnotherSessionAndRefusesNonOwner() {
+        insertSession(jdbc, SESSION.value(), OWNER.value(), 1L, "ACTIVE");
+        insertSession(jdbc, "session-2", 99L, 1L, "ACTIVE");
+        insertRun(jdbc, "run-1", SESSION.value(), "RUNNING");
+        insertRun(jdbc, "run-2", "session-2", 99L, "RUNNING");
+        JdbcSessionRunStore store = new JdbcSessionRunStore(jdbc, projector);
+        for (int sequence = 1; sequence <= 3; sequence++) {
+            projector.project(SESSION, new RunId("run-1"), sequence, "RUN_COMPLETED", "mine-" + sequence,
+                    T0.plusSeconds(sequence));
+        }
+        projector.project(new SessionId("session-2"), new RunId("run-2"), 1, "USER_INPUT", "theirs", T0);
+
+        assertEquals(0, store.trimSessionEvents(SESSION, new UserId(99), 1), "非属主不得裁剪他人会话历史");
+        assertEquals(0L, store.oldestSessionCursor(SESSION, new UserId(99)), "非属主读不到他人会话的下界");
+        assertEquals(3, jdbc.queryForObject("SELECT COUNT(*) FROM platform_agent_session_event WHERE session_id=?",
+                Integer.class, SESSION.value()), "被拒绝的裁剪不能真的删掉数据");
+
+        store.trimSessionEvents(SESSION, OWNER, 1);
+        assertEquals(1, jdbc.queryForObject("SELECT COUNT(*) FROM platform_agent_session_event WHERE session_id='session-2'",
+                Integer.class), "另一个会话的投影不受本会话裁剪影响");
+    }
 }

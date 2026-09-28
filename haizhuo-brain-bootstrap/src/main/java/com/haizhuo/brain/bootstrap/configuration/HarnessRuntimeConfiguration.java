@@ -3,6 +3,7 @@ package com.haizhuo.brain.bootstrap.configuration;
 import com.haizhuo.brain.platform.employee.AgentDefinitionRepository;
 import com.haizhuo.brain.platform.employee.runtime.DefaultHarnessDefinitionBundleCompiler;
 import com.haizhuo.brain.platform.employee.runtime.HarnessDefinitionBundleCompiler;
+import com.haizhuo.brain.platform.channel.ChannelReplyEnqueuer;
 import com.haizhuo.brain.platform.employee.runtime.HarnessDefinitionBundleRepository;
 import com.haizhuo.brain.platform.harness.SessionBridgeService;
 import com.haizhuo.brain.platform.harness.SessionBridgeSnapshotRepository;
@@ -101,9 +102,9 @@ public class HarnessRuntimeConfiguration {
                                             SessionRunStore runs,
                                             ToolExecutionRepository toolExecutions,
                                             AgentRuntime runtime, RunRealtimeEventPublisher realtimeEvents,
-                                            Clock clock) {
+                                            ChannelReplyEnqueuer replies, Clock clock) {
         return new RunExecutionService(executionStore, bundles, bridgeService, snapshots, runs,
-                toolExecutions, runtime, realtimeEvents, clock);
+                toolExecutions, runtime, realtimeEvents, replies, clock);
     }
 
     @Bean

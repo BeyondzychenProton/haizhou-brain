@@ -1,6 +1,7 @@
 package com.haizhuo.brain.api.session;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -10,6 +11,7 @@ import com.haizhuo.brain.kernel.identity.SessionId;
 import com.haizhuo.brain.kernel.identity.UserId;
 import com.haizhuo.brain.platform.run.EventVisibility;
 import com.haizhuo.brain.platform.run.SessionEvent;
+import com.haizhuo.brain.platform.run.SessionEventPage;
 import com.haizhuo.brain.platform.session.AgentSession;
 import com.haizhuo.brain.platform.session.SessionApplicationService;
 import com.haizhuo.brain.security.identity.AuthenticatedUser;
@@ -46,12 +48,15 @@ class SessionStreamControllerTest {
     @Test
     void eventsProjectSessionCursorIntoTheUnifiedEnvelope() {
         SessionEvent event = new SessionEvent(SESSION, 7L, RUN, 2, "RUN_COMPLETED", EventVisibility.USER, "结果", T0);
-        when(sessions.sessionEvents(SESSION, OWNER, 5L, 200)).thenReturn(List.of(event));
+        when(sessions.sessionEventPage(SESSION, OWNER, 5L, 200))
+                .thenReturn(new SessionEventPage(List.of(event), 1L, false));
 
         StepVerifier.create(controller.events(user, SESSION.value(), 5L, 200))
-                .assertNext(events -> {
-                    assertEquals(1, events.size());
-                    StreamEvent envelope = events.get(0);
+                .assertNext(response -> {
+                    assertEquals(1, response.events().size());
+                    assertEquals(1L, response.cursorFloor());
+                    assertEquals(false, response.cursorExpired());
+                    StreamEvent envelope = response.events().get(0);
                     assertEquals("session-1:7", envelope.eventId());
                     assertEquals(SESSION.value(), envelope.sessionId());
                     assertEquals(7L, envelope.sessionCursor());
@@ -61,6 +66,21 @@ class SessionStreamControllerTest {
                     assertEquals("durable", envelope.durability());
                     assertEquals("run-1-assistant", envelope.payload().messageId());
                     assertEquals("结果", envelope.payload().text());
+                })
+                .verifyComplete();
+    }
+
+    @Test
+    void expiredCursorIsReportedInsteadOfSilentlyReturningAnEmptyBatch() {
+        // 空批次与"确实没有新事件"在载荷上无法区分；失效必须显式带出，客户端才能转全量恢复。
+        when(sessions.sessionEventPage(SESSION, OWNER, 3L, 200))
+                .thenReturn(new SessionEventPage(List.of(), 101L, true));
+
+        StepVerifier.create(controller.events(user, SESSION.value(), 3L, 200))
+                .assertNext(response -> {
+                    assertTrue(response.events().isEmpty());
+                    assertEquals(101L, response.cursorFloor());
+                    assertTrue(response.cursorExpired());
                 })
                 .verifyComplete();
     }

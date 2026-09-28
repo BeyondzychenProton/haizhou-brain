@@ -80,6 +80,36 @@ public final class HarnessJdbcTestSupport {
                 + "PRIMARY KEY(session_id,session_cursor))");
     }
 
+    /** P3 渠道表：与 V15 迁移保持一致（测试库关闭 Flyway，需要手工建表）。 */
+    public static void createChannelTables(JdbcTemplate jdbc) {
+        jdbc.execute("CREATE TABLE platform_channel_account(binding_id VARCHAR(64) NOT NULL,tenant_id BIGINT NOT NULL,"
+                + "provider VARCHAR(32) NOT NULL,external_account_key VARCHAR(128) NOT NULL,"
+                + "credential_ref VARCHAR(256) NOT NULL,default_employee_id BIGINT NOT NULL,"
+                + "enabled BOOLEAN NOT NULL DEFAULT TRUE,created_at TIMESTAMP NOT NULL,updated_at TIMESTAMP NOT NULL,"
+                + "PRIMARY KEY(binding_id),UNIQUE(provider,external_account_key))");
+        jdbc.execute("CREATE TABLE platform_channel_identity(binding_id VARCHAR(64) NOT NULL,"
+                + "external_user_id VARCHAR(128) NOT NULL,user_id BIGINT NOT NULL,state VARCHAR(16) NOT NULL,"
+                + "linked_at TIMESTAMP NOT NULL,updated_at TIMESTAMP NOT NULL,"
+                + "PRIMARY KEY(binding_id,external_user_id))");
+        jdbc.execute("CREATE TABLE platform_channel_conversation(binding_id VARCHAR(64) NOT NULL,"
+                + "external_conversation_id VARCHAR(191) NOT NULL,session_id VARCHAR(64) NOT NULL,"
+                + "created_at TIMESTAMP NOT NULL,updated_at TIMESTAMP NOT NULL,"
+                + "PRIMARY KEY(binding_id,external_conversation_id),UNIQUE(session_id))");
+        jdbc.execute("CREATE TABLE platform_channel_inbox(binding_id VARCHAR(64) NOT NULL,"
+                + "provider_event_id VARCHAR(191) NOT NULL,provider VARCHAR(32) NOT NULL,"
+                + "external_conversation_id VARCHAR(191) NOT NULL,external_user_id VARCHAR(128) NOT NULL,"
+                + "user_id BIGINT NOT NULL,session_id VARCHAR(64) NULL,run_id VARCHAR(64) NULL,"
+                + "reply_target VARCHAR(512) NOT NULL,content VARCHAR(4000) NOT NULL,accepted_at TIMESTAMP NOT NULL,"
+                + "PRIMARY KEY(binding_id,provider_event_id))");
+        jdbc.execute("CREATE TABLE platform_channel_delivery(delivery_id VARCHAR(64) NOT NULL,"
+                + "run_id VARCHAR(64) NOT NULL,binding_id VARCHAR(64) NOT NULL,provider VARCHAR(32) NOT NULL,"
+                + "reply_target VARCHAR(512) NOT NULL,content VARCHAR(4000) NOT NULL,"
+                + "idempotency_key VARCHAR(191) NOT NULL,state VARCHAR(24) NOT NULL,"
+                + "external_message_id VARCHAR(191) NULL,attempts INT NOT NULL DEFAULT 0,last_error VARCHAR(256) NULL,"
+                + "created_at TIMESTAMP NOT NULL,updated_at TIMESTAMP NOT NULL,"
+                + "PRIMARY KEY(delivery_id),UNIQUE(idempotency_key))");
+    }
+
     public static void insertSession(JdbcTemplate jdbc, String sessionId, long userId, long employeeId, String status) {
         jdbc.update("INSERT INTO platform_agent_session(session_id,user_id,employee_id,status,created_at,last_active_at,row_version)"
                         + " VALUES(?,?,?,?,?,?,0)",

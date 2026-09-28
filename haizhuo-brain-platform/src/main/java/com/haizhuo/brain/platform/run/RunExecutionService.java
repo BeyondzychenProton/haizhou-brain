@@ -5,6 +5,7 @@ import com.haizhuo.brain.kernel.identity.SessionId;
 import com.haizhuo.brain.kernel.identity.TenantId;
 import com.haizhuo.brain.kernel.identity.TraceId;
 import com.haizhuo.brain.kernel.json.CanonicalJson;
+import com.haizhuo.brain.platform.channel.ChannelReplyEnqueuer;
 import com.haizhuo.brain.platform.employee.runtime.HarnessDefinitionBundle;
 import com.haizhuo.brain.platform.employee.runtime.HarnessDefinitionBundleRepository;
 import com.haizhuo.brain.platform.employee.runtime.PublishedToolSchema;
@@ -18,6 +19,7 @@ import com.haizhuo.brain.platform.tool.ToolApproval;
 import com.haizhuo.brain.platform.tool.ToolExecutionRepository;
 import com.haizhuo.brain.platform.tool.ToolExecutionState;
 import com.haizhuo.brain.runtime.api.AgentRuntime;
+import com.haizhuo.brain.runtime.api.event.AgentPlanUpdatedEvent;
 import com.haizhuo.brain.runtime.api.event.AgentRunCancelledEvent;
 import com.haizhuo.brain.runtime.api.event.AgentRunCompletedEvent;
 import com.haizhuo.brain.runtime.api.event.AgentRunFailedEvent;
@@ -75,13 +77,15 @@ public class RunExecutionService {
     private final ToolExecutionRepository toolExecutions;
     private final AgentRuntime runtime;
     private final RunRealtimeEventPublisher realtimeEvents;
+    private final ChannelReplyEnqueuer replies;
     private final Clock clock;
     private final ScheduledExecutorService heartbeats;
 
     public RunExecutionService(RunExecutionStore executionStore, HarnessDefinitionBundleRepository bundles,
                                SessionBridgeService bridgeService, SessionBridgeSnapshotRepository snapshots,
                                SessionRunStore runs, ToolExecutionRepository toolExecutions,
-                               AgentRuntime runtime, RunRealtimeEventPublisher realtimeEvents, Clock clock) {
+                               AgentRuntime runtime, RunRealtimeEventPublisher realtimeEvents,
+                               ChannelReplyEnqueuer replies, Clock clock) {
         this.executionStore = Objects.requireNonNull(executionStore);
         this.bundles = Objects.requireNonNull(bundles);
         this.bridgeService = Objects.requireNonNull(bridgeService);
@@ -90,6 +94,7 @@ public class RunExecutionService {
         this.toolExecutions = Objects.requireNonNull(toolExecutions);
         this.runtime = Objects.requireNonNull(runtime);
         this.realtimeEvents = Objects.requireNonNull(realtimeEvents);
+        this.replies = Objects.requireNonNull(replies);
         this.clock = Objects.requireNonNull(clock);
         this.heartbeats = Executors.newSingleThreadScheduledExecutor(runnable -> {
             Thread thread = new Thread(runnable, "run-execution-heartbeat");
@@ -140,6 +145,9 @@ public class RunExecutionService {
                         publishTextDelta(claim.run().sessionId(), claim.run().id(), claim.attempt().attemptId(),
                                 streamOffset.incrementAndGet(), delta.text());
                     }
+                    if (event instanceof AgentPlanUpdatedEvent plan) {
+                        recordPlanSnapshot(claim, plan);
+                    }
                     classify(event, suspended, completed, cancelled, failed);
                 })
                 .blockLast();
@@ -154,6 +162,7 @@ public class RunExecutionService {
         }
         if (driven.completed() != null) {
             executionStore.complete(claim, driven.completed().result(), driven.deliverableIds());
+            enqueueChannelReply(claim, driven.completed().result());
             return;
         }
         if (driven.cancelled() != null) {
@@ -293,6 +302,34 @@ public class RunExecutionService {
         }
         // AgentTextDeltaEvent 只经实时端口投递，不落 token 增量；最终答案文本仍由
         // RUN_COMPLETED 持久事件承载并用于断线后的整体校准。
+    }
+
+    /**
+     * 计划快照（P2）：只有带正文的写入才落库——ENTER/EXIT 只表达计划模式的开关，
+     * 没有可展示的内容。计划属于可降级展示链路，落库失败不得影响 Run 的业务结果。
+     */
+    private void recordPlanSnapshot(ExecutionClaim claim, AgentPlanUpdatedEvent plan) {
+        if (plan.phase() != AgentPlanUpdatedEvent.Phase.WRITE
+                || plan.plan() == null || plan.plan().isBlank()) {
+            return;
+        }
+        try {
+            executionStore.recordPlanSnapshot(claim, plan.plan());
+        } catch (RuntimeException ignored) {
+            // 与实时投递一致：投递/投影失败只影响展示，不反向改写业务终态。
+        }
+    }
+
+    /**
+     * 渠道回投（P3）：Run 有了最终答复时，若该会话来自渠道则入队一条投递。
+     * 与实时链路一致，入队失败不回写已经落定的 Run 终态。
+     */
+    private void enqueueChannelReply(ExecutionClaim claim, String result) {
+        try {
+            replies.enqueueReply(claim.run().id(), claim.run().sessionId(), result);
+        } catch (RuntimeException ignored) {
+            // 渠道回投可降级：投递失败由 outbox 的重试与人工核查兜底。
+        }
     }
 
     private ScheduledFuture<?> scheduleHeartbeat(ExecutionClaim claim, Duration leaseTtl) {

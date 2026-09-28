@@ -68,6 +68,18 @@ export function mergeConversationEvent(items: ConversationItem[], event: Present
     return next
   }
 
+  if (event.type === 'PLAN_SNAPSHOT') {
+    // 同一个 Run 只保留最新的计划快照：计划是状态而不是流水，堆叠多份会让界面失去重点。
+    // key 带 runId，因此切换定义版本或换 Run 之后不会把旧计划混进新运行。
+    const key = `${event.runId}-plan`
+    const item: ConversationItem = { key, role: 'system', text: content, eventType: event.type, sequenceNo }
+    const index = items.findIndex(candidate => candidate.key === key)
+    if (index < 0) return [...items, item]
+    const next = items.slice()
+    next[index] = item
+    return next
+  }
+
   if (['RUN_FAILED', 'RUN_CANCEL_REQUESTED', 'RUN_CANCELLED', 'RUN_GUIDANCE_RECEIVED',
     'RUN_GUIDANCE_CONSUMED'].includes(event.type)) {
     const key = `${event.runId}-${sequenceNo}-${event.type}`

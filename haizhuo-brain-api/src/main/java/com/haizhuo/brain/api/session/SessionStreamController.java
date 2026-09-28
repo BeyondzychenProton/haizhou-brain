@@ -3,6 +3,7 @@ package com.haizhuo.brain.api.session;
 import com.haizhuo.brain.kernel.identity.SessionId;
 import com.haizhuo.brain.platform.run.EventVisibility;
 import com.haizhuo.brain.platform.run.SessionEvent;
+import com.haizhuo.brain.platform.run.SessionEventPage;
 import com.haizhuo.brain.platform.session.SessionApplicationService;
 import com.haizhuo.brain.security.identity.AuthenticatedUser;
 import java.time.Duration;
@@ -46,14 +47,16 @@ public class SessionStreamController {
     }
 
     @GetMapping("/{sessionId}/events")
-    public Mono<List<StreamEvent>> events(@AuthenticationPrincipal AuthenticatedUser user,
-                                          @PathVariable String sessionId,
-                                          @RequestParam(defaultValue = "0") long after,
-                                          @RequestParam(defaultValue = "200") int limit) {
-        return RunStreamController.blocking(() -> sessions
-                .sessionEvents(new SessionId(sessionId), user.userId(), after, limit).stream()
-                .map(SessionStreamController::envelope)
-                .toList());
+    public Mono<SessionEventPageResponse> events(@AuthenticationPrincipal AuthenticatedUser user,
+                                                 @PathVariable String sessionId,
+                                                 @RequestParam(defaultValue = "0") long after,
+                                                 @RequestParam(defaultValue = "200") int limit) {
+        return RunStreamController.blocking(() -> {
+            SessionEventPage page = sessions.sessionEventPage(new SessionId(sessionId), user.userId(), after, limit);
+            return new SessionEventPageResponse(page.events().stream()
+                    .map(SessionStreamController::envelope)
+                    .toList(), page.cursorFloor(), page.cursorExpired());
+        });
     }
 
     @GetMapping(value = "/{sessionId}/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)

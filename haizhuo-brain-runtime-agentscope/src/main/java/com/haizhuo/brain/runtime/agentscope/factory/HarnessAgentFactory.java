@@ -32,6 +32,9 @@ import java.util.stream.Collectors;
  */
 public class HarnessAgentFactory {
 
+    /** 计划文件相对定义工作区的目录名，由 Harness PlanModeManager 使用。 */
+    private static final String PLAN_DIRECTORY = "plans";
+
     private final AgentScopeModelFactory modelFactory;
     private final AgentStateStore agentStateStore;
     private final RemoteFilesystemSpec filesystemSpec;
@@ -74,6 +77,11 @@ public class HarnessAgentFactory {
                 .middleware(new SessionBridgeMiddleware())
                 .middleware(new RunControlMiddleware(controlInbox))
                 .middleware(new ObservabilityMiddleware())
+                // P2：接入 Harness 计划能力。计划正文由计划工具的流式入参派生为
+                // PLAN_SNAPSHOT 持久事件（见 AgentScopeEventTranslator），
+                // 因此计划不需要另建存储，也能随会话游标一起续传。
+                .enablePlanMode()
+                .planFileDirectory(PLAN_DIRECTORY)
                 // I-15：P0/P1 不做自动长期记忆。
                 .disableMemoryHooks()
                 .disableMemoryTools()

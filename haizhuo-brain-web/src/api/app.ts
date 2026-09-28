@@ -16,8 +16,9 @@ export async function createRun(sessionId:string,input:string){return(await http
 export async function getRun(runId:string){return(await httpClient.get<Run>(`/api/v1/sessions/runs/${runId}`)).data}
 export async function getEvents(runId:string,after:number,limit=200){return(await httpClient.get<RunEvent[]>(`/api/v1/sessions/runs/${runId}/events`,{params:{after,limit}})).data}
 /** 会话级补读/历史分页：返回统一信封，sessionCursor 是跨 Run 的续传游标。 */
+export interface SessionEventPage { events:SessionEvent[]; cursorFloor:number; cursorExpired:boolean }
 export async function getSessionEvents(sessionId:string,after:number,limit=200){
-  return(await httpClient.get<SessionEvent[]>(`/api/v1/sessions/${sessionId}/events`,{params:{after,limit}})).data
+  return(await httpClient.get<SessionEventPage>(`/api/v1/sessions/${sessionId}/events`,{params:{after,limit}})).data
 }
 export async function timeline(sessionId:string){return(await httpClient.get<TimelineItem[]>(`/api/v1/sessions/${sessionId}/timeline`)).data}
 export async function cancelRun(runId:string){return(await httpClient.post<Run>(`/api/v1/sessions/runs/${runId}/cancel`)).data}

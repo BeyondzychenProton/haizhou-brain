@@ -106,6 +106,34 @@ public class JdbcSessionRunStore implements SessionRunStore, RunControlInbox {
                         instant(rs.getTimestamp("created_at"))), sessionId.value(), owner.value(), afterCursor, safeLimit);
     }
 
+    @Override public long oldestSessionCursor(SessionId sessionId, UserId owner) {
+        Long floor = jdbc.query("SELECT MIN(event.session_cursor) FROM platform_agent_session_event event "
+                        + "JOIN platform_agent_session session ON session.session_id=event.session_id "
+                        + "WHERE event.session_id=? AND session.user_id=?",
+                (rs, row) -> rs.getObject(1) == null ? 0L : rs.getLong(1),
+                sessionId.value(), owner.value()).stream().findFirst().orElse(0L);
+        return floor == null ? 0L : floor;
+    }
+
+    @Override public int trimSessionEvents(SessionId sessionId, UserId owner, int keepLatest) {
+        if (keepLatest <= 0) {
+            return 0;
+        }
+        // 先确认属主，避免越权裁剪他人会话的历史。
+        Long max = jdbc.query("SELECT COALESCE(MAX(event.session_cursor),0) FROM platform_agent_session_event event "
+                        + "JOIN platform_agent_session session ON session.session_id=event.session_id "
+                        + "WHERE event.session_id=? AND session.user_id=?",
+                (rs, row) -> rs.getLong(1), sessionId.value(), owner.value()).stream().findFirst().orElse(0L);
+        // 分两步取边界再删除：不依赖 MySQL 与 H2 一致支持的自引用删除子查询。
+        // 并发写入只会抬高边界下界，已算好的 boundary 仍落在更旧的一侧，因此只可能少删、不会误删。
+        long boundary = (max == null ? 0L : max) - keepLatest;
+        if (boundary <= 0) {
+            return 0;
+        }
+        return jdbc.update("DELETE FROM platform_agent_session_event WHERE session_id=? AND session_cursor<=?",
+                sessionId.value(), boundary);
+    }
+
     @Override public List<AgentRun> findRuns(SessionId sessionId, UserId owner, int limit) {
         int safeLimit = Math.max(1, Math.min(limit, 100));
         return jdbc.query("SELECT run_id,session_id,user_id,employee_id,definition_version_id,client_request_id,input_digest,state,created_at,started_at,finished_at FROM platform_agent_run WHERE session_id=? AND user_id=? ORDER BY created_at DESC,run_id DESC LIMIT ?",

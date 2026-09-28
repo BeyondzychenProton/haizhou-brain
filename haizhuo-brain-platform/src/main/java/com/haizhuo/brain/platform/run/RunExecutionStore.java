@@ -37,6 +37,13 @@ public interface RunExecutionStore {
     /** 确认此前请求的取消；fence 不匹配时返回 false。 */
     boolean cancelled(ExecutionClaim claim, String safeMessage);
 
+    /**
+     * 运行中记录一次计划快照（P2）：与 run 事件同一事务写入，并同步投影到会话游标，
+     * 因此计划在断线后可由会话流恢复。只校验租约与 fence、不改尝试状态——
+     * 过期 worker 不得把计划写进已被重新认领的运行。fence 不匹配时返回 false。
+     */
+    boolean recordPlanSnapshot(ExecutionClaim claim, String content);
+
     /** 把运行中尝试租约已过期的 Run 重新入队；返回回收数量（§15）。 */
     int reclaimExpiredLeases();
 }

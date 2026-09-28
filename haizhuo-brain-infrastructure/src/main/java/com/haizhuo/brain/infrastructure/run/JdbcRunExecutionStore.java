@@ -219,6 +219,20 @@ public class JdbcRunExecutionStore implements RunExecutionStore {
         return reclaimed;
     }
 
+    @Transactional
+    @Override public boolean recordPlanSnapshot(ExecutionClaim claim, String content) {
+        // 只校验租约与 fence、不改尝试状态：过期 worker 不得把计划写进已被重新认领的运行。
+        Integer owned = jdbc.query("SELECT 1 FROM platform_run_execution_attempt "
+                        + "WHERE attempt_id=? AND lease_token=? AND fence_token=? AND state='RUNNING' FOR UPDATE",
+                (rs, row) -> rs.getInt(1), claim.attempt().attemptId(), claim.attempt().leaseToken(),
+                claim.attempt().fenceToken()).stream().findFirst().orElse(null);
+        if (owned == null) {
+            return false;
+        }
+        appendEvent(claim.run().id(), "PLAN_SNAPSHOT", content, Instant.now());
+        return true;
+    }
+
     /** 公共 fence 校验：只有当前租约持有者才能推进该 attempt（§13.6）。 */
     private boolean finishAttempt(ExecutionClaim claim, ExecutionAttemptState target, Instant now) {
         return jdbc.update("UPDATE platform_run_execution_attempt SET state=?,finished_at=? "

@@ -2,8 +2,10 @@ package com.haizhuo.brain.runtime.agentscope.event;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 import com.haizhuo.brain.kernel.identity.RunId;
+import com.haizhuo.brain.runtime.api.event.AgentPlanUpdatedEvent;
 import com.haizhuo.brain.runtime.api.event.AgentRunCancelledEvent;
 import com.haizhuo.brain.runtime.api.event.AgentRunCompletedEvent;
 import com.haizhuo.brain.runtime.api.event.AgentTextDeltaEvent;
@@ -14,6 +16,9 @@ import io.agentscope.core.event.ModelCallStartEvent;
 import io.agentscope.core.event.RequestStopEvent;
 import io.agentscope.core.event.RequireExternalExecutionEvent;
 import io.agentscope.core.event.TextBlockDeltaEvent;
+import io.agentscope.core.event.ToolCallDeltaEvent;
+import io.agentscope.core.event.ToolCallEndEvent;
+import io.agentscope.core.event.ToolCallStartEvent;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.MsgRole;
 import io.agentscope.core.message.TextBlock;
@@ -71,5 +76,83 @@ class AgentScopeEventTranslatorTest {
         ModelCallStartEvent ignored = new ModelCallStartEvent("reply-1");
 
         assertEquals(0, translator.translate(RUN_ID, ignored).count().block());
+    }
+
+    @Test
+    void planToolArgumentsAreBufferedIntoASnapshotOnlyWhenTheCallEnds() {
+        translator.translate(RUN_ID, new ToolCallStartEvent("reply-1", "call-1", "plan_write"));
+        assertEquals(0, translator.translate(RUN_ID,
+                new ToolCallDeltaEvent("reply-1", "call-1", "plan_write", "{\"plan\":\"第一步：")).count().block(),
+                "入参还在流式到达，此时不得产出半截计划");
+        assertEquals(0, translator.translate(RUN_ID,
+                new ToolCallDeltaEvent("reply-1", "call-1", "plan_write", "确认需求\"}")).count().block());
+
+        AgentPlanUpdatedEvent plan = assertInstanceOf(AgentPlanUpdatedEvent.class,
+                translator.translate(RUN_ID, new ToolCallEndEvent("reply-1", "call-1", "plan_write")).blockFirst());
+
+        assertEquals(AgentPlanUpdatedEvent.Phase.WRITE, plan.phase());
+        assertEquals("第一步：确认需求", plan.plan());
+    }
+
+    @Test
+    void planPhaseToolsProducePhaseOnlySnapshots() {
+        translator.translate(RUN_ID, new ToolCallStartEvent("reply-1", "call-enter", "plan_enter"));
+        translator.translate(RUN_ID, new ToolCallDeltaEvent("reply-1", "call-enter", "plan_enter", "{}"));
+        AgentPlanUpdatedEvent enter = assertInstanceOf(AgentPlanUpdatedEvent.class,
+                translator.translate(RUN_ID, new ToolCallEndEvent("reply-1", "call-enter", "plan_enter"))
+                        .blockFirst());
+
+        assertEquals(AgentPlanUpdatedEvent.Phase.ENTER, enter.phase());
+        assertNull(enter.plan(), "enter 的空入参不应被当成计划正文");
+
+        translator.translate(RUN_ID, new ToolCallStartEvent("reply-1", "call-exit", "plan_exit"));
+        AgentPlanUpdatedEvent exit = assertInstanceOf(AgentPlanUpdatedEvent.class,
+                translator.translate(RUN_ID, new ToolCallEndEvent("reply-1", "call-exit", "plan_exit")).blockFirst());
+
+        assertEquals(AgentPlanUpdatedEvent.Phase.EXIT, exit.phase());
+        assertNull(exit.plan());
+    }
+
+    @Test
+    void nonPlanToolsProduceNoSnapshot() {
+        translator.translate(RUN_ID, new ToolCallStartEvent("reply-1", "call-9", "meeting.reserve"));
+        translator.translate(RUN_ID,
+                new ToolCallDeltaEvent("reply-1", "call-9", "meeting.reserve", "{\"room\":\"A-101\"}"));
+
+        assertEquals(0, translator.translate(RUN_ID, new ToolCallEndEvent("reply-1", "call-9", "meeting.reserve"))
+                .count().block());
+    }
+
+    @Test
+    void planBodyFallsBackAcrossFieldNamesAndKeepsMalformedInput() {
+        translator.translate(RUN_ID, new ToolCallStartEvent("reply-1", "call-content", "plan_write"));
+        translator.translate(RUN_ID, new ToolCallDeltaEvent("reply-1", "call-content", "plan_write",
+                "{\"content\":\"用 content 字段承载计划\"}"));
+        AgentPlanUpdatedEvent byContent = assertInstanceOf(AgentPlanUpdatedEvent.class,
+                translator.translate(RUN_ID, new ToolCallEndEvent("reply-1", "call-content", "plan_write"))
+                        .blockFirst());
+        assertEquals("用 content 字段承载计划", byContent.plan());
+
+        translator.translate(RUN_ID, new ToolCallStartEvent("reply-1", "call-text", "plan_write"));
+        translator.translate(RUN_ID, new ToolCallDeltaEvent("reply-1", "call-text", "plan_write", "纯文本计划"));
+        AgentPlanUpdatedEvent malformed = assertInstanceOf(AgentPlanUpdatedEvent.class,
+                translator.translate(RUN_ID, new ToolCallEndEvent("reply-1", "call-text", "plan_write")).blockFirst());
+        assertEquals("纯文本计划", malformed.plan(), "入参不是 JSON 时保留原文，不能丢掉整份计划");
+    }
+
+    @Test
+    void planBuffersAreIsolatedPerRunAndDroppedWhenTheRunEnds() {
+        translator.translate(RUN_ID, new ToolCallStartEvent("reply-1", "call-1", "plan_write"));
+        translator.translate(RUN_ID, new ToolCallDeltaEvent("reply-1", "call-1", "plan_write", "{\"plan\":\"本轮\"}"));
+
+        assertEquals(0, translator.translate(new RunId("run-2"),
+                        new ToolCallEndEvent("reply-1", "call-1", "plan_write")).count().block(),
+                "另一个 Run 不得消费本 Run 的计划缓冲");
+
+        Msg answer = Msg.builder().role(MsgRole.ASSISTANT).content(TextBlock.builder().text("结束").build()).build();
+        translator.translate(RUN_ID, new AgentResultEvent(answer));
+
+        assertEquals(0, translator.translate(RUN_ID, new ToolCallEndEvent("reply-1", "call-1", "plan_write"))
+                .count().block(), "Run 终止后残留缓冲必须清理，不得再产出台计划");
     }
 }

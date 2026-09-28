@@ -12,6 +12,7 @@ import com.haizhuo.brain.platform.run.HarnessRunSpecFactory;
 import com.haizhuo.brain.platform.run.RunState;
 import com.haizhuo.brain.platform.run.RunEvent;
 import com.haizhuo.brain.platform.run.SessionEvent;
+import com.haizhuo.brain.platform.run.SessionEventPage;
 import com.haizhuo.brain.platform.run.SessionRunStore;
 import com.haizhuo.brain.platform.run.SessionTimelineItem;
 import com.haizhuo.brain.platform.run.RunGuidance;
@@ -105,6 +106,27 @@ public class SessionApplicationService {
     public java.util.List<SessionEvent> sessionEventsOfOwnedSession(SessionId sessionId, UserId owner,
                                                                     long afterCursor, int limit) {
         return findSessionEvents(sessionId, owner, afterCursor, limit);
+    }
+    /**
+     * 会话事件分页（P2）：带出保留窗口下界，并判定请求游标是否已失效。
+     * 失效必须显式告知而不是返回空批次：空批次与"确实没有新事件"在载荷上无法区分，
+     * 客户端会永久停在旧快照上而不再自愈。
+     */
+    public SessionEventPage sessionEventPage(SessionId sessionId, UserId owner, long afterCursor, int limit) {
+        get(sessionId, owner);
+        return loadSessionEventPage(sessionId, owner, afterCursor, limit);
+    }
+    /** 归属已在本次订阅建立时校验过；语义同 {@link #sessionEventPage}。 */
+    public SessionEventPage sessionEventPageOfOwnedSession(SessionId sessionId, UserId owner,
+                                                           long afterCursor, int limit) {
+        return loadSessionEventPage(sessionId, owner, afterCursor, limit);
+    }
+    private SessionEventPage loadSessionEventPage(SessionId sessionId, UserId owner, long afterCursor, int limit) {
+        long cursorFloor = store.oldestSessionCursor(sessionId, owner);
+        long requested = Math.max(afterCursor, 0);
+        // requested 之后、下界之前的事件已被裁剪才算失效；requested 恰为下界前一条时仍可续传。
+        boolean cursorExpired = requested > 0 && cursorFloor > requested + 1;
+        return new SessionEventPage(findSessionEvents(sessionId, owner, requested, limit), cursorFloor, cursorExpired);
     }
     private java.util.List<SessionEvent> findSessionEvents(SessionId sessionId, UserId owner, long afterCursor, int limit) {
         int boundedLimit = Math.max(1, Math.min(limit, 200));

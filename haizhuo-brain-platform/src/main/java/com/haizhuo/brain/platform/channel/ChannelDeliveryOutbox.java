@@ -8,4 +8,10 @@ public interface ChannelDeliveryOutbox {
 
     /** 记录已投递、可重试、永久性或结果不确定的投递结果，绝不盲目重发。 */
     void recordOutcome(String deliveryId, ChannelOutboundSender.DeliveryResult result);
+
+    /**
+     * 在调用供应商之前落库的投递意图（P3）。同一 idempotencyKey 只入队一次，
+     * 重复入队返回既有记录——这样"已受理但未投递"的状态可查、可在重启后继续。
+     */
+    ChannelDelivery enqueue(ChannelDelivery delivery);
 }
