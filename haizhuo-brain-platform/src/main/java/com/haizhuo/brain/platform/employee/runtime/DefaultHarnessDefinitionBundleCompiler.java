@@ -46,8 +46,9 @@ public class DefaultHarnessDefinitionBundleCompiler implements HarnessDefinition
             CapabilityCatalogEntry entry = repository.findCapability(selection.capabilityCode(), selection.revision())
                     .orElseThrow(() -> new IllegalArgumentException(
                             "Capability revision does not exist: " + selection.capabilityCode() + "@" + selection.revision()));
-            if (entry.type() != CapabilityBinding.CapabilityType.TOOL)
-                throw new IllegalArgumentException("Only tool capabilities can enter the runtime bundle: " + selection.capabilityCode());
+            if (entry.type() != CapabilityBinding.CapabilityType.TOOL
+                    && entry.type() != CapabilityBinding.CapabilityType.MCP)
+                throw new IllegalArgumentException("Only approved tools can enter the runtime bundle: " + selection.capabilityCode());
             if (entry.toolName() == null || entry.toolName().isBlank())
                 throw new IllegalArgumentException("Tool name must not be blank: " + selection.capabilityCode());
             if (entry.description() == null || entry.description().isBlank())
@@ -58,7 +59,8 @@ public class DefaultHarnessDefinitionBundleCompiler implements HarnessDefinition
             if (!toolNames.add(entry.toolName()))
                 throw new IllegalArgumentException("Duplicate tool name in draft: " + entry.toolName());
             catalog.add(new PublishedToolSchema(entry.capabilityRevisionId(), entry.capabilityCode(), entry.toolName(),
-                    entry.description(), entry.inputSchema(), false, entry.requiresConfirmation(), entry.businessAction()));
+                    entry.description(), entry.inputSchema(), "mcp.read".equals(entry.businessAction()),
+                    entry.requiresConfirmation(), entry.businessAction()));
         }
 
         Map<String, Object> workspaceManifest = new LinkedHashMap<>();

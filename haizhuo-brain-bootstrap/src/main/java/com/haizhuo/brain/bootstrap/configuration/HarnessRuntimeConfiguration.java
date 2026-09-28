@@ -6,6 +6,14 @@ import com.haizhuo.brain.platform.employee.runtime.HarnessDefinitionBundleCompil
 import com.haizhuo.brain.platform.channel.ChannelReplyEnqueuer;
 import com.haizhuo.brain.platform.channel.ChannelTurnPromoter;
 import com.haizhuo.brain.platform.employee.runtime.HarnessDefinitionBundleRepository;
+import com.haizhuo.brain.platform.mcp.DefaultMcpToolVisibility;
+import com.haizhuo.brain.platform.mcp.McpAdministrationService;
+import com.haizhuo.brain.platform.mcp.McpCatalogRepository;
+import com.haizhuo.brain.platform.mcp.McpEndpointPolicy;
+import com.haizhuo.brain.platform.mcp.McpRemoteClient;
+import com.haizhuo.brain.platform.mcp.McpUserTokenProvider;
+import com.haizhuo.brain.infrastructure.mcp.SimulatorMcpUserTokenProvider;
+import com.haizhuo.brain.security.identity.port.PlatformIdentityRepository;
 import com.haizhuo.brain.platform.harness.SessionBridgeService;
 import com.haizhuo.brain.platform.harness.SessionBridgeSnapshotRepository;
 import com.haizhuo.brain.platform.harness.SessionHarnessBindingRepository;
@@ -35,6 +43,10 @@ import java.util.List;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.env.Environment;
+import java.util.Arrays;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * 装配平台侧的 harness 服务：执行器白名单、能力包编译器、RunSpec 工厂、会话桥、
@@ -56,8 +68,37 @@ public class HarnessRuntimeConfiguration {
 
     @Bean
     HarnessRunSpecFactory harnessRunSpecFactory(AgentDefinitionRepository definitions,
-                                                CapabilityExecutorRegistry executors) {
-        return new HarnessRunSpecFactory(definitions, executors);
+                                                CapabilityExecutorRegistry executors,
+                                                McpCatalogRepository catalog, McpRemoteClient remote,
+                                                McpUserTokenProvider tokens) {
+        return new HarnessRunSpecFactory(definitions, executors,
+                () -> new DefaultMcpToolVisibility(catalog, remote, tokens));
+    }
+
+    @Bean
+    McpEndpointPolicy mcpEndpointPolicy(Environment environment) {
+        String hosts = environment.getProperty("haizhuo.brain.mcp.allowed-hosts", "");
+        Set<String> allowlist = Arrays.stream(hosts.split(","))
+                .map(String::trim).filter(s -> !s.isBlank()).collect(Collectors.toSet());
+        boolean simulator = environment.getProperty("haizhuo.brain.mcp.simulator.enabled", Boolean.class, false);
+        return new McpEndpointPolicy(allowlist, simulator);
+    }
+
+    @Bean
+    McpUserTokenProvider mcpUserTokenProvider(PlatformIdentityRepository identities,
+                                               Environment environment, Clock clock) {
+        if (!environment.getProperty("haizhuo.brain.mcp.simulator.enabled", Boolean.class, false))
+            return (user, connection) -> { throw new IllegalStateException("MCP identity integration is not configured"); };
+        return new SimulatorMcpUserTokenProvider(identities,
+                environment.getProperty("haizhuo.brain.mcp.simulator.secret"), clock);
+    }
+
+    @Bean
+    McpAdministrationService mcpAdministrationService(McpCatalogRepository catalog,
+                                                       McpRemoteClient remote,
+                                                       McpUserTokenProvider tokens,
+                                                       McpEndpointPolicy endpoints) {
+        return new McpAdministrationService(catalog, remote, tokens, endpoints);
     }
 
     @Bean
@@ -83,9 +124,12 @@ public class HarnessRuntimeConfiguration {
                                                             ToolExecutionUserDirectory users,
                                                             ToolResourcePolicy resourcePolicy,
                                                             CredentialResolver credentials,
-                                                            CapabilityExecutorRegistry executors) {
+                                                            CapabilityExecutorRegistry executors,
+                                                            McpCatalogRepository mcpCatalog,
+                                                            HarnessDefinitionBundleRepository bundles,
+                                                            ToolApprovalRepository approvals) {
         return new DefaultToolExecutionGatewayService(definitions, runSpecs, users, resourcePolicy,
-                credentials, executors);
+                credentials, executors, mcpCatalog, bundles, approvals);
     }
 
     @Bean

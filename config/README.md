@@ -21,7 +21,7 @@ docker compose -f deploy/docker-compose.local.yml up -d
 
 ## Agent 运行时开关
 
-公共配置中的 `haizhuo.brain.run-worker.enabled` 默认为 `false`。关闭时不会注册 Agent 运行时，也不会发起模型调用；开启时才会装配 AgentScope Runtime。当前平台工具网关仍是拒绝执行的安全占位实现，因此不能把开启开关理解为业务能力已经可用。只有在身份认证、用户授权和真实工具网关完成后，才应在对应环境的外置配置中显式设置：
+公共配置中的 `haizhuo.brain.run-worker.enabled` 默认为 `false`。关闭时不会注册 Agent 运行时，也不会发起模型调用；开启时才会装配 AgentScope Runtime。当前平台工具网关已接入本地 Tool 与经批准的 MCP 工具，但 MCP 生产身份对接尚未完成，不能把开启开关理解为真实外部业务能力已经可用。仅在身份认证、授权和目标 Server 经联调后，于对应环境的外置配置中显式设置：
 
 ```yaml
 haizhuo:
@@ -30,4 +30,21 @@ haizhuo:
       enabled: true
 ```
 
-当前仅开放健康检查等基础端点；业务 Run 与管理端点等待真实身份认证后重新接入。原 `meeting-mock` Profile 和脚本已退出。
+管理与 Session/Run 端点使用平台可信身份链路；是否可端到端运行仍取决于本地数据库、Redis、模型服务和目标工具服务。原 `meeting-mock` Profile 和脚本已退出。
+
+## MCP 模拟联调（仅本机/测试）
+
+MCP 连接默认拒绝未知目标；`haizhuo.brain.mcp.allowed-hosts` 只允许显式列出的 HTTPS 主机。下列开关单独放行本机 HTTP，**不得配置在生产环境**。模拟器和平台使用同一条至少 32 字符的临时测试密钥；测试手机号只是用户身份属性，Token 由平台按用户生成，不能把手机号本身当成授权凭据。
+
+```yaml
+haizhuo:
+  brain:
+    mcp:
+      simulator:
+        enabled: true
+        secret: "<仅用于本机联调的临时密钥，至少 32 字符>"
+```
+
+模拟 Server 的 `main` 类为 `com.haizhuo.brain.testsupport.mcp.SimulatedMcpServer`，监听 `127.0.0.1:8765/mcp`（可用 `MCP_SIMULATOR_PORT` 调整）；启动进程前须设置同一 `MCP_SIMULATOR_SECRET`。它实现分页 `tools/list`、逐用户可见性、便笺归属判权、带操作键的幂等写与状态查询。默认写入者和只读者分别是固定测试手机号；本机演示已有账户时，可通过 `MCP_SIMULATOR_WRITER_MOBILE`、`MCP_SIMULATOR_READER_MOBILE` 显式指定这两位用户，分别拥有 `note-a`、`note-b`，不改变平台登录或授权规则。管理员可从「MCP 连接」页登记 `demo-mcp`、发现并逐工具批准，再在数字员工草稿中绑定能力并发布。运行本机功能测试无需手工启动此服务，测试会自行启动随机端口的实例。
+
+关闭模拟开关后，生产 `McpUserTokenProvider` 目前故意拒绝发放凭证；终端用户凭证取得/续期及真实 MCP Server 信任联调尚待对接，不应把模拟签名方案用于生产。

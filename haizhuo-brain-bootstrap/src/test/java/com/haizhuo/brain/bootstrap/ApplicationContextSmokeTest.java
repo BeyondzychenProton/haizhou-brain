@@ -2,6 +2,7 @@ package com.haizhuo.brain.bootstrap;
 
 import com.haizhuo.brain.platform.employee.AgentDefinitionManagementService;
 import com.haizhuo.brain.platform.employee.AgentDefinitionRepository;
+import com.haizhuo.brain.platform.mcp.McpCatalogRepository;
 import com.haizhuo.brain.security.identity.ratelimit.AuthenticationRateLimiter;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
@@ -26,6 +27,7 @@ class ApplicationContextSmokeTest {
         WebTestClient client = WebTestClient.bindToServer().baseUrl("http://localhost:" + port).build();
         client.post().uri("/api/v1/sessions").exchange().expectStatus().is4xxClientError();
         client.get().uri("/api/admin/v1/capabilities").exchange().expectStatus().isUnauthorized();
+        client.get().uri("/api/admin/v1/mcp/connections").exchange().expectStatus().isUnauthorized();
         client.get().uri("/mock/api/v1/rooms/A-201/availability").exchange().expectStatus().is4xxClientError();
     }
 
@@ -67,6 +69,11 @@ class ApplicationContextSmokeTest {
             // 继承 EmployeeCatalog，一个 mock 同时满足两类注入点；Mockito 默认对
             // Optional 返回类型给空值，匿名访问校验无需真实员工数据。
             return org.mockito.Mockito.mock(AgentDefinitionRepository.class);
+        }
+
+        @Bean
+        McpCatalogRepository mcpCatalogRepository() {
+            return org.mockito.Mockito.mock(McpCatalogRepository.class);
         }
 
         @Bean

@@ -42,8 +42,8 @@ public class JdbcAgentDefinitionRepository implements AgentDefinitionRepository 
                 (rs, n) -> definitionRow(rs), tenantId.value(), employeeId);
         if (rows.isEmpty()) return Optional.empty();
         DefinitionRow row = rows.get(0);
-        List<CapabilityBinding> bindings = jdbc.query("SELECT capability_code,capability_revision FROM agent_definition_version_capability WHERE definition_version_id=? ORDER BY position_no",
-                (rs, n) -> new CapabilityBinding(row.versionId(), CapabilityBinding.CapabilityType.TOOL,
+        List<CapabilityBinding> bindings = jdbc.query("SELECT b.capability_code,b.capability_revision,d.capability_type FROM agent_definition_version_capability b JOIN capability_definition d ON d.capability_code=b.capability_code WHERE b.definition_version_id=? ORDER BY b.position_no",
+                (rs, n) -> new CapabilityBinding(row.versionId(), CapabilityBinding.CapabilityType.valueOf(rs.getString("capability_type")),
                         rs.getString("capability_code"), rs.getString("capability_revision")), row.versionId());
         DigitalEmployee employee = new DigitalEmployee(row.employeeId(), new TenantId(row.tenantId()), row.employeeCode(), row.displayName(), row.employeeEnabled());
         AgentDefinitionVersion version = new AgentDefinitionVersion(row.versionId(), row.employeeId(), row.versionNo(), row.instructions(), row.modelProvider(), row.modelName(), row.publishedAt(), row.contentHash());
@@ -241,8 +241,8 @@ public class JdbcAgentDefinitionRepository implements AgentDefinitionRepository 
                 (rs, n) -> definitionRow(rs), employeeId, versionId);
         if (rows.isEmpty()) throw new IllegalStateException("Published definition was not found after commit");
         DefinitionRow row = rows.get(0);
-        List<CapabilityBinding> bindings = jdbc.query("SELECT capability_code,capability_revision FROM agent_definition_version_capability WHERE definition_version_id=? ORDER BY position_no",
-                (rs, n) -> new CapabilityBinding(versionId, CapabilityBinding.CapabilityType.TOOL, rs.getString(1), rs.getString(2)), versionId);
+        List<CapabilityBinding> bindings = jdbc.query("SELECT b.capability_code,b.capability_revision,d.capability_type FROM agent_definition_version_capability b JOIN capability_definition d ON d.capability_code=b.capability_code WHERE b.definition_version_id=? ORDER BY b.position_no",
+                (rs, n) -> new CapabilityBinding(versionId, CapabilityBinding.CapabilityType.valueOf(rs.getString(3)), rs.getString(1), rs.getString(2)), versionId);
         return new PublishedEmployee(new DigitalEmployee(row.employeeId(), new TenantId(row.tenantId()), row.employeeCode(), row.displayName(), row.employeeEnabled()),
                 new AgentDefinitionVersion(versionId, employeeId, row.versionNo(), row.instructions(), row.modelProvider(), row.modelName(), row.publishedAt(), row.contentHash()), bindings);
     }

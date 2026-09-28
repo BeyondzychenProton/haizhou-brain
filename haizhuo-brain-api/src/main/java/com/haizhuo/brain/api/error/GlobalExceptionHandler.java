@@ -1,6 +1,7 @@
 package com.haizhuo.brain.api.error;
 
 import com.haizhuo.brain.platform.employee.AgentDefinitionManagementService;
+import com.haizhuo.brain.platform.mcp.McpRemoteFailure;
 import com.haizhuo.brain.security.identity.AuthenticationRejectedException;
 import jakarta.validation.ConstraintViolationException;
 import org.springframework.dao.DataAccessException;
@@ -18,6 +19,16 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(AuthenticationRejectedException.class)
     public Mono<ResponseEntity<ApiError>> handleAuthentication(AuthenticationRejectedException error) {
         return response(HttpStatus.UNAUTHORIZED, "AUTHENTICATION_FAILED", "认证失败或会话已失效");
+    }
+
+    @ExceptionHandler(McpRemoteFailure.class)
+    public Mono<ResponseEntity<ApiError>> handleMcp(McpRemoteFailure error) {
+        return switch (error.kind()) {
+            case AUTHENTICATION -> response(HttpStatus.UNAUTHORIZED, "MCP_AUTH_EXPIRED", "MCP 登录凭证已失效");
+            case FORBIDDEN -> response(HttpStatus.FORBIDDEN, "MCP_PERMISSION_DENIED", "MCP 工具或资源未获授权");
+            case UNAVAILABLE -> response(HttpStatus.SERVICE_UNAVAILABLE, "MCP_UNAVAILABLE", "MCP 工具暂不可用");
+            case RESULT_UNKNOWN -> response(HttpStatus.SERVICE_UNAVAILABLE, "MCP_RESULT_UNKNOWN", "写操作结果未知，请核查");
+        };
     }
 
     @ExceptionHandler(AccessDeniedException.class)

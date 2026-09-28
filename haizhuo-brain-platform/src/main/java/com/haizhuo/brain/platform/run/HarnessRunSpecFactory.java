@@ -6,6 +6,8 @@ import com.haizhuo.brain.kernel.json.CanonicalJson;
 import com.haizhuo.brain.platform.employee.AgentDefinitionRepository;
 import com.haizhuo.brain.platform.employee.runtime.HarnessDefinitionBundle;
 import com.haizhuo.brain.platform.employee.runtime.PublishedToolSchema;
+import com.haizhuo.brain.platform.employee.CapabilityBinding;
+import com.haizhuo.brain.platform.mcp.McpToolVisibility;
 import com.haizhuo.brain.platform.tool.CapabilityExecutorRegistry;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -19,21 +21,33 @@ import java.util.List;
 public class HarnessRunSpecFactory {
     private final AgentDefinitionRepository definitions;
     private final CapabilityExecutorRegistry executors;
+    private final java.util.function.Supplier<McpToolVisibility> mcpVisibility;
 
     public HarnessRunSpecFactory(AgentDefinitionRepository definitions, CapabilityExecutorRegistry executors) {
+        this(definitions, executors, () -> (user, entry) -> {
+            throw new IllegalStateException("MCP user listing is not configured");
+        });
+    }
+
+    public HarnessRunSpecFactory(AgentDefinitionRepository definitions, CapabilityExecutorRegistry executors,
+                                 java.util.function.Supplier<McpToolVisibility> mcpVisibility) {
         this.definitions = definitions;
         this.executors = executors;
+        this.mcpVisibility = mcpVisibility;
     }
 
     public HarnessRunSpec create(RunId runId, UserId userId, HarnessDefinitionBundle bundle, String channelType) {
         List<String> visible = new ArrayList<>();
         List<String> effective = new ArrayList<>();
+        McpToolVisibility mcp = mcpVisibility.get();
         for (PublishedToolSchema tool : bundle.toolCatalog()) {
             var entry = definitions.findCapabilityByRevisionId(tool.capabilityRevisionId());
             if (entry.isEmpty()) continue;
             if (!definitions.isCapabilityEnabled(entry.get().capabilityCode(), entry.get().revision())) continue;
             if (!executors.supports(entry.get().implementationKey(), entry.get().capabilityCode())) continue;
-            if (!definitions.hasUserCapabilityGrant(userId.value(), entry.get().capabilityCode())) continue;
+            if (entry.get().type() == CapabilityBinding.CapabilityType.MCP) {
+                if (!mcp.visible(userId, entry.get())) continue;
+            } else if (!definitions.hasUserCapabilityGrant(userId.value(), entry.get().capabilityCode())) continue;
             visible.add(tool.toolName());
             effective.add(entry.get().capabilityCode() + "@" + entry.get().revision() + ":" + tool.toolName());
         }

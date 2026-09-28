@@ -41,8 +41,9 @@ public class AgentDefinitionManagementService {
                 throw new IllegalArgumentException("Capability selections must be complete and unique");
             CapabilityCatalogEntry entry = repository.findCapability(selection.capabilityCode(), selection.revision())
                     .orElseThrow(() -> new IllegalArgumentException("Capability revision does not exist"));
-            if (entry.type() != CapabilityBinding.CapabilityType.TOOL)
-                throw new IllegalArgumentException("Only registered tools are supported in this release");
+            if (entry.type() != CapabilityBinding.CapabilityType.TOOL
+                    && entry.type() != CapabilityBinding.CapabilityType.MCP)
+                throw new IllegalArgumentException("Only registered tools or approved MCP tools are supported");
         }
         return repository.saveDraft(employeeId, expectedRevision, update.instructions().trim(),
                 update.modelProvider(), update.modelName().trim(), update.capabilities(),
