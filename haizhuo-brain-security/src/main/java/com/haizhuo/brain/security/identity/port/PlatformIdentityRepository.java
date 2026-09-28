@@ -7,6 +7,9 @@ import com.haizhuo.brain.security.identity.PlatformUser;
 import com.haizhuo.brain.security.identity.PlatformUserAudit;
 import com.haizhuo.brain.security.identity.PlatformUserStatus;
 import java.time.Instant;
+import java.util.Collection;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
@@ -25,6 +28,15 @@ public interface PlatformIdentityRepository {
     long countActiveAdministrators();
 
     Set<PlatformRole> findRoles(UserId userId);
+
+    /** 一次取多个用户的角色，供列表场景使用，避免逐行查询造成 N+1。 */
+    Map<UserId, Set<PlatformRole>> findRoles(Collection<UserId> userIds);
+
+    /** 管理员视角的分页检索；keyword 为空白时不做关键词过滤，status 为 null 时不做状态过滤。 */
+    List<PlatformUser> searchUsers(String keyword, PlatformUserStatus status, int limit, int offset);
+
+    /** 与 {@link #searchUsers} 完全相同的过滤条件，用于分页总数。 */
+    long countUsers(String keyword, PlatformUserStatus status);
 
     PlatformUser createUser(String mobileNormalized, String passwordHash, PlatformUserStatus status,
                             boolean mustChangePassword, UserId createdBy, Instant now);

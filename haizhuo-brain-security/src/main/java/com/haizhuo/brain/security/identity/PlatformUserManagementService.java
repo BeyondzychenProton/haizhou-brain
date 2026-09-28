@@ -7,6 +7,9 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Base64;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -107,6 +110,21 @@ public class PlatformUserManagementService {
                 PlatformIdentityService.state(target), "{\"status\":\"" + requestedStatus + "\"}", reason.trim(), now));
     }
 
+    /**
+     * 管理员视角的用户名单。角色一次性批量取回避免 N+1；手机号按统一口径脱敏，
+     * 且返回结构里不含任何凭据字段。
+     */
+    @Transactional(readOnly = true)
+    public UserDirectoryPage list(String keyword, PlatformUserStatus status, int limit, int offset) {
+        List<PlatformUser> users = repository.searchUsers(keyword, status, limit, Math.max(offset, 0));
+        Map<UserId, Set<PlatformRole>> roles = repository.findRoles(users.stream().map(PlatformUser::id).toList());
+        List<UserDirectoryEntry> content = users.stream()
+                .map(user -> new UserDirectoryEntry(user.id().value(), maskMobile(user.mobileNormalized()), user.status(),
+                        roles.getOrDefault(user.id(), Set.of()).stream().map(Enum::name).sorted().toList()))
+                .toList();
+        return new UserDirectoryPage(content, repository.countUsers(keyword, status));
+    }
+
     public void activate(String rawCredential, String newPassword) {
         activate(rawCredential, newPassword, "unknown");
     }
@@ -171,6 +189,11 @@ public class PlatformUserManagementService {
         return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
     }
 
+    private static String maskMobile(String mobile) {
+        if (mobile == null || mobile.length() < 7) return "***";
+        return mobile.substring(0, 3) + "****" + mobile.substring(mobile.length() - 4);
+    }
+
     private static void requireReason(String reason) {
         if (reason == null || reason.isBlank() || reason.trim().length() > 500) {
             throw new IllegalArgumentException("操作原因不能为空且不能超过 500 个字符");
@@ -184,5 +207,12 @@ public class PlatformUserManagementService {
     }
 
     public record CreatedPendingUser(PlatformUser user, ActivationCredential activationCredential) {
+    }
+
+    /** 名单里的一行用户；roles 已排序，便于前端稳定展示。 */
+    public record UserDirectoryEntry(long userId, String mobileMasked, PlatformUserStatus status, List<String> roles) {
+    }
+
+    public record UserDirectoryPage(List<UserDirectoryEntry> content, long total) {
     }
 }

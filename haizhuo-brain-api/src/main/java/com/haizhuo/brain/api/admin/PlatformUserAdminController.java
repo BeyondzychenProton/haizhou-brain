@@ -6,30 +6,49 @@ import com.haizhuo.brain.security.identity.AuthenticatedUser;
 import com.haizhuo.brain.security.identity.PlatformUserManagementService;
 import com.haizhuo.brain.security.identity.PlatformUserStatus;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 import java.time.Instant;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
 /** 角色与操作者均取自安全上下文；请求体无法自我提权。 */
 @RestController
+@Validated
 @RequestMapping("/api/admin/v1/users")
 public class PlatformUserAdminController {
     private final PlatformUserManagementService managementService;
 
     public PlatformUserAdminController(PlatformUserManagementService managementService) {
         this.managementService = managementService;
+    }
+
+    /**
+     * 名单查询。keyword 按手机号模糊匹配，status 为空表示不限状态；
+     * 返回的手机号已脱敏，页面拿不到任何凭据字段。
+     */
+    @GetMapping
+    public Mono<PlatformUserManagementService.UserDirectoryPage> list(
+            @RequestParam(required = false) @Size(max = 32) String keyword,
+            @RequestParam(required = false) PlatformUserStatus status,
+            @RequestParam(defaultValue = "20") @Min(1) @Max(100) int limit,
+            @RequestParam(defaultValue = "0") @Min(0) int offset) {
+        return blocking(() -> managementService.list(keyword, status, limit, offset));
     }
 
     @PostMapping

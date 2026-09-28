@@ -9,7 +9,11 @@ import com.haizhuo.brain.security.identity.PlatformUserStatus;
 import com.haizhuo.brain.security.identity.port.PlatformIdentityRepository;
 import java.sql.Types;
 import java.time.Instant;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.EnumSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -78,8 +82,49 @@ public class JdbcPlatformIdentityRepository implements PlatformIdentityRepositor
 
     @Override
     public Set<PlatformRole> findRoles(UserId userId) {
-        return namedJdbc.queryForList("SELECT role_code FROM platform_user_role WHERE user_id=:id", parameters().addValue("id", userId.value()), String.class)
-                .stream().map(PlatformRole::valueOf).collect(Collectors.toUnmodifiableSet());
+        return findRoles(List.of(userId)).getOrDefault(userId, Set.of());
+    }
+
+    @Override
+    public Map<UserId, Set<PlatformRole>> findRoles(Collection<UserId> userIds) {
+        List<UserId> distinct = userIds.stream().distinct().toList();
+        if (distinct.isEmpty()) return Map.of();
+        Map<UserId, Set<PlatformRole>> roles = distinct.stream()
+                .collect(Collectors.toMap(user -> user, user -> EnumSet.noneOf(PlatformRole.class)));
+        namedJdbc.query("SELECT user_id,role_code FROM platform_user_role WHERE user_id IN (:ids)",
+                        parameters().addValue("ids", distinct.stream().map(UserId::value).toList()),
+                        (rs, row) -> Map.entry(rs.getLong("user_id"), rs.getString("role_code")))
+                .forEach(entry -> roles.get(new UserId(entry.getKey())).add(PlatformRole.valueOf(entry.getValue())));
+        return roles.entrySet().stream().collect(Collectors.toUnmodifiableMap(Map.Entry::getKey,
+                entry -> Collections.unmodifiableSet(entry.getValue())));
+    }
+
+    @Override
+    public List<PlatformUser> searchUsers(String keyword, PlatformUserStatus status, int limit, int offset) {
+        return namedJdbc.query("SELECT * FROM platform_user " + userFilter()
+                        + " ORDER BY id DESC LIMIT :limit OFFSET :offset",
+                userFilterParameters(keyword, status).addValue("limit", limit).addValue("offset", offset), USER_MAPPER);
+    }
+
+    @Override
+    public long countUsers(String keyword, PlatformUserStatus status) {
+        Long total = namedJdbc.queryForObject("SELECT COUNT(*) FROM platform_user " + userFilter(),
+                userFilterParameters(keyword, status), Long.class);
+        return total == null ? 0L : total;
+    }
+
+    /** 关键词与状态都是可选过滤项，为空时退化成匹配全部的条件。 */
+    private static String userFilter() {
+        return "WHERE (:keyword IS NULL OR mobile_normalized LIKE CONCAT('%', :keyword, '%')) "
+                + "AND (:status IS NULL OR status = :status)";
+    }
+
+    private static MapSqlParameterSource userFilterParameters(String keyword, PlatformUserStatus status) {
+        String trimmed = keyword == null || keyword.isBlank() ? null : keyword.trim();
+        // null 参数必须显式给出 JDBC 类型，否则驱动推断不出来会直接报错。
+        return parameters()
+                .addValue("keyword", trimmed, Types.VARCHAR)
+                .addValue("status", status == null ? null : status.name(), Types.VARCHAR);
     }
 
     @Override

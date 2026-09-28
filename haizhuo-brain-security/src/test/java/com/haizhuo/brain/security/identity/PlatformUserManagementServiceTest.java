@@ -1,7 +1,10 @@
 package com.haizhuo.brain.security.identity;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.eq;
@@ -10,10 +13,14 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.haizhuo.brain.kernel.identity.UserId;
+import com.haizhuo.brain.security.identity.PlatformUserManagementService.UserDirectoryEntry;
+import com.haizhuo.brain.security.identity.PlatformUserManagementService.UserDirectoryPage;
 import com.haizhuo.brain.security.identity.port.PlatformIdentityRepository;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import org.junit.jupiter.api.BeforeEach;
@@ -75,6 +82,37 @@ class PlatformUserManagementServiceTest {
         assertThrows(IllegalStateException.class,
                 () -> service.initializeFirstAdmin("13812345678", "A-safe-password-123"));
         verify(repository, never()).createUser(any(), any(), any(), anyBoolean(), any(), any());
+    }
+
+    @Test
+    void directoryEntryMasksMobileAndSortsRoles() {
+        PlatformUser user = new PlatformUser(new UserId(7), "+8613800000001", "hashed-secret",
+                PlatformUserStatus.ACTIVE, 3, false);
+        when(repository.searchUsers("1380", PlatformUserStatus.ACTIVE, 20, 40)).thenReturn(List.of(user));
+        when(repository.findRoles(List.of(user.id())))
+                .thenReturn(Map.of(user.id(), Set.of(PlatformRole.USER, PlatformRole.PLATFORM_ADMIN)));
+        when(repository.countUsers("1380", PlatformUserStatus.ACTIVE)).thenReturn(1L);
+
+        UserDirectoryPage page = service.list("1380", PlatformUserStatus.ACTIVE, 20, 40);
+
+        assertEquals(1, page.total());
+        UserDirectoryEntry entry = page.content().get(0);
+        assertEquals(7, entry.userId());
+        assertEquals(PlatformUserStatus.ACTIVE, entry.status());
+        assertEquals(List.of("PLATFORM_ADMIN", "USER"), entry.roles());
+        // 名单必须继续脱敏：这里守住「完整手机号与密码散列都不得出现在管理端响应里」。
+        assertEquals("+86****0001", entry.mobileMasked());
+        assertFalse(entry.mobileMasked().contains("13800000001"));
+    }
+
+    @Test
+    void negativeOffsetIsClampedInsteadOfReachingTheSqlDriver() {
+        when(repository.searchUsers(null, null, 20, 0)).thenReturn(List.of());
+        when(repository.findRoles(List.of())).thenReturn(Map.of());
+        when(repository.countUsers(null, null)).thenReturn(0L);
+
+        assertTrue(service.list(null, null, 20, -5).content().isEmpty());
+        verify(repository).searchUsers(null, null, 20, 0);
     }
 
     private PlatformUser activeTarget() {
