@@ -14,6 +14,14 @@ interface ApiErrorBody {
 export function toMessage(error: unknown, fallback = '操作失败，请稍后重试'): string {
   const axiosError = error as AxiosError<ApiErrorBody> | undefined
   if (!axiosError?.response) return '网络连接失败，请检查网络后重试'
+  // 个别业务错误给出可操作的中文指引，优先于后端英文原文。
+  const knownMessages: Record<string, string> = {
+    'Published definition has no runtime bundle; re-publish the employee first':
+      '当前员工定义发布时缺少运行时能力包，请在「管理端 → 定义编排」中重新校验并发布后再运行',
+    'Session employee is no longer published': '该会话对应的员工已被下线，请新建会话',
+  }
+  const known = knownMessages[axiosError.response.data?.message ?? '']
+  if (known) return known
   if (axiosError.response.data?.message) return axiosError.response.data.message
   switch (axiosError.response.status) {
     case 400:
