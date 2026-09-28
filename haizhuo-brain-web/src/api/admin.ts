@@ -31,6 +31,92 @@ export function setCapabilityStatus(capabilityCode: string, enabled: boolean, re
     .then(r => r.data)
 }
 
+/* ---------------- 可信 MCP 连接与逐工具审核 ---------------- */
+
+export interface McpConnection {
+  id: number
+  code: string
+  displayName: string
+  endpoint: string
+  revision: number
+  enabled: boolean
+}
+
+export interface McpToolDescriptor {
+  name: string
+  description: string
+  inputSchema: Record<string, unknown>
+  outputSchema: Record<string, unknown>
+  readOnlyHint: boolean
+}
+
+export interface McpDiscovery {
+  snapshotId: number
+  tools: McpToolDescriptor[]
+}
+
+export interface McpDiscoverySnapshotSummary {
+  snapshotId: number
+  connectionRevision: number
+  discoveredAt: string
+  toolCount: number
+}
+
+export interface McpToolChange {
+  name: string
+  type: 'ADDED' | 'REMOVED' | 'CHANGED'
+  changedFields: Array<'description' | 'inputSchema' | 'outputSchema' | 'readOnlyHint'>
+  before: McpToolDescriptor | null
+  after: McpToolDescriptor | null
+}
+
+export interface McpDiscoveryDiff {
+  previous: McpDiscoverySnapshotSummary | null
+  current: McpDiscoverySnapshotSummary | null
+  changes: McpToolChange[]
+}
+
+export interface McpApproval {
+  snapshotId: number
+  capabilityCode: string
+  revision: string
+  modelToolName: string
+  displayName: string
+  description: string
+  readOnly: boolean
+  requiresConfirmation: boolean
+  reason: string
+}
+
+export function mcpConnections() {
+  return httpClient.get<McpConnection[]>('/api/admin/v1/mcp/connections').then(r => r.data)
+}
+
+export function createMcpConnection(code: string, displayName: string, endpoint: string, reason: string) {
+  return httpClient.post<McpConnection>('/api/admin/v1/mcp/connections', { code, displayName, endpoint, reason })
+    .then(r => r.data)
+}
+
+export function setMcpConnectionStatus(id: number, enabled: boolean, reason: string) {
+  return httpClient.put<void>(`/api/admin/v1/mcp/connections/${id}/status`, { enabled, reason })
+    .then(r => r.data)
+}
+
+export function discoverMcpTools(id: number) {
+  return httpClient.post<McpDiscovery>(`/api/admin/v1/mcp/connections/${id}/discover`).then(r => r.data)
+}
+
+export function mcpDiscoveryDiff(id: number) {
+  return httpClient.get<McpDiscoveryDiff>(`/api/admin/v1/mcp/connections/${id}/discoveries/diff`)
+    .then(r => r.data)
+}
+
+export function approveMcpTool(id: number, remoteName: string, approval: McpApproval) {
+  return httpClient.post<{ capabilityRevisionId: number }>(
+    `/api/admin/v1/mcp/connections/${id}/tools/${encodeURIComponent(remoteName)}/approve`, approval
+  ).then(r => r.data)
+}
+
 /** 用户级能力授权：授予与撤销都走同一个 enabled 开关，响应体为空。 */
 export function setUserGrant(userId: number, capabilityCode: string, enabled: boolean, reason: string) {
   return httpClient

@@ -40,6 +40,7 @@
             <el-checkbox v-for="capability in catalog" :key="valueOf(capability)" :value="valueOf(capability)">
               {{ capability.displayName }}
               <span class="muted">({{ capability.capabilityCode }} · {{ capability.revision }})</span>
+              <el-tag v-if="capability.type === 'MCP'" size="small" type="warning">MCP · 由服务端判权</el-tag>
               <el-tag v-if="!capability.enabled" size="small" type="info">已停用</el-tag>
             </el-checkbox>
           </el-checkbox-group>
@@ -54,6 +55,17 @@
           <el-button type="success" :loading="publishing" @click="publish">发布</el-button>
         </el-form-item>
       </el-form>
+
+      <el-card v-if="selectedCapabilities.length" class="block">
+        <template #header>拟发布工具契约（以保存后的草稿和服务端校验为准）</template>
+        <el-table :data="selectedCapabilities" border size="small">
+          <el-table-column prop="displayName" label="能力" min-width="130" />
+          <el-table-column prop="toolName" label="模型工具名" min-width="160" />
+          <el-table-column label="来源" width="90"><template #default="{ row }">{{ row.type === 'MCP' ? 'MCP' : '本地' }}</template></el-table-column>
+          <el-table-column prop="businessAction" label="动作" min-width="100" />
+          <el-table-column label="确认" width="90"><template #default="{ row }">{{ row.requiresConfirmation ? '必需' : '不需要' }}</template></el-table-column>
+        </el-table>
+      </el-card>
 
       <div v-if="validation" class="block">
         <el-alert v-if="validation.publishable" title="校验通过，可以发布" type="success" :closable="false" />
@@ -76,7 +88,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import type { FormInstance, FormRules } from 'element-plus'
 import * as adminApi from '../../api/admin'
 import type { Capability, PublishedEmployee, ValidationResult } from '../../api/admin'
@@ -106,6 +118,8 @@ const publishing = ref(false)
 const loadError = ref('')
 const validation = ref<ValidationResult>()
 const published = ref<PublishedEmployee>()
+const selectedCapabilities = computed(() => catalog.value.filter(item =>
+  form.value?.selected.includes(valueOf(item))))
 
 const rules: FormRules<DraftForm> = {
   instructions: [{ required: true, message: '请填写系统指令', trigger: 'blur' }],
