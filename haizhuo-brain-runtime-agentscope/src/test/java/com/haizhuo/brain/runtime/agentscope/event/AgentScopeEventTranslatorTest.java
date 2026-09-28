@@ -19,9 +19,11 @@ import io.agentscope.core.event.TextBlockDeltaEvent;
 import io.agentscope.core.event.ToolCallDeltaEvent;
 import io.agentscope.core.event.ToolCallEndEvent;
 import io.agentscope.core.event.ToolCallStartEvent;
+import io.agentscope.core.event.ToolResultEndEvent;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.MsgRole;
 import io.agentscope.core.message.TextBlock;
+import io.agentscope.core.message.ToolResultState;
 import io.agentscope.core.message.ToolUseBlock;
 import java.util.List;
 import java.util.Map;
@@ -145,14 +147,52 @@ class AgentScopeEventTranslatorTest {
         translator.translate(RUN_ID, new ToolCallStartEvent("reply-1", "call-1", "plan_write"));
         translator.translate(RUN_ID, new ToolCallDeltaEvent("reply-1", "call-1", "plan_write", "{\"plan\":\"本轮\"}"));
 
-        assertEquals(0, translator.translate(new RunId("run-2"),
-                        new ToolCallEndEvent("reply-1", "call-1", "plan_write")).count().block(),
-                "另一个 Run 不得消费本 Run 的计划缓冲");
+        AgentPlanUpdatedEvent otherRun = assertInstanceOf(AgentPlanUpdatedEvent.class,
+                translator.translate(new RunId("run-2"),
+                        new ToolCallEndEvent("reply-1", "call-1", "plan_write")).blockFirst());
+        assertNull(otherRun.plan(), "另一个 Run 绝不能读到本 Run 缓存的计划正文");
 
         Msg answer = Msg.builder().role(MsgRole.ASSISTANT).content(TextBlock.builder().text("结束").build()).build();
         translator.translate(RUN_ID, new AgentResultEvent(answer));
 
-        assertEquals(0, translator.translate(RUN_ID, new ToolCallEndEvent("reply-1", "call-1", "plan_write"))
-                .count().block(), "Run 终止后残留缓冲必须清理，不得再产出台计划");
+        AgentPlanUpdatedEvent afterRunEnd = assertInstanceOf(AgentPlanUpdatedEvent.class,
+                translator.translate(RUN_ID, new ToolCallEndEvent("reply-1", "call-1", "plan_write")).blockFirst());
+        assertNull(afterRunEnd.plan(), "Run 终止后残留缓冲必须清理，不得再把旧正文当成新计划");
+    }
+
+    @Test
+    void realEventStreamShapeOnlyNeedsDeltaAndToolResultEnd() {
+        // 真机验证：Harness 事件流不含 TOOL_CALL_START/END，实际可用的收尾信号是 TOOL_RESULT_END。
+        translator.translate(RUN_ID, new ToolCallDeltaEvent("reply-1", "call-1", "plan_write",
+                "{\"plan\":\"真机计划\"}"));
+
+        AgentPlanUpdatedEvent plan = assertInstanceOf(AgentPlanUpdatedEvent.class,
+                translator.translate(RUN_ID, new ToolResultEndEvent("reply-1", "call-1", "plan_write",
+                        ToolResultState.SUCCESS)).blockFirst());
+
+        assertEquals(AgentPlanUpdatedEvent.Phase.WRITE, plan.phase());
+        assertEquals("真机计划", plan.plan());
+    }
+
+    @Test
+    void deltaWithoutToolNameStillResolvesToPlanAtResultEnd() {
+        // 入参增量不一定带工具名，只靠结果结束事件也必须能识别计划工具。
+        translator.translate(RUN_ID, new ToolCallDeltaEvent("reply-1", "call-1", null, "{\"plan\":\"无名字计划\"}"));
+
+        AgentPlanUpdatedEvent plan = assertInstanceOf(AgentPlanUpdatedEvent.class,
+                translator.translate(RUN_ID, new ToolResultEndEvent("reply-1", "call-1", "plan_write",
+                        ToolResultState.SUCCESS)).blockFirst());
+
+        assertEquals("无名字计划", plan.plan());
+    }
+
+    @Test
+    void nonPlanToolArgumentsAreDroppedAtResultEnd() {
+        translator.translate(RUN_ID, new ToolCallDeltaEvent("reply-1", "call-9", "meeting.reserve",
+                "{\"room\":\"A-101\"}"));
+
+        assertEquals(0, translator.translate(RUN_ID, new ToolResultEndEvent("reply-1", "call-9", "meeting.reserve",
+                        ToolResultState.SUCCESS)).count().block(),
+                "非计划工具的内部参数不得落成计划事件");
     }
 }

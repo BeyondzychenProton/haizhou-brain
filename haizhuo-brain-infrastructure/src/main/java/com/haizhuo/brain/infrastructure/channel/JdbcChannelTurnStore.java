@@ -58,9 +58,24 @@ public class JdbcChannelTurnStore implements ChannelTurnStore {
 
         SessionId sessionId = conversationSession(binding, message)
                 .orElseGet(() -> openConversation(binding, message, userId));
+        if (hasActiveRun(sessionId)) {
+            // V10 之后平台在数据库层强制"每个会话同一时刻只有一个活动 Run"，
+            // 因此会话忙时的新消息按契约登记为"已受理、等待中"（runId 为空），
+            // 而不是去撞唯一约束抛错——那会让渠道侧把一次正常入站当成故障。
+            recordInbox(message, binding, userId, sessionId, null);
+            return new ChannelAcceptance(sessionId, Optional.empty(), false);
+        }
         AgentRun run = sessions.createRun(sessionId, userId, message.providerEventId(), message.text());
         recordInbox(message, binding, userId, sessionId, run);
         return new ChannelAcceptance(sessionId, Optional.of(run.id()), false);
+    }
+
+    /** 活动状态集合必须与 active_marker 生成列保持一致，否则会漏判。 */
+    private boolean hasActiveRun(SessionId sessionId) {
+        Integer active = jdbc.queryForObject("SELECT COUNT(*) FROM platform_agent_run WHERE session_id=? "
+                        + "AND state IN ('QUEUED','RUNNING','WAITING_TOOL','WAITING_CONFIRMATION','CANCELLING')",
+                Integer.class, sessionId.value());
+        return active != null && active > 0;
     }
 
     private Optional<ChannelAcceptance> findAccepted(String bindingId, String providerEventId) {
@@ -95,7 +110,8 @@ public class JdbcChannelTurnStore implements ChannelTurnStore {
                         + "content,accepted_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 binding.bindingId(), message.providerEventId(), message.provider(),
                 message.externalConversationId(), message.externalUserId(), userId.value(), sessionId.value(),
-                run.id().value(), message.replyTarget(), truncate(message.text()), Timestamp.from(clock.instant()));
+                run == null ? null : run.id().value(), message.replyTarget(), truncate(message.text()),
+                Timestamp.from(clock.instant()));
     }
 
     private static String truncate(String content) {

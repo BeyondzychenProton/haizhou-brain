@@ -17,11 +17,13 @@ import io.agentscope.core.event.RequireExternalExecutionEvent;
 import io.agentscope.core.event.TextBlockDeltaEvent;
 import io.agentscope.core.event.ToolCallDeltaEvent;
 import io.agentscope.core.event.ToolCallEndEvent;
-import io.agentscope.core.event.ToolCallStartEvent;
+import io.agentscope.core.event.ToolResultEndEvent;
 import io.agentscope.core.message.Msg;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import reactor.core.publisher.Flux;
 
 /**
@@ -33,6 +35,8 @@ import reactor.core.publisher.Flux;
  * 因此必须缓冲到调用结束再翻译成 {@link AgentPlanUpdatedEvent}（P2 plan.snapshot）。</p>
  */
 public class AgentScopeEventTranslator {
+
+    private static final Logger LOG = LoggerFactory.getLogger(AgentScopeEventTranslator.class);
 
     /** 计划工具名取自 Harness PlanModeTools（javap 核对取值：plan_enter / plan_write / plan_exit）。 */
     static final String PLAN_ENTER = "plan_enter";
@@ -51,22 +55,19 @@ public class AgentScopeEventTranslator {
     private final Map<String, PlanBuffer> planBuffers = new ConcurrentHashMap<>();
 
     public Flux<BrainAgentEvent> translate(RunId runId, AgentEvent event) {
-        if (event instanceof ToolCallStartEvent started && isPlanTool(started.getToolCallName())) {
-            // 计划工具在调用开始就建立缓冲：enter/exit 可能完全没有入参，
-            // 但平台仍需要它们来表达计划模式的开关。
-            planBuffers.putIfAbsent(key(runId, started.getToolCallId()),
-                    new PlanBuffer(runId, started.getToolCallName()));
-            return Flux.empty();
-        }
-        if (event instanceof ToolCallDeltaEvent delta && isPlanTool(delta.getToolCallName())) {
+        if (event instanceof ToolCallDeltaEvent delta) {
+            // 真机验证确认：Harness 的事件流只发出 TOOL_CALL_DELTA，没有 TOOL_CALL_START/END。
+            // 因此对所有工具入参先缓冲，等结果结束事件再按工具名决定是否产出计划。
             planBuffers.computeIfAbsent(key(runId, delta.getToolCallId()),
                     ignored -> new PlanBuffer(runId, delta.getToolCallName())).append(delta.getDelta());
             return Flux.empty();
         }
         if (event instanceof ToolCallEndEvent ended) {
-            // 结束事件不一定带工具名，所以按 toolCallId 取缓冲而不是按名字判断。
-            PlanBuffer buffer = planBuffers.remove(key(runId, ended.getToolCallId()));
-            return buffer == null ? Flux.empty() : Flux.just(planEvent(buffer));
+            return Flux.fromIterable(flushPlan(runId, ended.getToolCallId(), ended.getToolCallName()));
+        }
+        if (event instanceof ToolResultEndEvent ended) {
+            // 工具结果结束是实际可用的收尾信号，也是计划正文真正写完的时刻。
+            return Flux.fromIterable(flushPlan(runId, ended.getToolCallId(), ended.getToolCallName()));
         }
         if (event instanceof RequireExternalExecutionEvent suspension) {
             List<PendingExternalToolCall> calls = suspension.getToolCalls().stream()
@@ -90,11 +91,28 @@ public class AgentScopeEventTranslator {
             forgetRun(runId);
             return Flux.just(new AgentRunCancelledEvent(runId, "运行已在安全检查点取消"));
         }
+        // 诊断用：确认事件流实际包含哪些类型（例如计划工具调用是否以事件形式浮现）。
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("Unmapped AgentScope event: type={} class={}", event.getType(),
+                    event.getClass().getSimpleName());
+        }
         return Flux.empty();
     }
 
-    private static BrainAgentEvent planEvent(PlanBuffer buffer) {
-        return new AgentPlanUpdatedEvent(buffer.runId, phaseOf(buffer.toolName), extractPlan(buffer.raw()));
+    /**
+     * 工具结束时结算缓冲：只有计划工具才产出计划事件，其余工具的入参直接丢弃。
+     * 工具名优先取入参增量携带的名字，其次取结束事件的名字；两者都没有时无法识别，
+     * 这与真实事件流一致（Harness 只发增量，名字可能只出现在其中一侧）。
+     * 即使没有入参增量，只要结束事件表明是计划工具，也产出只带阶段的事件。
+     */
+    private List<BrainAgentEvent> flushPlan(RunId runId, String toolCallId, String toolCallName) {
+        PlanBuffer buffer = planBuffers.remove(key(runId, toolCallId));
+        String name = buffer != null && isPlanTool(buffer.toolName) ? buffer.toolName : toolCallName;
+        if (!isPlanTool(name)) {
+            return List.of();
+        }
+        return List.of(new AgentPlanUpdatedEvent(runId, phaseOf(name),
+                buffer == null ? null : extractPlan(buffer.raw())));
     }
 
     private static AgentPlanUpdatedEvent.Phase phaseOf(String toolName) {
