@@ -21,7 +21,7 @@ docker compose -f deploy/docker-compose.local.yml up -d
 
 ## Agent 运行时开关
 
-公共配置中的 `haizhuo.brain.run-worker.enabled` 默认为 `false`。关闭时不会注册 Agent 运行时，也不会发起模型调用；开启时才会装配 AgentScope Runtime。当前平台工具网关已接入本地 Tool 与经批准的 MCP 工具，但 MCP 生产身份对接尚未完成，不能把开启开关理解为真实外部业务能力已经可用。仅在身份认证、授权和目标 Server 经联调后，于对应环境的外置配置中显式设置：
+公共配置中的 `haizhuo.brain.run-worker.enabled` 默认为 `false`。关闭时不会注册 Agent 运行时，也不会发起模型调用；开启时才会装配 AgentScope Runtime。本机模拟联调可在测试身份、模型和模拟 Server 均配置完成后显式开启；生产环境则必须先完成真实凭证、授权和目标 Server 联调。开关打开不等于真实外部业务能力可用：
 
 ```yaml
 haizhuo:

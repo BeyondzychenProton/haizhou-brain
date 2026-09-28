@@ -3,7 +3,7 @@
 | 项目 | 内容 |
 | --- | --- |
 | 日期 | 2026-09-28 |
-| 状态 | 架构与产品边界已确认；MCP 对接、详细设计及端到端验证尚未完成 |
+| 状态 | 边界已确认；本机 MCP 模拟闭环已实现并经自动化验证，真实 Server 与真实用户凭证未联调 |
 | 用途 | 作为后续接口、持久化、管理页面、运行链路和验收设计的共同约束，不直接充当编码清单或完成证明 |
 | 适用范围 | 可执行的本地 Tool 与可信 MCP 子工具；MCP Resource、Prompt 和知识库另行设计 |
 | 关联文档 | [Agent 能力配置与发布架构](Agent能力配置与发布架构.md)、[Agent 资源与动作权限设计](../02-身份与会话/Agent资源与动作权限设计.md)、[数字员工 Harness 运行时与版本状态切换详细设计](数字员工Harness运行时与版本状态切换详细设计.md) |
@@ -18,14 +18,14 @@
 
 ## 2. 当前代码和框架证据
 
-以下是截至本文日期的代码现状，不是 MCP 已交付声明：
+以下为 2026-09-28 的代码状态；模拟环境的实测范围见[功能验收报告](../07-测试报告/工具与MCP模拟闭环功能验收报告.md)，不能据此推断真实 MCP Server 已接通。
 
 | 已有事实 | 证据与限制 |
 | --- | --- |
-| 根 `pom.xml` 锁定 AgentScope Java `2.0.3`；能力目录已保存修订、工具名、Schema、实现键、业务动作和确认要求 | `CapabilityCatalogEntry`、Flyway V2/V9；当前目录与管理页面主要服务本地能力 |
-| 数字员工草稿、发布能力包和 Run 工具视图已有主干 | `AgentDefinitionManagementService` 与 `DefaultHarnessDefinitionBundleCompiler` 当前只接受 `TOOL`；`HarnessRunSpecFactory` 用平台用户能力授权筛选工具，不是 MCP 逐用户列表 |
-| 外部工具在 Harness 中以仅 Schema 形式装配，实际调用交回平台 | `ExternalToolSchemaAssembler` 不携带 MCP 地址或凭证；`DefaultToolExecutionGatewayService` 目前按本地工具逻辑执行平台资源策略，执行异常会归为通用错误，尚不满足本文的 MCP 错误分类 |
-| `CapabilityBinding.CapabilityType.MCP` 是预留类型 | 尚无 MCP 连接管理、逐用户发现、子工具批准和真实 MCP 调用闭环；不能把枚举值当作已接通 |
+| 根 `pom.xml` 锁定 AgentScope Java `2.0.3`；能力目录已保存工具修订及来源 | Flyway V2/V9/V17/V18；管理页支持 MCP 连接、发现差异和逐工具批准 |
+| 数字员工发布和 Run 工具视图支持 `TOOL`、`MCP` | `DefaultHarnessDefinitionBundleCompiler` 接受两类绑定；`HarnessRunSpecFactory` 对 MCP 使用当前用户的远端列表收窄可见工具 |
+| Harness 仅装配工具 Schema，实际调用回到平台 | `ExternalToolSchemaAssembler` 不携带 MCP 地址或 Token；网关区分本地/MCP 路由及远端失败类别，非模拟模式取不到真实凭证时拒绝调用 |
+| 本机模拟 Server 已覆盖按用户列举和逐次资源判权 | 用加工手机号生成的测试 Token 仅供模拟验收；当前配置模型在浏览器自动交互中触发模拟工具的本机演示已记录，真实用户 Token 获取/续期、真实 Server 错误契约和用户人工验收仍未完成 |
 
 AgentScope 2.0.3 已有 MCP 客户端、Toolkit 注册和子工具筛选，也提供每次 HTTP 请求的 `httpRequestCustomizer`。但其直接注册会在初始化/装配阶段发现工具；原生 `McpTool` 的上下文传递与错误转换也不能直接证明共享客户端的逐用户身份隔离及写操作结果分类。首版应优先复用原生 MCP 协议客户端，保留平台控制的外部工具执行边界；只有经过双用户并发、逐用户发现和失败分类验证，才考虑把 MCP 客户端直接注册进共享 Harness 模板。不得重写一套 MCP 协议栈。
 

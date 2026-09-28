@@ -1,6 +1,6 @@
 # Session 与 Run 历史、队列及运行中引导详细设计
 
-> 状态：待开发
+> 状态：后端 Session/Run 排队、历史时间线、引导、取消及会话级 SSE 已实现；真实模型/浏览器端到端另需验收
 >
 > 版本：v1
 >
@@ -8,7 +8,7 @@
 
 ## 1. 要解决的问题
 
-当前平台已经能把一条输入创建为一个 Run，并持久化该 Run 的事件。但它仍是“单次执行视角”：页面只能读取一个 Run 的事件，后续普通消息不能排队，运行中的 Agent 也无法在工具返回后接收新的引导信息。
+制定本设计时，页面只能读取单个 Run 的事件，普通消息不能排队，也缺少运行中引导。当前代码已支持会话历史、同会话排队、取消、引导及持久事件；下文保留设计约束，实际完成范围以[项目说明](../../项目说明.md)与代码为准。
 
 本设计把这三个概念分开：
 
@@ -138,44 +138,30 @@ worker 领取 Run 时遵守“每个 Session 串行、跨 Session 可并行”�
 
 不能承诺在长时间、不可取消的工具调用中瞬时生效。若工具正在执行，引导先可靠落库；工具返回后才会被消费。对需要更快响应的工具，后续应定义协作式取消协议与合理超时，但不能用线程强杀代替业务补偿。
 
-## 7. 运行时改造
+## 7. 当前运行时边界
 
-当前 `AgentScopeRuntime` 对一次 `agent.call(...)` 进行整体阻塞等待，无法在“工具返回与下一轮模型调用之间”插入平台逻辑。实现本设计时，平台需要掌握 ReAct 的分步循环，或为 AgentScope 增加等价的工具后钩子与受控上下文刷新点。
-
-目标接口语义如下：
-
-```text
-RunControlInbox.poll(runId)
-  -> pending guidance + cancellation request
-
-RunStepExecutor.executeNext(runSnapshot, conversationContext)
-  -> model decision / tool result / final answer
-
-RunCoordinator
-  -> 在每个安全检查点合并控制消息，再决定继续、停止或完成
-```
-
-`RunCoordinator` 是平台层对象，负责身份、队列、审计、租约和状态迁移；AgentScope 只负责在已给定上下文中执行一小步推理。这样渠道、前端和未来的多 Agent 运行时都复用同一套控制语义。
+实际实现复用 AgentScope `MiddlewareBase.onReasoning`，没有另写 ReAct 分步循环。`RunControlMiddleware` 在下一次模型推理前按调用级 `runId` 读取取消标记和已落库引导：取消时返回 `RequestStopEvent`，有引导时追加受控 `SystemMessage` 再交还框架推理。工具执行途中不承诺即时生效；平台继续拥有排队、身份、审计和持久状态。
 
 ## 8. API 草案
 
 | 接口 | 用途 |
 | --- | --- |
-| `GET /api/v1/sessions/{sessionId}/timeline?before=&limit=` | 读取 Session 历史时间线 |
-| `GET /api/v1/sessions/{sessionId}/runs?state=` | 查询队列和历史 Run 摘要 |
+| `GET /api/v1/sessions/{sessionId}/timeline` | 读取 Session 历史时间线 |
+| `GET /api/v1/sessions/{sessionId}/runs` | 查询队列和历史 Run 摘要 |
 | `POST /api/v1/sessions/{sessionId}/runs` | 普通消息入队；返回 Run 与队列位置 |
 | `POST /api/v1/sessions/runs/{runId}/guidance` | 向当前 Run 写入引导消息 |
 | `POST /api/v1/sessions/runs/{runId}/cancel` | 取消排队项或请求取消运行中 Run |
-| `GET /api/v1/sessions/runs/{runId}/controls` | 查询取消与引导的处理状态，仅用于运行详情 |
+
+另有会话级 `/events` 补读与 `/stream` SSE；原计划中的独立 `/controls` 查询端点尚未提供，不应按本页旧草案调用。
 
 所有写接口从登录主体推导用户和角色；不得接受客户端提交的 `userId`、`tenantId`、`workerId` 或内部优先级。
 
-## 9. 实施顺序与验收
+## 9. 原实施顺序与验收边界
 
 1. **历史时间线**：补充跨 Run 查询、前端分页与恢复展示。
 2. **普通队列与取消**：允许同 Session 多 Run 排队，增加容量上限、取消状态与 worker 租约。
 3. **运行中引导**：新增引导收件箱、事件审计和安全检查点。
-4. **分步运行时**：将当前整体 `agent.call(...)` 改为可在工具结果后读取控制消息的编排方式。
+4. **运行时检查点**：实际采用 AgentScope `onReasoning` 中间件，不自建分步循环。
 5. **恢复与多 worker**：租约续期、过期接管、跨 Session 公平调度。
 
 核心验收场景：
