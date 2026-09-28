@@ -80,11 +80,12 @@ public final class HarnessJdbcTestSupport {
                 + "PRIMARY KEY(session_id,session_cursor))");
     }
 
-    /** P3 渠道表：与 V15 迁移保持一致（测试库关闭 Flyway，需要手工建表）。 */
+    /** P3 渠道表：与 V15 + V16 迁移保持一致（测试库关闭 Flyway，需要手工建表）。 */
     public static void createChannelTables(JdbcTemplate jdbc) {
         jdbc.execute("CREATE TABLE platform_channel_account(binding_id VARCHAR(64) NOT NULL,tenant_id BIGINT NOT NULL,"
                 + "provider VARCHAR(32) NOT NULL,external_account_key VARCHAR(128) NOT NULL,"
                 + "credential_ref VARCHAR(256) NOT NULL,default_employee_id BIGINT NOT NULL,"
+                + "dm_scope VARCHAR(32) NOT NULL DEFAULT 'PER_PEER',"
                 + "enabled BOOLEAN NOT NULL DEFAULT TRUE,created_at TIMESTAMP NOT NULL,updated_at TIMESTAMP NOT NULL,"
                 + "PRIMARY KEY(binding_id),UNIQUE(provider,external_account_key))");
         jdbc.execute("CREATE TABLE platform_channel_identity(binding_id VARCHAR(64) NOT NULL,"
