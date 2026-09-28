@@ -1,12 +1,13 @@
 package com.haizhuo.brain.api.session;
 
 import com.haizhuo.brain.kernel.identity.RunId;
+import com.haizhuo.brain.platform.run.AgentRun;
+import com.haizhuo.brain.platform.run.EventVisibility;
 import com.haizhuo.brain.platform.run.RunEvent;
 import com.haizhuo.brain.platform.run.RunRealtimeEvent;
 import com.haizhuo.brain.platform.session.SessionApplicationService;
 import com.haizhuo.brain.security.identity.AuthenticatedUser;
 import java.time.Duration;
-import java.time.Instant;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.springframework.http.CacheControl;
 import org.springframework.http.MediaType;
@@ -45,7 +46,7 @@ public class RunStreamController {
     }
 
     @GetMapping(value = "/{runId}/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public Flux<ServerSentEvent<StreamEventResponse>> stream(
+    public Flux<ServerSentEvent<StreamEvent>> stream(
             @AuthenticationPrincipal AuthenticatedUser user,
             @PathVariable String runId,
             @RequestParam(required = false) Integer after,
@@ -57,14 +58,13 @@ public class RunStreamController {
         RunId id = new RunId(runId);
         int resumeAfter = Math.max(Math.max(after == null ? 0 : after, 0), parseLastEventId(lastEventId));
         return blocking(() -> sessions.getRun(id, user.userId()))
-                .flatMapMany(ignored -> eventStream(id, user, resumeAfter));
+                .flatMapMany(run -> eventStream(run, user, resumeAfter));
     }
 
-    private Flux<ServerSentEvent<StreamEventResponse>> eventStream(RunId runId,
-                                                                    AuthenticatedUser user,
-                                                                    int resumeAfter) {
+    private Flux<ServerSentEvent<StreamEvent>> eventStream(AgentRun run, AuthenticatedUser user, int resumeAfter) {
+        RunId runId = run.id();
         AtomicInteger cursor = new AtomicInteger(resumeAfter);
-        Flux<ServerSentEvent<StreamEventResponse>> durable = Flux
+        Flux<ServerSentEvent<StreamEvent>> durable = Flux
                 .interval(Duration.ZERO, DATABASE_POLL_INTERVAL)
                 // 上一次补读尚未结束（含重试退避）时丢弃本次 tick：interval 无法缓冲，
                 // 否则会以 OverflowException 终止整条流，慢数据库反而比断线更致命。
@@ -78,13 +78,13 @@ public class RunStreamController {
                 .flatMapIterable(events -> events)
                 .filter(event -> event.sequenceNo() > cursor.get())
                 .doOnNext(event -> cursor.accumulateAndGet(event.sequenceNo(), Math::max))
-                .map(this::durableEvent);
+                .map(event -> durableEvent(run.sessionId().value(), event));
 
-        Flux<ServerSentEvent<StreamEventResponse>> transientEvents = realtimeEvents.stream(runId)
-                .map(this::transientEvent);
+        Flux<ServerSentEvent<StreamEvent>> transientEvents = realtimeEvents.stream(runId)
+                .map(RunStreamController::transientEvent);
 
-        Flux<ServerSentEvent<StreamEventResponse>> heartbeats = Flux.interval(HEARTBEAT_INTERVAL)
-                .map(ignored -> ServerSentEvent.<StreamEventResponse>builder()
+        Flux<ServerSentEvent<StreamEvent>> heartbeats = Flux.interval(HEARTBEAT_INTERVAL)
+                .map(ignored -> ServerSentEvent.<StreamEvent>builder()
                         .comment("keepalive")
                         .build());
 
@@ -92,31 +92,33 @@ public class RunStreamController {
                 .takeUntil(event -> event.data() != null && isTerminal(event.data().type()));
     }
 
-    private ServerSentEvent<StreamEventResponse> durableEvent(RunEvent event) {
+    static ServerSentEvent<StreamEvent> durableEvent(String sessionId, RunEvent event) {
         String messageId = switch (event.type()) {
             case "USER_INPUT" -> event.runId().value() + "-user-" + event.sequenceNo();
             case "RUN_COMPLETED" -> event.runId().value() + "-assistant";
             default -> null;
         };
-        StreamEventResponse response = new StreamEventResponse(1,
-                event.runId().value() + ":" + event.sequenceNo(), event.runId().value(), null,
-                event.sequenceNo(), null, event.type(), "durable", event.createdAt(),
-                new StreamPayload(messageId, messageId == null ? null : "text", null, event.content()));
-        return ServerSentEvent.<StreamEventResponse>builder(response)
+        StreamEvent response = new StreamEvent(1,
+                event.runId().value() + ":" + event.sequenceNo(), sessionId, null, event.runId().value(),
+                event.sequenceNo(), null, null, event.type(), EventVisibility.USER.name(), "durable",
+                event.createdAt(),
+                new StreamEvent.Payload(messageId, messageId == null ? null : "text", null, event.content()));
+        return ServerSentEvent.<StreamEvent>builder(response)
                 .id(Integer.toString(event.sequenceNo()))
                 .build();
     }
 
-    private ServerSentEvent<StreamEventResponse> transientEvent(RunRealtimeEvent event) {
-        StreamEventResponse response = new StreamEventResponse(1,
+    static ServerSentEvent<StreamEvent> transientEvent(RunRealtimeEvent event) {
+        StreamEvent response = new StreamEvent(1,
                 event.runId().value() + ":" + event.attemptId() + ":stream:" + event.streamOffset(),
-                event.runId().value(), event.attemptId(), null, event.streamOffset(), event.type(),
-                "transient", event.occurredAt(),
-                new StreamPayload(event.messageId(), event.blockId(), event.content(), null));
+                event.sessionId().value(), null, event.runId().value(), null, event.attemptId(),
+                event.streamOffset(), event.type(), EventVisibility.USER.name(), "transient",
+                event.occurredAt(),
+                new StreamEvent.Payload(event.messageId(), event.blockId(), event.content(), null));
         return ServerSentEvent.builder(response).build();
     }
 
-    private static boolean isTerminal(String type) {
+    static boolean isTerminal(String type) {
         return "RUN_COMPLETED".equals(type) || "RUN_FAILED".equals(type)
                 || "RUN_CANCELLED".equals(type);
     }
@@ -132,15 +134,7 @@ public class RunStreamController {
         }
     }
 
-    private static <T> Mono<T> blocking(java.util.concurrent.Callable<T> callable) {
+    static <T> Mono<T> blocking(java.util.concurrent.Callable<T> callable) {
         return Mono.fromCallable(callable).subscribeOn(Schedulers.boundedElastic());
-    }
-
-    public record StreamEventResponse(int schemaVersion, String eventId, String runId,
-                                      String attemptId, Integer runSequence, Long streamOffset, String type,
-                                      String durability, Instant occurredAt, StreamPayload payload) {
-    }
-
-    public record StreamPayload(String messageId, String blockId, String delta, String text) {
     }
 }

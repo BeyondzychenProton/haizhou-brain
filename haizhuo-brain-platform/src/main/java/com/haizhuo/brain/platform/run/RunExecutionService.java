@@ -1,6 +1,7 @@
 package com.haizhuo.brain.platform.run;
 
 import com.haizhuo.brain.kernel.identity.RunId;
+import com.haizhuo.brain.kernel.identity.SessionId;
 import com.haizhuo.brain.kernel.identity.TenantId;
 import com.haizhuo.brain.kernel.identity.TraceId;
 import com.haizhuo.brain.kernel.json.CanonicalJson;
@@ -136,7 +137,7 @@ public class RunExecutionService {
         AtomicLong streamOffset = new AtomicLong();
         runtime.execute(request).doOnNext(event -> {
                     if (event instanceof AgentTextDeltaEvent delta) {
-                        publishTextDelta(claim.run().id(), claim.attempt().attemptId(),
+                        publishTextDelta(claim.run().sessionId(), claim.run().id(), claim.attempt().attemptId(),
                                 streamOffset.incrementAndGet(), delta.text());
                     }
                     classify(event, suspended, completed, cancelled, failed);
@@ -269,9 +270,9 @@ public class RunExecutionService {
         }
     }
 
-    private void publishTextDelta(RunId runId, String attemptId, long streamOffset, String text) {
+    private void publishTextDelta(SessionId sessionId, RunId runId, String attemptId, long streamOffset, String text) {
         try {
-            realtimeEvents.publishTextDelta(runId, attemptId, streamOffset, text, clock.instant());
+            realtimeEvents.publishTextDelta(sessionId, runId, attemptId, streamOffset, text, clock.instant());
         } catch (RuntimeException ignored) {
             // 实时投递是可降级展示链路，不能反向改变 Run 的业务结果。
         }

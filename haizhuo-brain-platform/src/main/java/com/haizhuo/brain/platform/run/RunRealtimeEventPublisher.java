@@ -1,6 +1,7 @@
 package com.haizhuo.brain.platform.run;
 
 import com.haizhuo.brain.kernel.identity.RunId;
+import com.haizhuo.brain.kernel.identity.SessionId;
 import java.time.Instant;
 
 /**
@@ -8,7 +9,8 @@ import java.time.Instant;
  * 完成条件，也不得在这里持久化业务状态。
  */
 public interface RunRealtimeEventPublisher {
-    RunRealtimeEventPublisher NOOP = (runId, attemptId, streamOffset, text, occurredAt) -> { };
+    RunRealtimeEventPublisher NOOP = (sessionId, runId, attemptId, streamOffset, text, occurredAt) -> { };
 
-    void publishTextDelta(RunId runId, String attemptId, long streamOffset, String text, Instant occurredAt);
+    void publishTextDelta(SessionId sessionId, RunId runId, String attemptId, long streamOffset, String text,
+                          Instant occurredAt);
 }

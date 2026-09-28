@@ -3,6 +3,7 @@ package com.haizhuo.brain.infrastructure.session;
 import static com.haizhuo.brain.infrastructure.support.HarnessJdbcTestSupport.T0;
 import static com.haizhuo.brain.infrastructure.support.HarnessJdbcTestSupport.createRunAndToolTables;
 import static com.haizhuo.brain.infrastructure.support.HarnessJdbcTestSupport.createSessionAndGuidanceTables;
+import static com.haizhuo.brain.infrastructure.support.HarnessJdbcTestSupport.createSessionEventTable;
 import static com.haizhuo.brain.infrastructure.support.HarnessJdbcTestSupport.eventTypes;
 import static com.haizhuo.brain.infrastructure.support.HarnessJdbcTestSupport.insertExecution;
 import static com.haizhuo.brain.infrastructure.support.HarnessJdbcTestSupport.insertRun;
@@ -47,7 +48,8 @@ class JdbcSessionRunStoreTest {
         jdbc = newJdbc("sessionrun");
         createRunAndToolTables(jdbc);
         createSessionAndGuidanceTables(jdbc);
-        store = new JdbcSessionRunStore(jdbc);
+        createSessionEventTable(jdbc);
+        store = new JdbcSessionRunStore(jdbc, new JdbcSessionEventProjector(jdbc));
     }
 
     @Test

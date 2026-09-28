@@ -344,9 +344,10 @@ class RunExecutionServiceTest {
         final List<Long> streamOffsets = new ArrayList<>();
         boolean failPublish;
 
-        @Override public void publishTextDelta(RunId runId, String attemptId, long streamOffset,
+        @Override public void publishTextDelta(SessionId sessionId, RunId runId, String attemptId, long streamOffset,
                                                String text, Instant occurredAt) {
             if (failPublish) throw new IllegalStateException("realtime unavailable");
+            assertEquals(SESSION, sessionId);
             assertEquals(RUN, runId);
             assertEquals(T0, occurredAt);
             attemptIds.add(attemptId);

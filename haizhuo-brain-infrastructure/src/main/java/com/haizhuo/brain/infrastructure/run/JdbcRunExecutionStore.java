@@ -1,5 +1,6 @@
 package com.haizhuo.brain.infrastructure.run;
 
+import com.haizhuo.brain.infrastructure.session.JdbcSessionEventProjector;
 import com.haizhuo.brain.kernel.identity.RunId;
 import com.haizhuo.brain.kernel.identity.SessionId;
 import com.haizhuo.brain.kernel.identity.UserId;
@@ -33,9 +34,11 @@ import org.springframework.transaction.annotation.Transactional;
 @Repository
 public class JdbcRunExecutionStore implements RunExecutionStore {
     private final JdbcTemplate jdbc;
+    private final JdbcSessionEventProjector sessionEvents;
 
-    public JdbcRunExecutionStore(JdbcTemplate jdbc) {
+    public JdbcRunExecutionStore(JdbcTemplate jdbc, JdbcSessionEventProjector sessionEvents) {
         this.jdbc = jdbc;
+        this.sessionEvents = sessionEvents;
     }
 
     @Override
@@ -249,12 +252,25 @@ public class JdbcRunExecutionStore implements RunExecutionStore {
                         rs.getTimestamp("created_at").toInstant()), runId.value()).stream().findFirst();
     }
 
+    /** run 事件与会话投影必须在同一事务内写入，否则会话游标会出现空洞。 */
     private void appendEvent(RunId runId, String type, String content, Instant now) {
         jdbc.queryForObject("SELECT run_id FROM platform_agent_run WHERE run_id=? FOR UPDATE", String.class, runId.value());
+        int sequence = nextSequence(runId);
         String safeContent = content != null && content.length() > 4000 ? content.substring(0, 4000) : content;
-        jdbc.update("INSERT INTO platform_agent_run_event(run_id,sequence_no,event_type,content,created_at) "
-                        + "SELECT ?,COALESCE(MAX(sequence_no),0)+1,?,?,? FROM platform_agent_run_event WHERE run_id=?",
-                runId.value(), type, safeContent, Timestamp.from(now), runId.value());
+        jdbc.update("INSERT INTO platform_agent_run_event(run_id,sequence_no,event_type,content,created_at) VALUES(?,?,?,?,?)",
+                runId.value(), sequence, type, safeContent, Timestamp.from(now));
+        sessionEvents.project(sessionIdOf(runId), runId, sequence, type, safeContent, now);
+    }
+
+    private int nextSequence(RunId runId) {
+        Integer next = jdbc.queryForObject("SELECT COALESCE(MAX(sequence_no),0)+1 FROM platform_agent_run_event WHERE run_id=?",
+                Integer.class, runId.value());
+        return next == null ? 1 : next;
+    }
+
+    private SessionId sessionIdOf(RunId runId) {
+        return new SessionId(jdbc.queryForObject("SELECT session_id FROM platform_agent_run WHERE run_id=?",
+                String.class, runId.value()));
     }
 
     private AgentRun mapRun(ResultSet rs) throws SQLException {

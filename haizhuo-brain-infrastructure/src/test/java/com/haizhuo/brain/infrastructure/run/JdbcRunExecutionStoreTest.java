@@ -2,15 +2,19 @@ package com.haizhuo.brain.infrastructure.run;
 
 import static com.haizhuo.brain.infrastructure.support.HarnessJdbcTestSupport.T0;
 import static com.haizhuo.brain.infrastructure.support.HarnessJdbcTestSupport.createRunAndToolTables;
+import static com.haizhuo.brain.infrastructure.support.HarnessJdbcTestSupport.createSessionAndGuidanceTables;
+import static com.haizhuo.brain.infrastructure.support.HarnessJdbcTestSupport.createSessionEventTable;
 import static com.haizhuo.brain.infrastructure.support.HarnessJdbcTestSupport.eventTypes;
 import static com.haizhuo.brain.infrastructure.support.HarnessJdbcTestSupport.idempotencyKey;
 import static com.haizhuo.brain.infrastructure.support.HarnessJdbcTestSupport.insertExecution;
 import static com.haizhuo.brain.infrastructure.support.HarnessJdbcTestSupport.insertRun;
 import static com.haizhuo.brain.infrastructure.support.HarnessJdbcTestSupport.insertRunSpec;
+import static com.haizhuo.brain.infrastructure.support.HarnessJdbcTestSupport.insertSession;
 import static com.haizhuo.brain.infrastructure.support.HarnessJdbcTestSupport.newJdbc;
 import static com.haizhuo.brain.infrastructure.support.HarnessJdbcTestSupport.runState;
 import static org.junit.jupiter.api.Assertions.*;
 
+import com.haizhuo.brain.infrastructure.session.JdbcSessionEventProjector;
 import com.haizhuo.brain.kernel.identity.RunId;
 import com.haizhuo.brain.kernel.identity.UserId;
 import com.haizhuo.brain.platform.run.ExecutionClaim;
@@ -45,7 +49,12 @@ class JdbcRunExecutionStoreTest {
     void setUp() {
         jdbc = newJdbc("runexec");
         createRunAndToolTables(jdbc);
-        store = new JdbcRunExecutionStore(jdbc);
+        // 会话事件投影要与 run 事件同事务写入，因此需要会话表与投影表。
+        createSessionAndGuidanceTables(jdbc);
+        createSessionEventTable(jdbc);
+        insertSession(jdbc, "session-1", 42L, 1L, "ACTIVE");
+        insertSession(jdbc, "session-2", 42L, 1L, "ACTIVE");
+        store = new JdbcRunExecutionStore(jdbc, new JdbcSessionEventProjector(jdbc));
     }
 
     @Test

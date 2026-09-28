@@ -11,6 +11,7 @@ import com.haizhuo.brain.platform.run.HarnessRunSpec;
 import com.haizhuo.brain.platform.run.HarnessRunSpecFactory;
 import com.haizhuo.brain.platform.run.RunState;
 import com.haizhuo.brain.platform.run.RunEvent;
+import com.haizhuo.brain.platform.run.SessionEvent;
 import com.haizhuo.brain.platform.run.SessionRunStore;
 import com.haizhuo.brain.platform.run.SessionTimelineItem;
 import com.haizhuo.brain.platform.run.RunGuidance;
@@ -91,6 +92,23 @@ public class SessionApplicationService {
     private java.util.List<RunEvent> findEvents(RunId runId, UserId owner, int afterSequence, int limit) {
         int boundedLimit = Math.max(1, Math.min(limit, 200));
         return store.findEvents(runId, owner, Math.max(afterSequence, 0), boundedLimit);
+    }
+    /**
+     * 会话级持久事件（P2）：sessionCursor 在同一 Session 内严格递增，是会话流与历史分页的
+     * 唯一续传游标。超过保留窗口或游标失效时返回空批次，客户端应转快照恢复。
+     */
+    public java.util.List<SessionEvent> sessionEvents(SessionId sessionId, UserId owner, long afterCursor, int limit) {
+        get(sessionId, owner);
+        return findSessionEvents(sessionId, owner, afterCursor, limit);
+    }
+    /** 归属已在本次订阅建立时校验过；轮询补读不再重复加载 session 行（仓储仍按 owner 过滤）。 */
+    public java.util.List<SessionEvent> sessionEventsOfOwnedSession(SessionId sessionId, UserId owner,
+                                                                    long afterCursor, int limit) {
+        return findSessionEvents(sessionId, owner, afterCursor, limit);
+    }
+    private java.util.List<SessionEvent> findSessionEvents(SessionId sessionId, UserId owner, long afterCursor, int limit) {
+        int boundedLimit = Math.max(1, Math.min(limit, 200));
+        return store.findSessionEvents(sessionId, owner, Math.max(afterCursor, 0), boundedLimit);
     }
     public List<SessionTimelineItem> timeline(SessionId sessionId, UserId owner, int limit) {
         get(sessionId, owner);

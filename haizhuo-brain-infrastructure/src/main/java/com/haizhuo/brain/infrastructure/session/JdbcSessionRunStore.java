@@ -6,7 +6,9 @@ import com.haizhuo.brain.kernel.identity.UserId;
 import com.haizhuo.brain.platform.run.AgentRun;
 import com.haizhuo.brain.platform.run.HarnessRunSpec;
 import com.haizhuo.brain.platform.run.RunState;
+import com.haizhuo.brain.platform.run.EventVisibility;
 import com.haizhuo.brain.platform.run.RunEvent;
+import com.haizhuo.brain.platform.run.SessionEvent;
 import com.haizhuo.brain.platform.run.SessionRunStore;
 import com.haizhuo.brain.platform.run.SessionTimelineItem;
 import com.haizhuo.brain.platform.run.RunGuidance;
@@ -26,8 +28,12 @@ import org.springframework.transaction.annotation.Transactional;
 @Repository
 public class JdbcSessionRunStore implements SessionRunStore, RunControlInbox {
     private final JdbcTemplate jdbc;
+    private final JdbcSessionEventProjector sessionEvents;
 
-    public JdbcSessionRunStore(JdbcTemplate jdbc) { this.jdbc = jdbc; }
+    public JdbcSessionRunStore(JdbcTemplate jdbc, JdbcSessionEventProjector sessionEvents) {
+        this.jdbc = jdbc;
+        this.sessionEvents = sessionEvents;
+    }
 
     @Override
     public AgentSession createSession(AgentSession session) {
@@ -69,6 +75,7 @@ public class JdbcSessionRunStore implements SessionRunStore, RunControlInbox {
                 runSpec.runId().value(), runSpec.definitionVersionId(), runSpec.definitionBundleId(), runSpec.definitionBundleHash(),
                 runSpec.modelVisibleToolNamesJson(), runSpec.toolViewHash(), runSpec.effectiveCapabilityHash(), runSpec.channelType(), Timestamp.from(runSpec.createdAt()));
         jdbc.update("INSERT INTO platform_agent_run_event(run_id,sequence_no,event_type,content,created_at) VALUES(?,?,?,?,?)", run.id().value(), 1, "USER_INPUT", input, Timestamp.from(run.createdAt()));
+        sessionEvents.project(run.sessionId(), run.id(), 1, "USER_INPUT", input, run.createdAt());
         jdbc.update("UPDATE platform_agent_session SET last_active_at=?,row_version=row_version+1 WHERE session_id=? AND user_id=?", Timestamp.from(run.createdAt()), run.sessionId().value(), run.userId().value());
         return run;
     }
@@ -84,6 +91,19 @@ public class JdbcSessionRunStore implements SessionRunStore, RunControlInbox {
 
     @Override public java.util.List<RunEvent> findEvents(RunId runId, UserId owner, int afterSequence, int limit) {
         return jdbc.query("SELECT event.sequence_no,event.event_type,event.content,event.created_at FROM platform_agent_run_event event JOIN platform_agent_run run ON run.run_id=event.run_id WHERE event.run_id=? AND run.user_id=? AND event.sequence_no>? ORDER BY event.sequence_no LIMIT ?", (rs, row) -> new RunEvent(runId, rs.getInt("sequence_no"), rs.getString("event_type"), rs.getString("content"), instant(rs.getTimestamp("created_at"))), runId.value(), owner.value(), afterSequence, limit);
+    }
+
+    @Override public java.util.List<SessionEvent> findSessionEvents(SessionId sessionId, UserId owner, long afterCursor, int limit) {
+        int safeLimit = Math.max(1, Math.min(limit, 200));
+        return jdbc.query("SELECT event.session_id,event.session_cursor,event.run_id,event.run_sequence,event.event_type,"
+                        + "event.visibility,event.content,event.created_at FROM platform_agent_session_event event "
+                        + "JOIN platform_agent_session session ON session.session_id=event.session_id "
+                        + "WHERE event.session_id=? AND session.user_id=? AND event.session_cursor>? "
+                        + "ORDER BY event.session_cursor LIMIT ?",
+                (rs, row) -> new SessionEvent(new SessionId(rs.getString("session_id")), rs.getLong("session_cursor"),
+                        new RunId(rs.getString("run_id")), nullableInt(rs, "run_sequence"), rs.getString("event_type"),
+                        EventVisibility.valueOf(rs.getString("visibility")), rs.getString("content"),
+                        instant(rs.getTimestamp("created_at"))), sessionId.value(), owner.value(), afterCursor, safeLimit);
     }
 
     @Override public List<AgentRun> findRuns(SessionId sessionId, UserId owner, int limit) {
@@ -164,10 +184,24 @@ public class JdbcSessionRunStore implements SessionRunStore, RunControlInbox {
         return jdbc.query("SELECT 1 FROM platform_agent_run WHERE run_id=? AND state='CANCELLING'", (rs,row) -> 1, runId.value()).stream().findFirst().isPresent();
     }
 
+    /** run 事件与会话投影必须在同一事务内写入，否则会话游标会出现空洞。 */
     private void appendEvent(RunId id, String type, String text, Instant now) {
-        // 与本 Run 的状态/控制写入一起串行化序号分配。
         jdbc.queryForObject("SELECT run_id FROM platform_agent_run WHERE run_id=? FOR UPDATE", String.class, id.value());
-        jdbc.update("INSERT INTO platform_agent_run_event(run_id,sequence_no,event_type,content,created_at) SELECT ?,COALESCE(MAX(sequence_no),0)+1,?,?,? FROM platform_agent_run_event WHERE run_id=?",id.value(),type,text,Timestamp.from(now),id.value());
+        int sequence = nextSequence(id);
+        jdbc.update("INSERT INTO platform_agent_run_event(run_id,sequence_no,event_type,content,created_at) VALUES(?,?,?,?,?)",
+                id.value(), sequence, type, text, Timestamp.from(now));
+        sessionEvents.project(sessionIdOf(id), id, sequence, type, text, now);
+    }
+
+    private int nextSequence(RunId runId) {
+        Integer next = jdbc.queryForObject("SELECT COALESCE(MAX(sequence_no),0)+1 FROM platform_agent_run_event WHERE run_id=?",
+                Integer.class, runId.value());
+        return next == null ? 1 : next;
+    }
+
+    private SessionId sessionIdOf(RunId runId) {
+        return new SessionId(jdbc.queryForObject("SELECT session_id FROM platform_agent_run WHERE run_id=?",
+                String.class, runId.value()));
     }
 
     private Optional<AgentRun> findByRequest(UserId owner, String clientRequestId) {
@@ -176,4 +210,8 @@ public class JdbcSessionRunStore implements SessionRunStore, RunControlInbox {
 
     private static Instant instant(Timestamp timestamp) { return timestamp.toInstant(); }
     private static Instant nullableInstant(Timestamp timestamp) { return timestamp == null ? null : timestamp.toInstant(); }
+    private static Integer nullableInt(java.sql.ResultSet rs, String column) throws java.sql.SQLException {
+        int value = rs.getInt(column);
+        return rs.wasNull() ? null : value;
+    }
 }

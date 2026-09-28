@@ -75,8 +75,8 @@
           <el-descriptions-item label="队列位置">{{ run.queuePosition || '-' }}</el-descriptions-item>
         </el-descriptions>
         <el-timeline class="event-list">
-          <el-timeline-item v-for="event in events" :key="`${event.runId}-${event.sequenceNo}`" :timestamp="event.createdAt">
-            #{{ event.sequenceNo }} {{ event.type }}<div>{{ event.content }}</div>
+          <el-timeline-item v-for="event in events" :key="event.eventId" :timestamp="event.occurredAt">
+            #{{ event.sessionCursor }} {{ event.type }}<div>{{ event.payload.text ?? event.payload.delta }}</div>
           </el-timeline-item>
         </el-timeline>
       </el-drawer>
@@ -89,8 +89,8 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AppLayout from '../../layouts/AppLayout.vue'
 import * as api from '../../api/app'
-import type { Run, RunEvent, Session, ToolExecution } from '../../api/app'
-import { openRunStream, type RunStreamEvent } from '../../api/runStream'
+import type { Run, Session, SessionEvent, ToolExecution } from '../../api/app'
+import { openSessionStream, type RunStreamEvent } from '../../api/runStream'
 import { mergeConversationEvent, presentTimeline, type ConversationItem } from '../../presenters/runEventPresenter'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { formatTime, isRetryable, notifyError } from '../../utils/notify'
@@ -101,7 +101,7 @@ const router = useRouter()
 const session = ref<Session>()
 const run = ref<Run>()
 const runs = ref<Run[]>([])
-const events = ref<RunEvent[]>([])
+const events = ref<SessionEvent[]>([])
 const toolExecutions = ref<ToolExecution[]>([])
 const messages = ref<ConversationItem[]>([])
 const input = ref('')
@@ -128,9 +128,8 @@ const streamStateLabel = computed(() => ({
   polling: '轮询降级',
 })[streamState.value])
 const sessionId = () => String(route.params.sessionId)
-const lastSequence = (runId = run.value?.runId) => events.value
-  .filter(event => !runId || event.runId === runId)
-  .reduce((maximum, event) => Math.max(maximum, event.sequenceNo), 0)
+/** 会话游标是跨 Run 的唯一续传游标；run 内序号只在单个 Run 中有序。 */
+const lastCursor = () => events.value.reduce((maximum, event) => Math.max(maximum, event.sessionCursor ?? 0), 0)
 
 async function loadTimeline() {
   const pending = messages.value.filter(item => item.pending)
@@ -150,30 +149,24 @@ async function loadRuns(): Promise<Run | undefined> {
   return undefined
 }
 
-function appendPersistentEvents(next: RunEvent[], expectedRunId = run.value?.runId) {
-  if (!expectedRunId) return
-  const known = new Set(events.value
-    .filter(event => event.runId === expectedRunId)
-    .map(event => `${event.runId}:${event.sequenceNo}`))
-  for (const event of next.sort((left, right) => left.sequenceNo - right.sequenceNo)) {
-    if (event.runId !== expectedRunId || run.value?.runId !== expectedRunId) continue
-    const key = `${event.runId}:${event.sequenceNo}`
-    if (known.has(key)) continue
-    known.add(key)
+function appendSessionEvents(next: SessionEvent[]) {
+  const known = new Set(events.value.map(event => event.sessionCursor))
+  for (const event of next.sort((left, right) => (left.sessionCursor ?? 0) - (right.sessionCursor ?? 0))) {
+    if (event.sessionCursor == null || known.has(event.sessionCursor)) continue
+    known.add(event.sessionCursor)
     events.value.push(event)
     messages.value = mergeConversationEvent(messages.value, event)
   }
-  events.value.sort((left, right) => left.sequenceNo - right.sequenceNo)
+  events.value.sort((left, right) => (left.sessionCursor ?? 0) - (right.sessionCursor ?? 0))
 }
 
-async function syncPersistentEvents(runId: string) {
-  if (run.value?.runId !== runId) return
-  let batch: RunEvent[]
+/** 按会话游标补读历史，直到取空为止；会话流与降级复用同一条路径。 */
+async function syncSessionEvents() {
+  let batch: SessionEvent[]
   do {
-    batch = await api.getEvents(runId, lastSequence(runId), 200)
-    if (run.value?.runId !== runId) return
-    appendPersistentEvents(batch, runId)
-  } while (batch.length === 200 && run.value?.runId === runId)
+    batch = await api.getSessionEvents(sessionId(), lastCursor(), 200)
+    appendSessionEvents(batch)
+  } while (batch.length === 200)
 }
 
 async function loadToolExecutions() {
@@ -207,15 +200,11 @@ function stopTransport() {
 }
 
 async function activateRun(nextRun: Run) {
-  if (run.value?.runId === nextRun.runId && streamState.value !== 'idle') return
-  stopTransport()
+  // 会话流跨 Run 保持同一条连接，切换 Run 只换展示与控制目标，不重建传输。
   run.value = nextRun
-  events.value = []
   toolExecutions.value = []
-  seenStreamEventIds.clear()
-  await Promise.all([syncPersistentEvents(nextRun.runId), loadToolExecutions()])
-  const generation = transportGeneration
-  connectRealtime(nextRun.runId, generation)
+  await loadToolExecutions()
+  ensureTransport()
 }
 
 async function refreshCurrentRun(runId: string) {
@@ -226,11 +215,16 @@ async function refreshCurrentRun(runId: string) {
   await loadToolExecutions()
   if (ACTIVE_STATES.has(latest.state)) return
 
+  // 该 Run 已终态：先看看会话里还有没有排队/运行中的下一个 Run，
+  // 没有才真正停掉传输；这样连续两轮之间不会重建连接。
+  const inProgress = await loadRuns()
+  if (inProgress) {
+    await activateRun(inProgress)
+    return
+  }
   stopTransport()
   run.value = latest
   await loadTimeline()
-  const inProgress = await loadRuns()
-  if (inProgress) await activateRun(inProgress)
 }
 
 function scheduleRunRefresh(runId: string) {
@@ -243,18 +237,12 @@ function scheduleRunRefresh(runId: string) {
   }, 80)
 }
 
-function handleStreamEvent(event: RunStreamEvent, runId: string) {
-  if (run.value?.runId !== runId || event.runId !== runId) return
-
-  if (event.durability === 'durable' && event.runSequence != null) {
-    appendPersistentEvents([{
-      runId: event.runId,
-      sequenceNo: event.runSequence,
-      type: event.type,
-      content: event.payload.text ?? event.payload.delta ?? '',
-      createdAt: event.occurredAt,
-    }], runId)
-    scheduleRunRefresh(runId)
+function handleStreamEvent(event: RunStreamEvent) {
+  if (event.durability === 'durable' && event.sessionCursor != null) {
+    appendSessionEvents([event])
+    // 事件可能属于另一个 Run（例如排队中的下一轮），因此按事件自带的 runId 刷新。
+    if (event.runId === run.value?.runId) scheduleRunRefresh(event.runId)
+    else void switchToRunIfChanged(event.runId)
     return
   }
   if (seenStreamEventIds.has(event.eventId)) return
@@ -266,43 +254,57 @@ function handleStreamEvent(event: RunStreamEvent, runId: string) {
   messages.value = mergeConversationEvent(messages.value, event)
 }
 
-function connectRealtime(runId: string, generation: number) {
-  if (generation !== transportGeneration || run.value?.runId !== runId || !active.value) return
+/** 会话流推送了别的 Run 的事件时，把控制目标切过去（不重建传输）。 */
+async function switchToRunIfChanged(runId: string) {
+  if (!runId || run.value?.runId === runId) return
+  const candidate = runs.value.find(item => item.runId === runId)
+    ?? (await loadRuns().catch(() => undefined))
+  if (candidate) await activateRun(candidate)
+}
+
+/** 会话级连接按需建立：只有有活跃 Run 时才保持长连接，空闲会话不做无谓的补读轮询。 */
+function ensureTransport() {
+  if (streamState.value === 'live' || streamState.value === 'connecting') return
+  connectRealtime(transportGeneration)
+}
+
+function connectRealtime(generation: number) {
+  if (generation !== transportGeneration || !active.value) return
   if (typeof EventSource === 'undefined') {
     streamState.value = 'polling'
-    scheduleFallback(runId, generation, 0)
+    scheduleFallback(generation, 0)
     return
   }
 
   closeStream?.()
   streamState.value = 'connecting'
-  closeStream = openRunStream(runId, lastSequence(runId), {
+  closeStream = openSessionStream(sessionId(), lastCursor(), {
     onOpen: () => {
-      if (generation !== transportGeneration || run.value?.runId !== runId) return
+      if (generation !== transportGeneration) return
       streamState.value = 'live'
       reconnectAttempt = 0
       if (fallbackTimer) window.clearTimeout(fallbackTimer)
       fallbackTimer = undefined
-      scheduleStatusRefresh(runId, generation)
+      scheduleStatusRefresh(generation)
     },
-    onEvent: event => handleStreamEvent(event, runId),
+    onEvent: event => handleStreamEvent(event),
     onDisconnect: () => {
-      void recoverDisconnectedStream(runId, generation)
+      void recoverDisconnectedStream(generation)
     },
-    onMalformedEvent: raw => console.warn('Ignored malformed run stream event', raw),
+    onMalformedEvent: raw => console.warn('Ignored malformed session stream event', raw),
   })
 }
 
-async function recoverDisconnectedStream(runId: string, generation: number) {
-  if (generation !== transportGeneration || run.value?.runId !== runId || !active.value) return
+async function recoverDisconnectedStream(generation: number) {
+  if (generation !== transportGeneration) return
   closeStream = undefined
   if (statusTimer) window.clearTimeout(statusTimer)
   statusTimer = undefined
   streamState.value = 'interrupted'
 
   try {
-    await syncPersistentEvents(runId)
-    await refreshCurrentRun(runId)
+    await syncSessionEvents()
+    if (run.value) await refreshCurrentRun(run.value.runId)
   } catch (error) {
     if (!isRetryable(error)) {
       stopTransport()
@@ -310,60 +312,60 @@ async function recoverDisconnectedStream(runId: string, generation: number) {
     }
   }
 
-  if (generation !== transportGeneration || run.value?.runId !== runId || !active.value) return
-  scheduleFallback(runId, generation, 0)
-  scheduleReconnect(runId, generation)
+  if (generation !== transportGeneration || !active.value) return
+  scheduleFallback(generation, 0)
+  scheduleReconnect(generation)
 }
 
-function scheduleReconnect(runId: string, generation: number) {
+function scheduleReconnect(generation: number) {
   if (reconnectTimer || generation !== transportGeneration || !active.value) return
   const delay = Math.min(1000 * 2 ** reconnectAttempt, 10000)
   reconnectAttempt++
   reconnectTimer = window.setTimeout(() => {
     reconnectTimer = undefined
-    connectRealtime(runId, generation)
+    connectRealtime(generation)
   }, delay)
 }
 
-function scheduleStatusRefresh(runId: string, generation: number, delay = 5000) {
+function scheduleStatusRefresh(generation: number, delay = 5000) {
   if (statusTimer || generation !== transportGeneration || !active.value) return
   statusTimer = window.setTimeout(async () => {
     statusTimer = undefined
-    if (generation !== transportGeneration || run.value?.runId !== runId || !isStreamLive()) return
+    if (generation !== transportGeneration || !run.value || !isStreamLive()) return
     try {
-      await refreshCurrentRun(runId)
+      await refreshCurrentRun(run.value.runId)
     } catch (error) {
       if (!isRetryable(error)) {
         stopTransport()
         return
       }
     }
-    if (generation === transportGeneration && run.value?.runId === runId && active.value && isStreamLive()) {
-      scheduleStatusRefresh(runId, generation)
+    if (generation === transportGeneration && active.value && isStreamLive()) {
+      scheduleStatusRefresh(generation)
     }
   }, delay)
 }
 
 function isStreamLive() { return streamState.value === 'live' }
 
-function scheduleFallback(runId: string, generation: number, delay = 1200) {
+function scheduleFallback(generation: number, delay = 1200) {
   if (fallbackTimer || generation !== transportGeneration || !active.value) return
   fallbackTimer = window.setTimeout(async () => {
     fallbackTimer = undefined
-    if (generation !== transportGeneration || run.value?.runId !== runId || streamState.value === 'live') return
+    if (generation !== transportGeneration || streamState.value === 'live') return
     try {
-      await syncPersistentEvents(runId)
-      await refreshCurrentRun(runId)
-      if (generation === transportGeneration && run.value?.runId === runId && active.value && !isStreamLive()) {
+      await syncSessionEvents()
+      if (run.value) await refreshCurrentRun(run.value.runId)
+      if (generation === transportGeneration && active.value && !isStreamLive()) {
         streamState.value = typeof EventSource === 'undefined' ? 'polling' : 'interrupted'
-        scheduleFallback(runId, generation)
+        scheduleFallback(generation)
       }
     } catch (error) {
       if (!isRetryable(error)) {
         stopTransport()
         return
       }
-      scheduleFallback(runId, generation)
+      scheduleFallback(generation)
     }
   }, delay)
 }
@@ -382,9 +384,10 @@ async function send() {
   try {
     const created = await api.createRun(sessionId(), value)
     input.value = ''
-    await loadTimeline()
     const inProgress = await loadRuns()
-    if (!run.value || !ACTIVE_STATES.has(run.value.state)) await activateRun(inProgress || created)
+    await activateRun(inProgress || created)
+    // 新 Run 已经在会话流上推送；降级环境下靠这次补读兜底。
+    if (!isStreamLive()) await syncSessionEvents()
   } finally {
     sending.value = false
   }
@@ -395,14 +398,14 @@ async function sendGuidance() {
   const runId = run.value.runId
   await api.guideRun(runId, guidance.value.trim())
   guidance.value = ''
-  await syncPersistentEvents(runId)
+  await syncSessionEvents()
 }
 
 async function cancel() {
   if (!run.value) return
   const runId = run.value.runId
   run.value = await api.cancelRun(runId)
-  await syncPersistentEvents(runId)
+  await syncSessionEvents()
   await refreshCurrentRun(runId)
 }
 

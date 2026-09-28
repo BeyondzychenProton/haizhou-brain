@@ -71,6 +71,15 @@ public final class HarnessJdbcTestSupport {
                 + "consumed_at TIMESTAMP NULL)");
     }
 
+    /** V14 会话级事件投影的最小内联结构（与迁移同构，省略外键）。 */
+    public static void createSessionEventTable(JdbcTemplate jdbc) {
+        jdbc.execute("CREATE TABLE platform_agent_session_event(session_id VARCHAR(64) NOT NULL,"
+                + "session_cursor BIGINT NOT NULL,run_id VARCHAR(64) NULL,run_sequence INT NULL,"
+                + "event_type VARCHAR(64) NOT NULL,visibility VARCHAR(32) NOT NULL DEFAULT 'USER',"
+                + "content VARCHAR(4000) NULL,created_at TIMESTAMP NOT NULL,"
+                + "PRIMARY KEY(session_id,session_cursor))");
+    }
+
     public static void insertSession(JdbcTemplate jdbc, String sessionId, long userId, long employeeId, String status) {
         jdbc.update("INSERT INTO platform_agent_session(session_id,user_id,employee_id,status,created_at,last_active_at,row_version)"
                         + " VALUES(?,?,?,?,?,?,0)",

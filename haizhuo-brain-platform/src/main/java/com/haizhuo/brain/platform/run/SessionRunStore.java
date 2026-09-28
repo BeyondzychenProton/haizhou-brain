@@ -26,6 +26,11 @@ public interface SessionRunStore {
 
     List<RunEvent> findEvents(RunId runId, UserId owner, int afterSequence, int limit);
 
+    /** 会话级投影：按 sessionCursor 严格递增返回属主 Session 的持久事件。 */
+    default List<SessionEvent> findSessionEvents(SessionId sessionId, UserId owner, long afterCursor, int limit) {
+        return List.of();
+    }
+
     default List<SessionTimelineItem> findTimeline(SessionId sessionId, UserId owner, int limit) { return List.of(); }
 
     default int queuePosition(RunId runId, UserId owner) { return 0; }
