@@ -1,5 +1,6 @@
 package com.haizhuo.brain.runtime.agentscope.context;
 
+import com.haizhuo.brain.observability.LangfuseCallContext;
 import com.haizhuo.brain.runtime.api.model.AgentExecutionRequest;
 import io.agentscope.core.agent.RuntimeContext;
 
@@ -22,6 +23,9 @@ public class RuntimeContextFactory {
                 .userId(Long.toString(request.userId().value()))
                 .sessionId(request.binding().harnessSessionKey())
                 .put(HarnessCallContext.class, call)
+                .put(LangfuseCallContext.class, new LangfuseCallContext(
+                        request.runId(), request.platformSessionId().value(),
+                        Long.toString(request.userId().value()), request.attemptId()))
                 .build();
     }
 }

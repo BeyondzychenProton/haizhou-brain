@@ -9,6 +9,7 @@ import com.haizhuo.brain.runtime.agentscope.tool.ExternalToolSchemaAssembler;
 import com.haizhuo.brain.runtime.api.RunControlInbox;
 import com.haizhuo.brain.runtime.api.model.RuntimeDefinitionSnapshot;
 import com.haizhuo.brain.runtime.api.model.RuntimeToolSchema;
+import io.agentscope.core.tracing.OtelTracingMiddleware;
 import io.agentscope.core.model.ChatModelBase;
 import io.agentscope.core.state.AgentStateStore;
 import io.agentscope.core.tool.Toolkit;
@@ -40,6 +41,8 @@ public class HarnessAgentFactory {
     private final RemoteFilesystemSpec filesystemSpec;
     private final DefinitionWorkspaceMaterializer workspaceMaterializer;
     private final RunControlInbox controlInbox;
+    private final ObservabilityMiddleware observabilityMiddleware;
+    private final boolean otelTracingEnabled;
 
     /**
      * @param filesystemSpec 可为 null；缺失时 Harness 不带远程工作区文件面运行
@@ -54,6 +57,23 @@ public class HarnessAgentFactory {
         this.filesystemSpec = filesystemSpec;
         this.workspaceMaterializer = Objects.requireNonNull(workspaceMaterializer);
         this.controlInbox = Objects.requireNonNull(controlInbox);
+        this.observabilityMiddleware = new ObservabilityMiddleware();
+        this.otelTracingEnabled = false;
+    }
+
+    public HarnessAgentFactory(AgentScopeModelFactory modelFactory, AgentStateStore agentStateStore,
+                               RemoteFilesystemSpec filesystemSpec,
+                               DefinitionWorkspaceMaterializer workspaceMaterializer,
+                               RunControlInbox controlInbox,
+                               ObservabilityMiddleware observabilityMiddleware,
+                               boolean otelTracingEnabled) {
+        this.modelFactory = Objects.requireNonNull(modelFactory);
+        this.agentStateStore = Objects.requireNonNull(agentStateStore);
+        this.filesystemSpec = filesystemSpec;
+        this.workspaceMaterializer = Objects.requireNonNull(workspaceMaterializer);
+        this.controlInbox = Objects.requireNonNull(controlInbox);
+        this.observabilityMiddleware = Objects.requireNonNull(observabilityMiddleware);
+        this.otelTracingEnabled = otelTracingEnabled;
     }
 
     public HarnessRuntimeTemplate build(RuntimeDefinitionSnapshot definition, HarnessTemplateKey key) {
@@ -76,7 +96,7 @@ public class HarnessAgentFactory {
                 .middleware(new CapabilityViewMiddleware(externalCatalogNames))
                 .middleware(new SessionBridgeMiddleware())
                 .middleware(new RunControlMiddleware(controlInbox))
-                .middleware(new ObservabilityMiddleware())
+                .middleware(observabilityMiddleware)
                 // P2：接入 Harness 计划能力。计划正文由计划工具的流式入参派生为
                 // PLAN_SNAPSHOT 持久事件（见 AgentScopeEventTranslator），
                 // 因此计划不需要另建存储，也能随会话游标一起续传。
@@ -95,6 +115,11 @@ public class HarnessAgentFactory {
                 .disableDynamicSubagents()
                 .disableToolsConfig()
                 .disableAtPathExpansion();
+        if (otelTracingEnabled) {
+            // AgentScope 2.0.3 原生中间件负责 invoke_agent/chat/execute_tool span；
+            // 上面的平台中间件只建立稳定 Run 根 span并传播 Langfuse 属性。
+            builder.middleware(new OtelTracingMiddleware());
+        }
         if (filesystemSpec != null) {
             builder.filesystem(filesystemSpec);
         }

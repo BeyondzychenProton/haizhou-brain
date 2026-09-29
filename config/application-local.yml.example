@@ -23,10 +23,22 @@ haizhuo:
       primary-model: replace-with-model-id
       api-key: replace-with-api-key
       base-url: https://example.com/v1
-haizhuo:
-  brain:
-    agent:
-      provider: openai
-      primary-model: replace-with-model-id
-      api-key: replace-with-api-key
-      base-url: https://example.com/v1
+    observability:
+      langfuse:
+        enabled: false
+        base-url: http://172.16.1.29:3001
+        otlp-endpoint: http://172.16.1.29:3001/api/public/otel/v1/traces
+        public-key: replace-with-langfuse-public-key
+        secret-key: replace-with-langfuse-secret-key
+        environment: local
+        service-name: haizhuo-brain
+        capture-content: false
+management:
+  opentelemetry:
+    resource-attributes:
+      service.name: ${haizhuo.brain.observability.langfuse.service-name:${LANGFUSE_SERVICE_NAME:${OTEL_SERVICE_NAME:haizhuo-brain}}}
+  otlp:
+    tracing:
+      export:
+        enabled: false
+      transport: http

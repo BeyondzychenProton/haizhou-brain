@@ -1,11 +1,24 @@
 package com.haizhuo.brain.observability;
 
 import com.haizhuo.brain.runtime.api.model.AgentExecutionRequest;
+import com.haizhuo.brain.runtime.api.event.AgentRunCompletedEvent;
+import com.haizhuo.brain.runtime.api.event.AgentRunFailedEvent;
+import com.haizhuo.brain.runtime.api.event.AgentToolSuspendedEvent;
 
 public interface AgentExecutionObserver {
-    void onStarted(AgentExecutionRequest request);
+    default void onStarted(AgentExecutionRequest request) {
+    }
 
-    void onCompleted(AgentExecutionRequest request);
+    default void onCompleted(AgentExecutionRequest request, AgentRunCompletedEvent event) {
+    }
 
-    void onFailed(AgentExecutionRequest request, Throwable error);
+    default void onFailed(AgentExecutionRequest request, AgentRunFailedEvent event) {
+    }
+
+    default void onSuspended(AgentExecutionRequest request, AgentToolSuspendedEvent event) {
+    }
+
+    static AgentExecutionObserver noop() {
+        return new AgentExecutionObserver() { };
+    }
 }

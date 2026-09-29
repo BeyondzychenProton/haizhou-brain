@@ -4,6 +4,7 @@ import com.haizhuo.brain.runtime.agentscope.context.RuntimeContextFactory;
 import com.haizhuo.brain.runtime.agentscope.event.AgentScopeEventTranslator;
 import com.haizhuo.brain.runtime.agentscope.factory.HarnessRuntimeTemplate;
 import com.haizhuo.brain.runtime.agentscope.factory.HarnessTemplateCache;
+import com.haizhuo.brain.observability.AgentExecutionObserver;
 import com.haizhuo.brain.runtime.api.AgentRuntime;
 import com.haizhuo.brain.runtime.api.event.AgentRunCompletedEvent;
 import com.haizhuo.brain.runtime.api.event.AgentRunFailedEvent;
@@ -42,17 +43,25 @@ public class AgentScopeRuntime implements AgentRuntime {
     private final HarnessTemplateCache templateCache;
     private final RuntimeContextFactory contextFactory;
     private final AgentScopeEventTranslator translator;
+    private final AgentExecutionObserver observer;
 
     public AgentScopeRuntime(HarnessTemplateCache templateCache, RuntimeContextFactory contextFactory,
                              AgentScopeEventTranslator translator) {
+        this(templateCache, contextFactory, translator, AgentExecutionObserver.noop());
+    }
+
+    public AgentScopeRuntime(HarnessTemplateCache templateCache, RuntimeContextFactory contextFactory,
+                             AgentScopeEventTranslator translator, AgentExecutionObserver observer) {
         this.templateCache = Objects.requireNonNull(templateCache);
         this.contextFactory = Objects.requireNonNull(contextFactory);
         this.translator = Objects.requireNonNull(translator);
+        this.observer = Objects.requireNonNull(observer);
     }
 
     @Override
     public Flux<BrainAgentEvent> execute(AgentExecutionRequest request) {
         return Flux.defer(() -> {
+                    safe(() -> observer.onStarted(request));
                     HarnessRuntimeTemplate template = templateCache.getOrBuild(request.definition());
                     RuntimeContext context = contextFactory.create(request);
                     Flux<AgentEvent> events = stream(template, request.input(), context);
@@ -65,7 +74,8 @@ public class AgentScopeRuntime implements AgentRuntime {
                                     suspended.set(true);
                                 }
                             })
-                            .filter(event -> !(suspended.get() && event instanceof AgentRunCompletedEvent));
+                            .filter(event -> !(suspended.get() && event instanceof AgentRunCompletedEvent))
+                            .doOnNext(event -> safe(() -> observe(request, event)));
                 })
                 .subscribeOn(Schedulers.boundedElastic())
                 .onErrorResume(error -> {
@@ -76,9 +86,29 @@ public class AgentScopeRuntime implements AgentRuntime {
                     // 中文注释：只记录异常类型，不把上游响应正文、请求头或模型密钥写进日志。
                     log.error("AgentScope execution failed; errorType={}, rootCauseType={}",
                             error.getClass().getSimpleName(), root.getClass().getSimpleName());
-                    return Mono.just(new AgentRunFailedEvent(request.runId(),
-                            "AgentScope执行异常类型：" + root.getClass().getSimpleName()));
+                    AgentRunFailedEvent failed = new AgentRunFailedEvent(request.runId(),
+                            "AgentScope执行异常类型：" + root.getClass().getSimpleName());
+                    safe(() -> observer.onFailed(request, failed));
+                    return Mono.just(failed);
                 });
+    }
+
+    private void observe(AgentExecutionRequest request, BrainAgentEvent event) {
+        if (event instanceof AgentRunCompletedEvent completed) {
+            observer.onCompleted(request, completed);
+        } else if (event instanceof AgentRunFailedEvent failed) {
+            observer.onFailed(request, failed);
+        } else if (event instanceof AgentToolSuspendedEvent suspended) {
+            observer.onSuspended(request, suspended);
+        }
+    }
+
+    private static void safe(Runnable action) {
+        try {
+            action.run();
+        } catch (RuntimeException ignored) {
+            // 观测端口不能改变 Runtime 的业务事件流。
+        }
     }
 
     private Flux<AgentEvent> stream(HarnessRuntimeTemplate template, AgentExecutionInput input,
