@@ -16,7 +16,11 @@
             <div class="plan-title">执行计划</div>
             <pre class="plan-body">{{ item.text }}</pre>
           </div>
-          <div v-else class="bubble">{{ item.text }}<span v-if="item.pending" class="stream-caret">▋</span></div>
+          <div v-else-if="item.role === 'assistant'" class="bubble assistant-bubble">
+            <MarkdownMessage :content="item.text" />
+            <span v-if="item.pending" class="stream-caret">▋</span>
+          </div>
+          <div v-else class="bubble">{{ item.text }}</div>
         </div>
         <div v-if="active" class="progress">
           {{ stateLabel(run?.state) }}<span v-if="run?.queuePosition">，队列第 {{ run.queuePosition }} 位</span>
@@ -32,16 +36,29 @@
             <b>{{ tool.toolName }}</b>
             <span class="muted">{{ formatTime(tool.createdAt) }}</span>
           </div>
-          <pre class="approval-input">{{ prettyJson(tool.inputJson) }}</pre>
+          <div class="approval-summary">Agent 请求对工具调用进行确认。</div>
           <div class="approval-actions">
-            <el-button type="primary" size="small" :loading="decidingId === tool.toolExecutionId"
-                       @click="decide(tool, true)">批准</el-button>
-            <el-button type="danger" plain size="small" :loading="decidingId === tool.toolExecutionId"
-                       @click="decide(tool, false)">拒绝</el-button>
+            <el-button type="primary" size="small" @click="openInteraction(tool)">打开选择</el-button>
           </div>
         </el-card>
       </div>
-      <el-collapse v-else-if="finishedTools.length" class="approvals">
+      <el-dialog v-model="interactionOpen" title="Agent 请求你的选择" width="520px" destroy-on-close>
+        <template v-if="activeInteraction">
+          <div class="interaction-title">{{ activeInteraction.toolName }}</div>
+          <div class="interaction-message">该工具调用会在你的决定后继续执行。</div>
+          <pre class="approval-input">{{ prettyJson(activeInteraction.inputJson) }}</pre>
+          <div class="interaction-options">
+            <el-button v-for="option in interactionOptions" :key="option.id"
+                       :type="option.id === 'approve' ? 'primary' : 'danger'"
+                       :plain="option.id !== 'approve'"
+                       :loading="decidingId === activeInteraction.toolExecutionId"
+                       @click="decideInteraction(option.id)">
+              {{ option.label }}
+            </el-button>
+          </div>
+        </template>
+      </el-dialog>
+      <el-collapse v-if="!pendingTools.length && finishedTools.length" class="approvals">
         <el-collapse-item :title="`本次运行的工具调用记录（${finishedTools.length} 条）`">
           <div v-for="tool in finishedTools" :key="tool.toolExecutionId" class="done-tool">
             <el-tag size="small" :type="tool.approvalDecision === 'REJECTED' ? 'danger' : 'info'">
@@ -89,9 +106,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AppLayout from '../../layouts/AppLayout.vue'
+import MarkdownMessage from '../../components/conversation/MarkdownMessage.vue'
 import * as api from '../../api/app'
 import type { Run, Session, SessionEvent, ToolExecution } from '../../api/app'
 import { openSessionStream, type RunStreamEvent } from '../../api/runStream'
@@ -113,6 +131,9 @@ const guidance = ref('')
 const sending = ref(false)
 const inspector = ref(false)
 const decidingId = ref('')
+const interactionOpen = ref(false)
+const activeInteraction = ref<ToolExecution>()
+const openedInteractionId = ref('')
 const streamState = ref<'idle' | 'connecting' | 'live' | 'interrupted' | 'polling'>('idle')
 const seenStreamEventIds = new Set<string>()
 let closeStream: (() => void) | undefined
@@ -433,6 +454,31 @@ async function cancel() {
 const pendingTools = computed(() => toolExecutions.value.filter(
   item => item.state === 'APPROVAL_REQUIRED' && (!item.approvalDecision || item.approvalDecision === 'PENDING')))
 const finishedTools = computed(() => toolExecutions.value.filter(item => !pendingTools.value.includes(item)))
+const interactionOptions = computed(() => activeInteraction.value?.options?.length
+  ? activeInteraction.value.options
+  : [{ id: 'approve', label: '批准', description: '继续执行该工具调用' },
+    { id: 'deny', label: '拒绝', description: '阻止该工具调用并让运行安全收尾' }])
+
+watch(pendingTools, next => {
+  const first = next.find(item => item.toolExecutionId !== openedInteractionId.value)
+  if (first && !interactionOpen.value) openInteraction(first)
+})
+
+function openInteraction(tool: ToolExecution) {
+  activeInteraction.value = tool
+  openedInteractionId.value = tool.toolExecutionId
+  interactionOpen.value = true
+}
+
+async function decideInteraction(optionId: string) {
+  const tool = activeInteraction.value
+  if (!tool) return
+  await decide(tool, optionId === 'approve')
+  if (tool.approvalDecision || !pendingTools.value.some(item => item.toolExecutionId === tool.toolExecutionId)) {
+    interactionOpen.value = false
+    activeInteraction.value = undefined
+  }
+}
 
 async function decide(tool: ToolExecution, approve: boolean) {
   if (!run.value) return
@@ -490,6 +536,41 @@ onBeforeUnmount(stopTransport)
 </script>
 
 <style scoped>
+.conversation {
+  padding: 32px;
+  gap: 22px;
+  border-color: #e4eaf2;
+  border-radius: 20px;
+  background: linear-gradient(180deg, #fff 0%, #fbfcfe 100%);
+  box-shadow: 0 18px 48px rgb(15 23 42 / 5%);
+}
+.message { align-items: flex-end; }
+.bubble {
+  max-width: min(82%, 760px);
+  padding: 14px 18px;
+  border-radius: 18px;
+  font-size: 15px;
+  line-height: 1.72;
+  overflow-wrap: anywhere;
+  box-shadow: 0 8px 22px rgb(15 23 42 / 5%);
+}
+.message.user .bubble {
+  max-width: min(72%, 680px);
+  border-bottom-right-radius: 6px;
+  background: linear-gradient(135deg, #3478f6 0%, #2459dc 100%);
+  box-shadow: 0 10px 24px rgb(37 99 235 / 18%);
+}
+.message.assistant .bubble {
+  border: 1px solid #e6ebf2;
+  border-bottom-left-radius: 6px;
+  background: #f6f8fb;
+  color: #1f2937;
+}
+.assistant-bubble {
+  position: relative;
+  padding: 18px 20px;
+  white-space: normal;
+}
 .plan { background: #f1f5f9; border: 1px solid #e2e8f0; }
 .plan-title { font-weight: 500; font-size: 13px; color: #334155; margin-bottom: 6px; }
 .plan-body { margin: 0; font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
@@ -499,7 +580,23 @@ onBeforeUnmount(stopTransport)
 .approval-input { margin: 10px 0; padding: 12px; background: #f8fafc; border-radius: 8px; font-size: 12px;
   white-space: pre-wrap; word-break: break-all; max-height: 220px; overflow: auto; }
 .approval-actions { display: flex; gap: 10px; }
+.approval-summary, .interaction-message { color: #64748b; font-size: 13px; margin: 10px 0; }
+.interaction-title { font-size: 16px; font-weight: 600; }
+.interaction-options { display: flex; gap: 10px; justify-content: flex-end; }
 .done-tool { display: flex; gap: 10px; align-items: center; padding: 4px 0; }
-.stream-caret { color: #409eff; animation: blink 1s steps(1) infinite; }
+.stream-caret {
+  position: absolute;
+  right: 9px;
+  bottom: 7px;
+  color: #3478f6;
+  animation: blink 1s steps(1) infinite;
+}
 @keyframes blink { 50% { opacity: 0; } }
+@media (max-width: 700px) {
+  .conversation { padding: 20px 14px; gap: 18px; border-radius: 16px; }
+  .bubble,
+  .message.user .bubble { max-width: 92%; }
+  .bubble { padding: 12px 15px; }
+  .assistant-bubble { padding: 16px; }
+}
 </style>
