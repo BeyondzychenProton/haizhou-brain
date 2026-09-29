@@ -5,6 +5,7 @@ import com.haizhuo.brain.platform.employee.AgentDefinitionManagementService;
 import com.haizhuo.brain.platform.employee.CapabilityCatalogEntry;
 import com.haizhuo.brain.platform.employee.CapabilitySelection;
 import com.haizhuo.brain.platform.employee.PublishedEmployee;
+import com.haizhuo.brain.platform.employee.UserCapabilityGrant;
 import com.haizhuo.brain.security.identity.AuthenticatedUser;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
@@ -69,6 +70,11 @@ public class AgentDefinitionManagementController {
                                             @Valid @RequestBody PublishRequest request) {
         return blocking(() -> management.publish(employeeId, request.expectedDraftRevision(), request.requestId(),
                 actor.userId().value(), request.reason()));
+    }
+
+    @GetMapping("/users/{userId}/capability-grants")
+    public Mono<List<UserCapabilityGrant>> userCapabilityGrants(@PathVariable @Positive long userId) {
+        return blocking(() -> management.listUserCapabilityGrants(userId));
     }
 
     @PutMapping("/capabilities/{capabilityCode}/status")

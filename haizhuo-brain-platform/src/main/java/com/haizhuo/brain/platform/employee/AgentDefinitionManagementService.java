@@ -21,6 +21,11 @@ public class AgentDefinitionManagementService {
 
     public List<CapabilityCatalogEntry> listCapabilities() { return repository.listCapabilities(); }
 
+    public List<UserCapabilityGrant> listUserCapabilityGrants(long userId) {
+        if (userId <= 0) throw new IllegalArgumentException("userId must be positive");
+        return repository.listUserCapabilityGrants(userId);
+    }
+
     public AgentDefinitionDraft getDraft(long employeeId) {
         return repository.findDraft(employeeId).orElseThrow(() -> new IllegalArgumentException("Agent draft not found"));
     }

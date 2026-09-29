@@ -10,6 +10,7 @@ public interface AgentDefinitionRepository extends EmployeeCatalog {
     List<CapabilityCatalogEntry> listCapabilities();
     Optional<CapabilityCatalogEntry> findCapability(String capabilityCode, String revision);
     Optional<CapabilityCatalogEntry> findCapabilityByRevisionId(long capabilityRevisionId);
+    List<UserCapabilityGrant> listUserCapabilityGrants(long userId);
 
     AgentDefinitionDraft saveDraft(long employeeId, int expectedDraftRevision, String instructions,
                                    String modelProvider, String modelName,

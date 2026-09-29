@@ -1,5 +1,6 @@
 package com.haizhuo.brain.api.agentdefinition;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -8,6 +9,7 @@ import com.haizhuo.brain.kernel.identity.UserId;
 import com.haizhuo.brain.platform.employee.AgentDefinitionDraft;
 import com.haizhuo.brain.platform.employee.AgentDefinitionManagementService;
 import com.haizhuo.brain.platform.employee.CapabilitySelection;
+import com.haizhuo.brain.platform.employee.UserCapabilityGrant;
 import com.haizhuo.brain.security.identity.AuthenticatedUser;
 import com.haizhuo.brain.security.identity.PlatformRole;
 import java.time.Instant;
@@ -39,5 +41,15 @@ class AgentDefinitionManagementControllerTest {
 
         verify(management).saveDraft(9, 4, update, 71, "修订员工提示与能力绑定");
         verify(management).setUserCapabilityGrant(88, "sample.read", true, 71, "为已审批用户授予读取能力");
+    }
+
+    @Test
+    void userCapabilityGrantQueryUsesThePathUserId() {
+        AgentDefinitionManagementController controller = new AgentDefinitionManagementController(management);
+        List<UserCapabilityGrant> expected = List.of(new UserCapabilityGrant(88, "sample.read", true));
+        when(management.listUserCapabilityGrants(88)).thenReturn(expected);
+
+        assertEquals(expected, controller.userCapabilityGrants(88).block());
+        verify(management).listUserCapabilityGrants(88);
     }
 }

@@ -178,6 +178,12 @@ public class JdbcAgentDefinitionRepository implements AgentDefinitionRepository 
         return count != null && count > 0;
     }
 
+    @Override public List<UserCapabilityGrant> listUserCapabilityGrants(long userId) {
+        return jdbc.query("SELECT user_id,capability_code,enabled FROM agent_user_capability_grant WHERE user_id=? ORDER BY capability_code",
+                (rs, n) -> new UserCapabilityGrant(rs.getLong("user_id"), rs.getString("capability_code"), rs.getBoolean("enabled")),
+                userId);
+    }
+
     @Override public void setUserCapabilityGrant(long userId, String code, boolean enabled, AgentDefinitionManagementAudit audit) {
         tx.executeWithoutResult(status -> {
             List<Boolean> existing = jdbc.query("SELECT enabled FROM agent_user_capability_grant WHERE user_id=? AND capability_code=? FOR UPDATE",

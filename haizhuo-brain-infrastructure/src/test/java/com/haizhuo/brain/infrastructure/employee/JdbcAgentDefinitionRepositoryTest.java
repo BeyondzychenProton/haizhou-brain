@@ -8,6 +8,7 @@ import com.haizhuo.brain.platform.employee.AgentDefinitionManagementAudit;
 import com.haizhuo.brain.platform.employee.CapabilityCatalogEntry;
 import com.haizhuo.brain.platform.employee.CapabilitySelection;
 import com.haizhuo.brain.platform.employee.ToolInvocationAudit;
+import com.haizhuo.brain.platform.employee.UserCapabilityGrant;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
@@ -125,8 +126,21 @@ class JdbcAgentDefinitionRepositoryTest {
         repository.setUserCapabilityGrant(43, "sample.read", true, audit("USER_CAPABILITY_GRANT_CHANGED", "PLATFORM_USER", "43", null));
         assertTrue(repository.hasUserCapabilityGrant(43, "sample.read"), "新授权插入路径");
 
-        assertEquals(4, jdbc.queryForObject("SELECT COUNT(*) FROM agent_definition_management_audit", Integer.class),
-                "能力状态 1 条 + 授权变更 3 条");
+        List<UserCapabilityGrant> user42 = repository.listUserCapabilityGrants(42);
+        assertEquals(List.of(new UserCapabilityGrant(42, "sample.read", true),
+                        new UserCapabilityGrant(42, "sample.write", true)), user42,
+                "查询只返回目标用户的当前授权记录");
+        repository.setUserCapabilityGrant(42, "sample.read", false,
+                audit("USER_CAPABILITY_GRANT_CHANGED", "PLATFORM_USER", "42", null));
+        assertEquals(List.of(new UserCapabilityGrant(42, "sample.read", false),
+                        new UserCapabilityGrant(42, "sample.write", true)), repository.listUserCapabilityGrants(42),
+                "撤权状态必须可读回");
+        assertEquals(List.of(new UserCapabilityGrant(43, "sample.read", true)), repository.listUserCapabilityGrants(43),
+                "不同用户授权必须隔离");
+        assertEquals(List.of(), repository.listUserCapabilityGrants(99), "无授权用户返回空列表");
+
+        assertEquals(5, jdbc.queryForObject("SELECT COUNT(*) FROM agent_definition_management_audit", Integer.class),
+                "能力状态 1 条 + 授权变更 4 条");
         assertThrows(IllegalArgumentException.class, () -> repository.setCapabilityEnabled("sample.missing", false,
                 audit("CAPABILITY_STATUS_CHANGED", "CAPABILITY", "sample.missing", null)), "不存在的能力必须被拒绝");
     }
