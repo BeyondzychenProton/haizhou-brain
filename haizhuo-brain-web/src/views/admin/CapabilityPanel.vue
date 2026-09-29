@@ -33,6 +33,7 @@
       </el-table-column>
       <el-table-column label="操作" width="110" fixed="right">
         <template #default="{ row }">
+          <el-button link type="primary" @click="showDetails(row)">详情</el-button>
           <el-button link :type="row.enabled ? 'danger' : 'primary'" :loading="busyId === row.capabilityCode"
                      @click="toggle(row)">
             {{ row.enabled ? '停用' : '启用' }}
@@ -40,6 +41,28 @@
         </template>
       </el-table-column>
     </el-table>
+
+    <el-drawer v-model="detailVisible" :title="selected?.displayName || '工具详情'" size="520px">
+      <template v-if="selected">
+        <el-alert type="info" :closable="false" class="detail-block"
+                  title="本地工具必须由代码白名单提供者注册；MCP 工具须先在 MCP 页面逐项审核。" />
+        <el-descriptions :column="1" border>
+          <el-descriptions-item label="能力编码">{{ selected.capabilityCode }}</el-descriptions-item>
+          <el-descriptions-item label="类型">{{ typeLabel(selected.type) }}</el-descriptions-item>
+          <el-descriptions-item label="修订">{{ selected.revision }}</el-descriptions-item>
+          <el-descriptions-item label="模型工具名">{{ selected.toolName }}</el-descriptions-item>
+          <el-descriptions-item label="业务动作">{{ selected.businessAction }}</el-descriptions-item>
+          <el-descriptions-item label="执行实现">{{ selected.implementationKey }}</el-descriptions-item>
+          <el-descriptions-item label="全局状态">{{ selected.enabled ? '启用' : '停用' }}</el-descriptions-item>
+          <el-descriptions-item label="需要确认">{{ selected.requiresConfirmation ? '是' : '否' }}</el-descriptions-item>
+          <el-descriptions-item label="说明">{{ selected.description || '未填写' }}</el-descriptions-item>
+        </el-descriptions>
+        <div class="schema-block">
+          <div class="schema-title">输入 Schema</div>
+          <pre class="schema-preview">{{ prettySchema(selected.inputSchema) }}</pre>
+        </div>
+      </template>
+    </el-drawer>
   </section>
 </template>
 
@@ -55,6 +78,8 @@ const loading = ref(false)
 const keyword = ref('')
 /** 正在提交的能力编码，用于给对应行加 loading，避免整表遮罩。 */
 const busyId = ref('')
+const detailVisible = ref(false)
+const selected = ref<Capability>()
 
 const filtered = computed(() => {
   const key = keyword.value.trim().toLowerCase()
@@ -104,6 +129,20 @@ async function toggle(row: Capability) {
   }
 }
 
+function showDetails(row: Capability) {
+  selected.value = row
+  detailVisible.value = true
+}
+
+function typeLabel(type: Capability['type']): string {
+  return ({ TOOL: '本地工具', MCP: 'MCP 工具', SKILL: 'Skill', KNOWLEDGE: '知识' } as Record<Capability['type'], string>)[type]
+    || type
+}
+
+function prettySchema(schema: Record<string, unknown>): string {
+  return Object.keys(schema).length ? JSON.stringify(schema, null, 2) : '未声明'
+}
+
 function validateReason(value: string): boolean | string {
   const text = String(value ?? '').trim()
   if (!text) return '操作原因不能为空'
@@ -120,4 +159,9 @@ defineExpose({ refresh })
   display: flex;
   gap: 10px;
 }
+.detail-block { margin-bottom: 16px; }
+.schema-block { margin-top: 16px; }
+.schema-title { font-weight: 600; margin-bottom: 8px; }
+.schema-preview { max-height: 300px; overflow: auto; margin: 0; padding: 10px;
+  background: #f5f7fa; white-space: pre-wrap; overflow-wrap: anywhere; }
 </style>

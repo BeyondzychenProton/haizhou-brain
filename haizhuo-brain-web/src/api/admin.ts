@@ -124,6 +124,19 @@ export function setUserGrant(userId: number, capabilityCode: string, enabled: bo
     .then(r => r.data)
 }
 
+/** 用户能力授权是按 capabilityCode 保存的，未返回记录表示尚未授权。 */
+export interface UserCapabilityGrant {
+  userId: number
+  capabilityCode: string
+  enabled: boolean
+}
+
+export function userCapabilityGrants(userId: number) {
+  return httpClient
+    .get<UserCapabilityGrant[]>(`/api/admin/v1/users/${userId}/capability-grants`)
+    .then(r => r.data)
+}
+
 /* ---------------- 员工定义草稿与发布 ---------------- */
 
 /** 与后端 CapabilitySelection 对齐。 */

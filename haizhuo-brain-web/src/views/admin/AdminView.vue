@@ -10,6 +10,9 @@
       <el-tab-pane label="能力目录" name="capabilities">
         <CapabilityPanel v-if="tab === 'capabilities'" />
       </el-tab-pane>
+      <el-tab-pane label="工具授权" name="grants">
+        <ToolGrantPanel v-if="tab === 'grants'" />
+      </el-tab-pane>
       <el-tab-pane label="MCP 工具" name="mcp">
         <McpPanel v-if="tab === 'mcp'" />
       </el-tab-pane>
@@ -27,6 +30,7 @@
 import { ref } from 'vue'
 import AppLayout from '../../layouts/AppLayout.vue'
 import CapabilityPanel from './CapabilityPanel.vue'
+import ToolGrantPanel from './ToolGrantPanel.vue'
 import McpPanel from './McpPanel.vue'
 import DefinitionPanel from './DefinitionPanel.vue'
 import UserPanel from './UserPanel.vue'
