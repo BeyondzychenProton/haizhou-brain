@@ -35,6 +35,16 @@ export interface ToolExecution {
   approvalDecision: string | null
   createdAt: string
   updatedAt: string
+  /** 持久化交互请求；旧后端缺失时按空值兼容。 */
+  interactionId?: string | null
+  interactionType?: 'TOOL_APPROVAL' | 'USER_SELECTION' | string | null
+  options?: InteractionOption[]
+}
+
+export interface InteractionOption {
+  id: string
+  label: string
+  description?: string
 }
 
 /** 与后端 ToolDecisionResponse 对齐；decided 为 false 表示这是一次重复的幂等提交。 */

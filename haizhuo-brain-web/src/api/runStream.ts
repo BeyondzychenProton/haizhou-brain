@@ -1,8 +1,31 @@
+import type { ContentBlock } from '../renderers/contentBlockRegistry'
+
+export interface StreamInteractionOption {
+  id: string
+  label: string
+  description?: string
+}
+
+export interface StreamInteractionRequest {
+  interactionId: string
+  interactionType: 'TOOL_APPROVAL' | 'USER_SELECTION' | string
+  title: string
+  message?: string
+  options: StreamInteractionOption[]
+  status: 'PENDING' | 'SUBMITTED' | 'APPLIED' | 'REJECTED' | 'EXPIRED' | string
+  expiresAt?: string
+}
+
 export interface RunStreamPayload {
   messageId: string | null
   blockId: string | null
   delta: string | null
   text: string | null
+  /** 可扩展内容块/交互数据；旧事件没有该字段时按空对象处理。 */
+  metadata?: Record<string, unknown> & {
+    interaction?: StreamInteractionRequest
+    contentBlocks?: ContentBlock[]
+  }
 }
 
 export interface RunStreamEvent {

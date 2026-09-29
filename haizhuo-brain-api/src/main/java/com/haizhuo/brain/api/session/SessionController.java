@@ -8,6 +8,7 @@ import com.haizhuo.brain.platform.run.RunEvent;
 import com.haizhuo.brain.platform.run.SessionTimelineItem;
 import com.haizhuo.brain.platform.run.RunGuidance;
 import com.haizhuo.brain.platform.tool.ToolApprovalService;
+import com.haizhuo.brain.platform.tool.ToolExecutionState;
 import com.haizhuo.brain.kernel.identity.RunId;
 import com.haizhuo.brain.security.identity.AuthenticatedUser;
 import jakarta.validation.Valid;
@@ -122,7 +123,13 @@ public class SessionController {
                     return new ToolExecutionResponse(execution.id(), execution.toolName(),
                             execution.state().name(), execution.inputJson(),
                             approval.map(item -> item.decision().name()).orElse(null),
-                            execution.createdAt(), execution.updatedAt());
+                            execution.createdAt(), execution.updatedAt(),
+                            approval.map(item -> item.id()).orElse(null),
+                            approval.isPresent() ? "TOOL_APPROVAL" : null,
+                            execution.state() == ToolExecutionState.APPROVAL_REQUIRED
+                                    ? List.of(new InteractionOptionResponse("approve", "批准", "继续执行该工具调用"),
+                                    new InteractionOptionResponse("deny", "拒绝", "阻止该工具调用并让运行安全收尾"))
+                                    : List.of());
                 }).toList());
     }
 
@@ -158,7 +165,10 @@ public class SessionController {
     public record GuidanceRequest(@NotBlank @Size(max = 4000) String content) { }
     public record GuidanceResponse(String guidanceId, String runId, String status, Instant createdAt) { }
     public record ToolExecutionResponse(String toolExecutionId, String toolName, String state, String inputJson,
-                                        String approvalDecision, Instant createdAt, Instant updatedAt) { }
+                                        String approvalDecision, Instant createdAt, Instant updatedAt,
+                                        String interactionId, String interactionType,
+                                        List<InteractionOptionResponse> options) { }
+    public record InteractionOptionResponse(String id, String label, String description) { }
     public record ToolDecisionRequest(boolean approve, @Size(max = 500) String reason) { }
     public record ToolDecisionResponse(String toolExecutionId, boolean decided) { }
 }

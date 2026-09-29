@@ -1,6 +1,7 @@
 package com.haizhuo.brain.api.session;
 
 import java.time.Instant;
+import java.util.Map;
 
 /**
  * 跨渠道统一事件信封（改造方案 §5）。持久事件的 {@code sessionCursor} 与 {@code runSequence}
@@ -11,6 +12,14 @@ public record StreamEvent(int schemaVersion, String eventId, String sessionId, L
                           Integer runSequence, String attemptId, Long streamOffset, String type, String visibility,
                           String durability, Instant occurredAt, Payload payload) {
 
-    public record Payload(String messageId, String blockId, String delta, String text) {
+    public record Payload(String messageId, String blockId, String delta, String text,
+                          Map<String, Object> metadata) {
+        public Payload(String messageId, String blockId, String delta, String text) {
+            this(messageId, blockId, delta, text, Map.of());
+        }
+
+        public Payload {
+            metadata = metadata == null ? Map.of() : Map.copyOf(metadata);
+        }
     }
 }
