@@ -1,5 +1,7 @@
 package com.haizhuo.brain.bootstrap.configuration;
 
+import com.haizhuo.brain.observability.AgentExecutionObserver;
+import com.haizhuo.brain.observability.LangfuseProperties;
 import com.haizhuo.brain.runtime.agentscope.AgentScopeRuntime;
 import com.haizhuo.brain.runtime.agentscope.config.AgentScopeRuntimeProperties;
 import com.haizhuo.brain.runtime.agentscope.context.RuntimeContextFactory;
@@ -13,12 +15,15 @@ import com.haizhuo.brain.runtime.api.RunControlInbox;
 import io.agentscope.core.state.AgentStateStore;
 import io.agentscope.extensions.jdbc.dialect.vendor.MysqlDialect;
 import io.agentscope.extensions.jdbc.state.JdbcAgentStateStore;
+import io.opentelemetry.api.GlobalOpenTelemetry;
+import io.opentelemetry.api.trace.Tracer;
 import java.nio.file.Path;
 import javax.sql.DataSource;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
@@ -59,8 +64,13 @@ public class AgentRuntimeConfiguration {
     @Bean
     HarnessAgentFactory harnessAgentFactory(AgentScopeModelFactory modelFactory, AgentStateStore agentStateStore,
                                             DefinitionWorkspaceMaterializer workspaceMaterializer,
-                                            RunControlInbox controlInbox) {
-        return new HarnessAgentFactory(modelFactory, agentStateStore, null, workspaceMaterializer, controlInbox);
+                                            RunControlInbox controlInbox, LangfuseProperties langfuse,
+                                            ObjectProvider<Tracer> tracer) {
+        Tracer otelTracer = tracer.getIfAvailable(
+                () -> GlobalOpenTelemetry.getTracer("com.haizhuo.brain"));
+        return new HarnessAgentFactory(modelFactory, agentStateStore, null, workspaceMaterializer, controlInbox,
+                new com.haizhuo.brain.runtime.agentscope.middleware.ObservabilityMiddleware(
+                        otelTracer, langfuse), langfuse.isEnabled());
     }
 
     @Bean
@@ -80,7 +90,8 @@ public class AgentRuntimeConfiguration {
 
     @Bean
     AgentRuntime agentRuntime(HarnessTemplateCache templateCache, RuntimeContextFactory contextFactory,
-                              AgentScopeEventTranslator translator) {
-        return new AgentScopeRuntime(templateCache, contextFactory, translator);
+                              AgentScopeEventTranslator translator,
+                              AgentExecutionObserver observer) {
+        return new AgentScopeRuntime(templateCache, contextFactory, translator, observer);
     }
 }

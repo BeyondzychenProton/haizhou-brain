@@ -38,6 +38,7 @@ import com.haizhuo.brain.platform.tool.ToolExecutionUserDirectory;
 import com.haizhuo.brain.platform.tool.ToolExecutionWorker;
 import com.haizhuo.brain.platform.tool.ToolResourcePolicy;
 import com.haizhuo.brain.runtime.api.AgentRuntime;
+import com.haizhuo.brain.runtime.api.RunObservationSink;
 import java.time.Clock;
 import java.util.List;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -157,7 +158,8 @@ public class HarnessRuntimeConfiguration {
     @ConditionalOnProperty(prefix = "haizhuo.brain.run-worker", name = "enabled", havingValue = "true")
     ToolExecutionWorker toolExecutionWorker(ToolExecutionRepository executions,
                                             ToolApprovalRepository approvals,
-                                            ToolExecutionGatewayService gateway, Clock clock) {
-        return new ToolExecutionWorker(executions, approvals, gateway, clock);
+                                            ToolExecutionGatewayService gateway, Clock clock,
+                                            RunObservationSink observationSink) {
+        return new ToolExecutionWorker(executions, approvals, gateway, clock, observationSink);
     }
 }

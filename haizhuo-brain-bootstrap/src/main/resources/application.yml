@@ -29,6 +29,9 @@ mybatis-plus:
       logic-delete-value: 1
       logic-not-delete-value: 0
 management:
+  opentelemetry:
+    resource-attributes:
+      service.name: ${haizhuo.brain.observability.langfuse.service-name:${LANGFUSE_SERVICE_NAME:${OTEL_SERVICE_NAME:haizhuo-brain}}}
   endpoints:
     web:
       exposure:
@@ -40,7 +43,16 @@ management:
       show-details: when_authorized
   tracing:
     sampling:
-      probability: 0.1
+      probability: ${HAIZHUO_BRAIN_TRACE_SAMPLE_PROBABILITY:1.0}
+  otlp:
+    tracing:
+      export:
+        enabled: ${LANGFUSE_ENABLED:false}
+      endpoint: ${LANGFUSE_OTLP_TRACES_ENDPOINT:http://172.16.1.29:3001/api/public/otel/v1/traces}
+      transport: http
+      connect-timeout: 3s
+      timeout: 5s
+      headers: {}
 haizhuo:
   brain:
     security:
@@ -57,3 +69,17 @@ haizhuo:
       enabled: false
     persistence:
       enabled: true
+    observability:
+      langfuse:
+        enabled: ${LANGFUSE_ENABLED:false}
+        base-url: ${LANGFUSE_BASE_URL:http://172.16.1.29:3001}
+        otlp-endpoint: ${LANGFUSE_OTLP_TRACES_ENDPOINT:http://172.16.1.29:3001/api/public/otel/v1/traces}
+        public-key: ${LANGFUSE_PUBLIC_KEY:}
+        secret-key: ${LANGFUSE_SECRET_KEY:}
+        environment: ${LANGFUSE_ENVIRONMENT:local}
+        service-name: ${LANGFUSE_SERVICE_NAME:${OTEL_SERVICE_NAME:haizhuo-brain}}
+        capture-content: ${LANGFUSE_CAPTURE_CONTENT:false}
+        max-content-chars: ${LANGFUSE_MAX_CONTENT_CHARS:2000}
+        score-queue-capacity: ${LANGFUSE_SCORE_QUEUE_CAPACITY:256}
+        score-flush-interval-millis: ${LANGFUSE_SCORE_FLUSH_INTERVAL_MILLIS:250}
+        ingestion-version: ${LANGFUSE_INGESTION_VERSION:4}

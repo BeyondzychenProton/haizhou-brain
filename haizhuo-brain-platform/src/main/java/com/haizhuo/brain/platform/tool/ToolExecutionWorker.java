@@ -1,6 +1,7 @@
 package com.haizhuo.brain.platform.tool;
 
 import com.haizhuo.brain.kernel.json.CanonicalJson;
+import com.haizhuo.brain.runtime.api.RunObservationSink;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.util.LinkedHashMap;
@@ -21,13 +22,21 @@ public class ToolExecutionWorker {
     private final ToolApprovalRepository approvals;
     private final ToolExecutionGatewayService gateway;
     private final Clock clock;
+    private final RunObservationSink observationSink;
 
     public ToolExecutionWorker(ToolExecutionRepository executions, ToolApprovalRepository approvals,
                                ToolExecutionGatewayService gateway, Clock clock) {
+        this(executions, approvals, gateway, clock, RunObservationSink.noop());
+    }
+
+    public ToolExecutionWorker(ToolExecutionRepository executions, ToolApprovalRepository approvals,
+                               ToolExecutionGatewayService gateway, Clock clock,
+                               RunObservationSink observationSink) {
         this.executions = Objects.requireNonNull(executions);
         this.approvals = Objects.requireNonNull(approvals);
         this.gateway = Objects.requireNonNull(gateway);
         this.clock = Objects.requireNonNull(clock);
+        this.observationSink = Objects.requireNonNull(observationSink);
     }
 
     /** 认领并落定至多一条工具执行；没有可执行记录时返回 false。 */
@@ -38,23 +47,48 @@ public class ToolExecutionWorker {
         }
         ClaimedToolExecution claim = claimed.get();
         PlatformToolExecution execution = claim.execution();
+        var startedAt = clock.instant();
         try {
             ToolPreparation preparation = gateway.prepare(execution, claim.run());
             switch (preparation.outcome()) {
-                case DENIED -> executions.completeExecution(outcome(execution, ToolExecutionState.DENIED,
-                        false, preparation.safeMessage(), preparation.denialCode(), null));
-                case APPROVAL_REQUIRED -> approvals.createPending(execution, claim.run().userId().value());
+                case DENIED -> {
+                    PlatformToolExecution settled = outcome(execution, ToolExecutionState.DENIED,
+                            false, preparation.safeMessage(), preparation.denialCode(), null);
+                    executions.completeExecution(settled);
+                    observe(claim, settled.state().name(), settled.errorCode(), startedAt);
+                }
+                case APPROVAL_REQUIRED -> {
+                    approvals.createPending(execution, claim.run().userId().value());
+                    observe(claim, ToolExecutionState.APPROVAL_REQUIRED.name(), null, startedAt);
+                }
                 case ALLOWED -> {
                     ToolExecutionResult result = gateway.execute(execution, claim.run(), preparation);
-                    executions.completeExecution(outcomeOf(execution, result));
+                    PlatformToolExecution settled = outcomeOf(execution, result);
+                    executions.completeExecution(settled);
+                    observe(claim, settled.state().name(), settled.errorCode(), startedAt);
                 }
             }
         } catch (RuntimeException error) {
             // Tx-05 仍会把该记录原子落定；FAILED 状态承载执行结果。
-            executions.completeExecution(outcome(execution, ToolExecutionState.FAILED,
-                    false, "操作执行失败，请稍后重试。", "TOOL_WORKER_ERROR", null));
+            PlatformToolExecution settled = outcome(execution, ToolExecutionState.FAILED,
+                    false, "操作执行失败，请稍后重试。", "TOOL_WORKER_ERROR", null);
+            executions.completeExecution(settled);
+            observe(claim, settled.state().name(), settled.errorCode(), startedAt);
         }
         return true;
+    }
+
+    private void observe(ClaimedToolExecution claim, String state, String errorCode,
+                         java.time.Instant startedAt) {
+        try {
+            PlatformToolExecution execution = claim.execution();
+            observationSink.onToolExecution(execution.runId().value(), claim.run().sessionId().value(),
+                    Long.toString(claim.run().userId().value()), execution.id(), execution.toolName(),
+                    execution.capabilityRevisionId(), state, errorCode, execution.inputDigest(),
+                    startedAt, clock.instant());
+        } catch (RuntimeException ignored) {
+            // 观测系统故障不得回滚或改变已落定的工具结果。
+        }
     }
 
     private PlatformToolExecution outcomeOf(PlatformToolExecution execution, ToolExecutionResult result) {
