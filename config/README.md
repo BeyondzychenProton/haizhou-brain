@@ -32,6 +32,18 @@ haizhuo:
 
 管理与 Session/Run 端点使用平台可信身份链路；是否可端到端运行仍取决于本地数据库、Redis、模型服务和目标工具服务。原 `meeting-mock` Profile 和脚本已退出。
 
+## Langfuse OTLP 可观测性
+
+需要使用提供 OTLP traces 入口的新版 Langfuse（建议 v4，自托管最低 v3.22）。默认关闭；启用时配置
+`LANGFUSE_ENABLED=true`、`LANGFUSE_OTLP_TRACES_ENDPOINT`、
+`LANGFUSE_PUBLIC_KEY` 和 `LANGFUSE_SECRET_KEY`。HTTP endpoint 使用
+`/api/public/otel/v1/traces`，项目会通过 Spring Boot OTLP HTTP/protobuf exporter
+发送，并把评分通过 Langfuse Public Scores API 异步写入。详细边界、脱敏规则和验收步骤见
+[Langfuse OTLP 可观测性与评测接入说明](../docs/06-开发指南/Langfuse%20OTLP可观测性与评测接入说明.md)。
+
+`LANGFUSE_CAPTURE_CONTENT` 默认为 `false`；未完成脱敏评审前不要打开。评分接口返回
+`accepted=true` 只表示本地有界队列已接收，不代表远端已经持久化。
+
 ## MCP 模拟联调（仅本机/测试）
 
 MCP 连接默认拒绝未知目标；`haizhuo.brain.mcp.allowed-hosts` 只允许显式列出的 HTTPS 主机。下列开关单独放行本机 HTTP，**不得配置在生产环境**。模拟器和平台使用同一条至少 32 字符的临时测试密钥；测试手机号只是用户身份属性，Token 由平台按用户生成，不能把手机号本身当成授权凭据。
