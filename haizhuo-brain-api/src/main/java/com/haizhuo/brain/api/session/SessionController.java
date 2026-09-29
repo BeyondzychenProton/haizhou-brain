@@ -5,7 +5,6 @@ import com.haizhuo.brain.platform.session.AgentSession;
 import com.haizhuo.brain.platform.session.SessionApplicationService;
 import com.haizhuo.brain.platform.run.AgentRun;
 import com.haizhuo.brain.platform.run.RunEvent;
-import com.haizhuo.brain.platform.run.SessionTimelineItem;
 import com.haizhuo.brain.platform.run.RunGuidance;
 import com.haizhuo.brain.platform.tool.ToolApprovalService;
 import com.haizhuo.brain.platform.tool.ToolExecutionState;
@@ -63,9 +62,12 @@ public class SessionController {
     }
 
     @GetMapping("/{sessionId}/timeline")
-    public Mono<List<SessionTimelineItem>> timeline(@AuthenticationPrincipal AuthenticatedUser user, @PathVariable String sessionId,
-                                                    @RequestParam(defaultValue = "100") int limit) {
-        return blocking(() -> sessions.timeline(new SessionId(sessionId), user.userId(), limit));
+    public Mono<List<SessionTimelineResponse>> timeline(@AuthenticationPrincipal AuthenticatedUser user, @PathVariable String sessionId,
+                                                        @RequestParam(defaultValue = "100") int limit) {
+        return blocking(() -> sessions.timeline(new SessionId(sessionId), user.userId(), limit).stream()
+                .map(item -> new SessionTimelineResponse(item.runId().value(), item.sequenceNo(), item.type(),
+                        item.content(), item.createdAt()))
+                .toList());
     }
 
     @GetMapping("/{sessionId}/runs")
@@ -162,6 +164,7 @@ public class SessionController {
     public record CreateRunRequest(@NotBlank @Size(max = 128) String clientRequestId, @NotBlank @Size(max = 4000) String input) { }
     public record SessionResponse(String sessionId, long employeeId, String status, Instant createdAt, Instant lastActiveAt) { }
     public record RunResponse(String runId, String sessionId, String state, long definitionVersionId, Instant createdAt, int queuePosition) { }
+    public record SessionTimelineResponse(String runId, int sequenceNo, String type, String content, Instant createdAt) { }
     public record GuidanceRequest(@NotBlank @Size(max = 4000) String content) { }
     public record GuidanceResponse(String guidanceId, String runId, String status, Instant createdAt) { }
     public record ToolExecutionResponse(String toolExecutionId, String toolName, String state, String inputJson,

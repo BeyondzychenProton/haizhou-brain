@@ -7,6 +7,7 @@ export interface RunEvent { runId:string; sequenceNo:number; type:string; conten
 /** 会话级持久事件，形状与后端统一事件信封一致。 */
 export type SessionEvent = RunStreamEvent
 export interface TimelineItem extends RunEvent { }
+type TimelineWireItem = Omit<TimelineItem, 'runId'> & { runId: string | { value: string } }
 export async function listEmployees(){return(await httpClient.get<Employee[]>('/api/v1/employees')).data}
 export async function listSessions(){return(await httpClient.get<Session[]>('/api/v1/sessions')).data}
 export async function getSession(id:string){return(await httpClient.get<Session>(`/api/v1/sessions/${id}`)).data}
@@ -20,7 +21,11 @@ export interface SessionEventPage { events:SessionEvent[]; cursorFloor:number; c
 export async function getSessionEvents(sessionId:string,after:number,limit=200){
   return(await httpClient.get<SessionEventPage>(`/api/v1/sessions/${sessionId}/events`,{params:{after,limit}})).data
 }
-export async function timeline(sessionId:string){return(await httpClient.get<TimelineItem[]>(`/api/v1/sessions/${sessionId}/timeline`)).data}
+export async function timeline(sessionId:string):Promise<TimelineItem[]>{
+  const items=(await httpClient.get<TimelineWireItem[]>(`/api/v1/sessions/${sessionId}/timeline`)).data
+  // 兼容当前运行中的旧后端；新接口直接返回字符串 ID。
+  return items.map(item=>({...item,runId:typeof item.runId==='string'?item.runId:item.runId.value}))
+}
 export async function cancelRun(runId:string){return(await httpClient.post<Run>(`/api/v1/sessions/runs/${runId}/cancel`)).data}
 export async function guideRun(runId:string,content:string){return(await httpClient.post(`/api/v1/sessions/runs/${runId}/guidance`,{content})).data}
 
