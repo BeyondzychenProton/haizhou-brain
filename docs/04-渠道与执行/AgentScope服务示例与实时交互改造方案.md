@@ -5,7 +5,7 @@
 | 项目 | 内容 |
 | --- | --- |
 | 日期 | 2026-09-28 |
-| 状态 | 设计方案，供后续编码评审；本文未实施接口或运行时改造 |
+| 状态 | 设计方案；5.2 的交互契约、工具审批弹窗切片和多模态渲染器注册接口已实施，真实文档预览及通用 Agent 选项生产仍未实施 |
 | 参考范围 | AgentScope **Python 2.0.8** 的 Agent Service「快速上手」、计划、权限、团队、消息事件、Channel 概览/路由/自定义渠道文档及对应版本示例源码 |
 | 本项目基线 | Spring Boot WebFlux + AgentScope **Java 2.0.3** + Vue 3；以本次仓库源码为准，不把 Python 示例 API 视为 Java 已有能力 |
 | 上位约束 | [Agent 资源与动作权限设计](../02-身份与会话/Agent资源与动作权限设计.md)、[数字员工 Harness 运行时与版本状态切换详细设计](../03-Agent与能力/数字员工Harness运行时与版本状态切换详细设计.md)、[数字员工多渠道接入与消息流转设计](数字员工多渠道接入与消息流转设计.md)、[前端 v0 实现说明](../08-前端/前端v0实现说明.md) |
@@ -206,6 +206,16 @@ flowchart LR
 **审批往返。** 渠道审批输入只携带 `bindingId/providerEventId/externalUserId/approvalId/runId/decision` 等定位字段；平台重新验证消息签名、原用户绑定、Session/Run 归属、待确认调用与有效期，再从持久等待点读取权威工具参数。按钮数据或文本不作为工具参数和授权依据。官方的 `ChannelConfirmationResultEvent` 及从服务状态读取待确认调用的做法可借鉴，但本项目须沿用平台 `approvalId` 和 Tool Gateway 的权限检查。[自定义渠道的工具确认](https://docs.agentscope.io/zh/versions/2.0.8/deploy/channel/custom#工具确认)
 
 **投递契约。** `channel_delivery` 至少记录 `deliveryId/inboxId/runId?/sourceEventId?/bindingId/bindingGeneration/originalUserId/replyTarget/purpose/idempotencyKey/payload/state/attempts/providerMessageId?`。状态至少区分 `PENDING/SENDING/DELIVERED/FAILED/UNCERTAIN/SUPPRESSED`；`DELIVERED` 指提供方确认接收，不保证用户已读。一次 Run 可产生受控进度、审批和最终投递，但每种投递的去重键须稳定，例如 `(bindingId, runId, purpose, sourceEventId)`；`message.final` 重放不能再次向用户发同一条答复。渠道侧发送失败、连接重试和消息编辑失败写入 Delivery/连接状态，不能回写成 `run.failed`。对方成功但本地回执丢失时按 4.1 的核查/不确定规则处理。
+
+### 5.2 运行时工具交互与多模态内容块（本轮实施边界）
+
+本轮将“工具选择框”定义为 Agent 运行时产生的**持久化交互请求**，不等同于后台能力配置。交互请求至少区分 `TOOL_APPROVAL`（批准/拒绝）与 `USER_SELECTION`（从 Agent 给出的有限选项中选择），以 `interactionId` 作为幂等提交和恢复依据，并关联 `runId`、`toolExecutionId/toolUseId`、有效期和安全展示摘要。按钮或普通聊天文本不能直接成为业务授权或工具参数；提交时平台必须重新校验当前用户、Run、等待点、版本快照和有效期。
+
+交互状态由平台持久化并作为 Run 的等待点：`PENDING → SUBMITTED → APPLIED/REJECTED/EXPIRED`。页面刷新、SSE 断线、Worker 重启后，前端先读取 Run/Interaction 快照，再接收实时事件；重复提交返回已处理结果而不是重复执行。视觉上采用“阻塞时展开的选择卡/弹窗 + 决定后可折叠的工具卡片”，事件事实与视觉形态分离。工具卡片按同一 `toolExecutionId` 合并 `REQUESTED/APPROVAL_REQUIRED/EXECUTING/SUCCEEDED/FAILED/DENIED`，不得为每个状态生成重复气泡。
+
+多模态只冻结内容块和渲染扩展边界，不在本轮实现文档预览。事件 payload 采用可扩展的 `ContentBlock` 联合类型，保留 `text/image/audio/video/document/tool/artifact/interaction` 类型；前端通过 `type → renderer` 注册表选择渲染器，未知类型必须安全降级。普通助手 Markdown 已采用 `markdown-it + DOMPurify` 解析和清洗，支持表格、图片、链接、列表、引用和代码块；图片仅允许安全资源协议，并限制尺寸与懒加载。`document` 和 `artifact` 只携带受权限保护的文件引用及元数据（媒体类型、文件名、大小、预览/下载能力、来源事件），不把二进制内容直接放入 SSE 或普通事件文本。PDF/Office 解析、OCR、转换、浏览器预览、上传存储和供应商格式适配延期，不把“预留接口”写成已具备真实预览能力。
+
+本轮代码范围限定为：事件信封/运行时交互契约、持久化恢复所需的 API 与状态投影、Vue 工具交互卡片和内容块渲染器注册接口。后台 Agent 能力绑定界面、真实文件解析与预览、外部 IM 交互卡片、多实例共享广播均不在本轮交付。
 
 **管理接口。** 官方 `/channels/types` 返回渠道类型和凭据表单 Schema，`/channels` 管理实例、路由、启停、状态和会话；本项目可借鉴“类型自描述 + 实例配置”的接口形态，但管理员接口应由平台提供、按平台角色授权，凭据加密保存并在读取时脱敏。管理面只配置渠道绑定和允许的员工范围，不能赋予用户新的业务 Capability；主动推送也走独立的授权、目标选择与 Delivery 记录，不能借用对话回复的 `replyTarget`。[Channel 概览与 HTTP 接口](https://docs.agentscope.io/zh/versions/2.0.8/deploy/channel/overview)
 
