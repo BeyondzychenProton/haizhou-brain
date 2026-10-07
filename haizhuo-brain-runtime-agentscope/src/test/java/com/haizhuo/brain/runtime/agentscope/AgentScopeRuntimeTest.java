@@ -50,6 +50,22 @@ class AgentScopeRuntimeTest {
     private HarnessTemplateCache templateCache;
 
     @Test
+    void refusesMissingStateBeforeConstructingOrInvokingModel() {
+        var stateStore = new InMemoryAgentStateStore();
+        var cache = new HarnessTemplateCache(new FakeFactory(new TextOnlyModel(), workspaceDir));
+        var runtime = new AgentScopeRuntime(cache, new RuntimeContextFactory(), new AgentScopeEventTranslator(),
+                com.haizhuo.brain.observability.AgentExecutionObserver.noop(), stateStore);
+        var request = TestRequests.request(TestRequests.definition("bundle-required", List.of()),
+                TestRequests.constraints(Set.of()),
+                com.haizhuo.brain.runtime.api.model.RuntimeSessionBinding.direct("session-1", true),
+                new com.haizhuo.brain.runtime.api.model.UserPromptExecutionInput("继续"));
+        var events = runtime.execute(request).collectList().block();
+        var failure = assertInstanceOf(AgentRunFailedEvent.class, events.get(0));
+        assertTrue(failure.message().contains("RUNTIME_STATE_MISSING"));
+        assertEquals(0, cache.size(), "不能把缺失状态当成新会话");
+    }
+
+    @Test
     void completesInitialPromptThroughCachedTemplate() {
         AgentScopeRuntime runtime = runtimeWith(new TextOnlyModel());
         RuntimeDefinitionSnapshot definition = TestRequests.definition("bundle-complete", List.of());

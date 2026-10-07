@@ -62,7 +62,7 @@ class JdbcAgentStateStoreVerificationTest {
         Toolkit toolkit = new Toolkit();
         toolkit.registerSchema(ToolSchema.builder().name("meeting.reserve").description("P0 schema")
                 .parameters(Map.of("type", "object", "properties", Map.of())).build());
-        RuntimeContext context = RuntimeContext.builder().userId("user-a").sessionId("hs-restart").build();
+        RuntimeContext context = RuntimeContext.builder().userId("user-a").sessionId("session-restart").build();
 
         HarnessAgent first = harness(model, toolkit, newStore());
         try {
@@ -74,9 +74,9 @@ class JdbcAgentStateStoreVerificationTest {
         }
 
         JdbcAgentStateStore restartedStore = newStore();
-        assertTrue(restartedStore.exists("user-a", "hs-restart"),
+        assertTrue(restartedStore.exists("user-a", "session-restart"),
                 "挂起后的 AgentState 必须已落 JDBC，而非仅在进程内");
-        assertTrue(restartedStore.listSessionIds("user-a").contains("hs-restart"));
+        assertTrue(restartedStore.listSessionIds("user-a").contains("session-restart"));
 
         HarnessAgent restarted = harness(model, toolkit, restartedStore);
         try {
@@ -102,14 +102,14 @@ class JdbcAgentStateStoreVerificationTest {
         HarnessAgent harnessA = harness(model, toolkit, store);
         try {
             harnessA.streamEvents("reserve room",
-                    RuntimeContext.builder().userId("user-a").sessionId("hs-a").build()).collectList().block();
+                    RuntimeContext.builder().userId("user-a").sessionId("session-a").build()).collectList().block();
         } finally {
             harnessA.close();
         }
 
-        assertTrue(store.exists("user-a", "hs-a"));
-        assertTrue(!store.exists("user-a", "hs-b"), "状态槽按 (userId, harnessSessionKey) 寻址，互不污染");
-        assertTrue(!store.exists("user-b", "hs-a"));
+        assertTrue(store.exists("user-a", "session-a"));
+        assertTrue(!store.exists("user-a", "session-b"), "状态槽按 (userId, harnessSessionKey) 寻址，互不污染");
+        assertTrue(!store.exists("user-b", "session-a"));
     }
 
     private static HarnessAgent harness(ChatModelBase model, Toolkit toolkit, JdbcAgentStateStore stateStore) {

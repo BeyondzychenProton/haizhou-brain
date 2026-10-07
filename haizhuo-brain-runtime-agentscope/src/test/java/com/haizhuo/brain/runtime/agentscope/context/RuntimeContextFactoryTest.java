@@ -34,6 +34,17 @@ class RuntimeContextFactoryTest {
     }
 
     @Test
+    void directSessionUsesBusinessIdWithoutBridge() {
+        var request = TestRequests.request(TestRequests.definition("bundle-direct", List.of()),
+                TestRequests.constraints(Set.of()),
+                com.haizhuo.brain.runtime.api.model.RuntimeSessionBinding.direct("session-1", false),
+                new com.haizhuo.brain.runtime.api.model.UserPromptExecutionInput("你好"));
+        RuntimeContext context = new RuntimeContextFactory().create(request);
+        assertEquals(request.platformSessionId().value(), context.getSessionId());
+        assertNull(context.get(HarnessCallContext.class).bridgeContext());
+    }
+
+    @Test
     void toleratesMissingBridgeContext() {
         AgentExecutionRequest request = TestRequests.promptRequest(
                 TestRequests.definition("bundle-1", List.of()), "你好");

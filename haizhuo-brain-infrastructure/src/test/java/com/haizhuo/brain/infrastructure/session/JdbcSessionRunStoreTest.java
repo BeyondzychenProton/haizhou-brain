@@ -53,6 +53,27 @@ class JdbcSessionRunStoreTest {
     }
 
     @Test
+    void fixedIdentityRoundTripsAndRejectsVersionDrift() {
+        var session = new AgentSession(SESSION, OWNER, 1L, AgentSession.Status.ACTIVE, T0, T0, 0, 2L, false);
+        store.createSession(session);
+        assertEquals(session, store.findSession(SESSION, OWNER).orElseThrow());
+        assertEquals(session, store.findSessions(OWNER, 10).get(0));
+        assertThrows(IllegalStateException.class,
+                () -> store.createRun(newRun("wrong-version", "req", "digest"), "输入", runSpec("wrong-version")));
+        assertEquals(0, jdbc.queryForObject("SELECT COUNT(*) FROM platform_agent_run", Integer.class));
+    }
+
+    @Test
+    void legacyPinIsOwnerScopedAndNeverOverwritesWinningVersion() {
+        store.createSession(new AgentSession(SESSION, OWNER, 1L, AgentSession.Status.ACTIVE, T0, T0, 0));
+        assertThrows(IllegalArgumentException.class,
+                () -> store.pinDefinitionVersion(SESSION, new UserId(99), 2));
+        assertEquals(1L, store.pinDefinitionVersion(SESSION, OWNER, 1).definitionVersionId());
+        assertEquals(1L, store.pinDefinitionVersion(SESSION, OWNER, 2).definitionVersionId());
+        assertEquals(1, store.findSession(SESSION, OWNER).orElseThrow().rowVersion());
+    }
+
+    @Test
     void createRunFreezesSpecAndInputEventAtomically() {
         store.createSession(new AgentSession(SESSION, OWNER, 1L, AgentSession.Status.ACTIVE, T0, T0, 0));
 

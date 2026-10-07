@@ -37,24 +37,45 @@ public class JdbcSessionRunStore implements SessionRunStore, RunControlInbox {
 
     @Override
     public AgentSession createSession(AgentSession session) {
-        jdbc.update("INSERT INTO platform_agent_session(session_id,user_id,employee_id,status,created_at,last_active_at,row_version) VALUES(?,?,?,?,?,?,?)",
+        jdbc.update("INSERT INTO platform_agent_session(session_id,user_id,employee_id,status,created_at,last_active_at,row_version,definition_version_id,legacy_runtime) VALUES(?,?,?,?,?,?,?,?,?)",
                 session.id().value(), session.userId().value(), session.employeeId(), session.status().name(),
-                Timestamp.from(session.createdAt()), Timestamp.from(session.lastActiveAt()), session.rowVersion());
+                Timestamp.from(session.createdAt()), Timestamp.from(session.lastActiveAt()), session.rowVersion(), session.definitionVersionId(), session.legacyRuntime());
         return session;
     }
 
     @Override
     public Optional<AgentSession> findSession(SessionId sessionId, UserId owner) {
-        return jdbc.query("SELECT session_id,user_id,employee_id,status,created_at,last_active_at,row_version FROM platform_agent_session WHERE session_id=? AND user_id=?",
+        return jdbc.query("SELECT session_id,user_id,employee_id,status,created_at,last_active_at,row_version,definition_version_id,legacy_runtime FROM platform_agent_session WHERE session_id=? AND user_id=?",
                 (rs, row) -> new AgentSession(new SessionId(rs.getString("session_id")), new UserId(rs.getLong("user_id")), rs.getLong("employee_id"),
-                        AgentSession.Status.valueOf(rs.getString("status")), instant(rs.getTimestamp("created_at")), instant(rs.getTimestamp("last_active_at")), rs.getLong("row_version")),
+                        AgentSession.Status.valueOf(rs.getString("status")), instant(rs.getTimestamp("created_at")), instant(rs.getTimestamp("last_active_at")), rs.getLong("row_version"), rs.getObject("definition_version_id", Long.class), rs.getBoolean("legacy_runtime")),
                 sessionId.value(), owner.value()).stream().findFirst();
     }
 
     @Override public List<AgentSession> findSessions(UserId owner, int limit) {
         int safeLimit = Math.max(1, Math.min(limit, 100));
-        return jdbc.query("SELECT session_id,user_id,employee_id,status,created_at,last_active_at,row_version FROM platform_agent_session WHERE user_id=? ORDER BY last_active_at DESC LIMIT ?",
-                (rs, row) -> new AgentSession(new SessionId(rs.getString("session_id")), new UserId(rs.getLong("user_id")), rs.getLong("employee_id"), AgentSession.Status.valueOf(rs.getString("status")), instant(rs.getTimestamp("created_at")), instant(rs.getTimestamp("last_active_at")), rs.getLong("row_version")), owner.value(), safeLimit);
+        return jdbc.query("SELECT session_id,user_id,employee_id,status,created_at,last_active_at,row_version,definition_version_id,legacy_runtime FROM platform_agent_session WHERE user_id=? ORDER BY last_active_at DESC LIMIT ?",
+                (rs, row) -> new AgentSession(new SessionId(rs.getString("session_id")), new UserId(rs.getLong("user_id")), rs.getLong("employee_id"), AgentSession.Status.valueOf(rs.getString("status")), instant(rs.getTimestamp("created_at")), instant(rs.getTimestamp("last_active_at")), rs.getLong("row_version"), rs.getObject("definition_version_id", Long.class), rs.getBoolean("legacy_runtime")), owner.value(), safeLimit);
+    }
+
+    @Override @Transactional
+    public AgentSession pinDefinitionVersion(SessionId sessionId, UserId owner, long versionId) {
+        if (versionId <= 0) throw new IllegalArgumentException("versionId must be positive");
+        jdbc.update("UPDATE platform_agent_session SET definition_version_id=?,row_version=row_version+1 "
+                        + "WHERE session_id=? AND user_id=? AND status='ACTIVE' AND legacy_runtime=TRUE "
+                        + "AND definition_version_id IS NULL", versionId, sessionId.value(), owner.value());
+        AgentSession session = findSession(sessionId, owner)
+                .orElseThrow(() -> new IllegalArgumentException("Session was not found"));
+        if (session.status() != AgentSession.Status.ACTIVE || session.definitionVersionId() == null)
+            throw new IllegalStateException("Active session version could not be fixed");
+        return session;
+    }
+
+    @Override
+    public boolean hasRuntimeHistory(SessionId sessionId, UserId owner, RunId currentRun) {
+        Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM platform_agent_run WHERE session_id=? "
+                        + "AND user_id=? AND run_id<>? AND started_at IS NOT NULL", Integer.class,
+                sessionId.value(), owner.value(), currentRun.value());
+        return count != null && count > 0;
     }
 
     @Override @Transactional
@@ -65,9 +86,14 @@ public class JdbcSessionRunStore implements SessionRunStore, RunControlInbox {
             if (!existing.sessionId().equals(run.sessionId()) || !existing.inputDigest().equals(run.inputDigest())) throw new IllegalStateException("Client request id conflicts with an existing run");
             return existing;
         }
-        var sessions = jdbc.query("SELECT employee_id FROM platform_agent_session WHERE session_id=? AND user_id=? AND status='ACTIVE' FOR UPDATE", (rs, row) -> rs.getLong(1), run.sessionId().value(), run.userId().value());
+        var sessions = jdbc.query("SELECT employee_id,definition_version_id FROM platform_agent_session WHERE session_id=? AND user_id=? AND status='ACTIVE' FOR UPDATE", (rs, row) -> new Long[] { rs.getLong(1), rs.getObject(2, Long.class) }, run.sessionId().value(), run.userId().value());
         if (sessions.isEmpty()) throw new IllegalArgumentException("Active session was not found");
-        if (sessions.get(0) != run.employeeId()) throw new IllegalStateException("Run employee does not match session employee");
+        if (sessions.get(0)[0] != run.employeeId()) throw new IllegalStateException("Run employee does not match session employee");
+        Long fixedVersion = sessions.get(0)[1];
+        if (fixedVersion != null && fixedVersion != run.definitionVersionId())
+            throw new IllegalStateException("Run version does not match fixed session version");
+        if (runSpec.definitionVersionId() != run.definitionVersionId() || !runSpec.runId().equals(run.id()))
+            throw new IllegalStateException("Run specification does not match run");
         try {
             jdbc.update("INSERT INTO platform_agent_run(run_id,session_id,user_id,employee_id,definition_version_id,client_request_id,input_digest,state,created_at) VALUES(?,?,?,?,?,?,?,?,?)", run.id().value(), run.sessionId().value(), run.userId().value(), run.employeeId(), run.definitionVersionId(), run.clientRequestId(), run.inputDigest(), run.state().name(), Timestamp.from(run.createdAt()));
         } catch (DuplicateKeyException error) { throw new IllegalStateException("Client request id conflicts with an existing run", error); }

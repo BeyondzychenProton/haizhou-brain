@@ -27,5 +27,7 @@ public record AgentExecutionRequest(TenantId tenantId, UserId userId, SessionId 
         Objects.requireNonNull(constraints);
         Objects.requireNonNull(binding);
         Objects.requireNonNull(input);
+        if (binding.bridgeSnapshotHash() == null && !platformSessionId.value().equals(binding.harnessSessionKey()))
+            throw new IllegalArgumentException("Direct runtime session id must equal business session id");
     }
 }

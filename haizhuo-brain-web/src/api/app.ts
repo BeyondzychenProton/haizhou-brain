@@ -1,7 +1,7 @@
 import { httpClient } from './httpClient'
 import type { RunStreamEvent } from './runStream'
 export interface Employee { id:number; code:string; name:string; description:string; available:boolean }
-export interface Session { sessionId:string; employeeId:number; employeeName?:string; status:string; createdAt:string; lastActiveAt:string }
+export interface Session { sessionId:string; employeeId:number; definitionVersionId?:number|null; employeeName?:string; status:string; createdAt:string; lastActiveAt:string }
 export interface Run { runId:string; sessionId:string; state:string; definitionVersionId:number; createdAt:string; queuePosition:number }
 export interface RunEvent { runId:string; sequenceNo:number; type:string; content:string; createdAt:string }
 /** 会话级持久事件，形状与后端统一事件信封一致。 */

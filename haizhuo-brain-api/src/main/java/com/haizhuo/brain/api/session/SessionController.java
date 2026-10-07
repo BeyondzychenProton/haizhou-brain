@@ -150,7 +150,7 @@ public class SessionController {
     }
 
     private static SessionResponse response(AgentSession session) {
-        return new SessionResponse(session.id().value(), session.employeeId(), session.status().name(), session.createdAt(), session.lastActiveAt());
+        return new SessionResponse(session.id().value(), session.employeeId(), session.status().name(), session.createdAt(), session.lastActiveAt(), session.definitionVersionId());
     }
     private static RunResponse runResponse(AgentRun run, int queuePosition) {
         return new RunResponse(run.id().value(), run.sessionId().value(), run.state().name(), run.definitionVersionId(), run.createdAt(), queuePosition);
@@ -162,7 +162,7 @@ public class SessionController {
 
     public record CreateSessionRequest(@Positive long employeeId) { }
     public record CreateRunRequest(@NotBlank @Size(max = 128) String clientRequestId, @NotBlank @Size(max = 4000) String input) { }
-    public record SessionResponse(String sessionId, long employeeId, String status, Instant createdAt, Instant lastActiveAt) { }
+    public record SessionResponse(String sessionId, long employeeId, String status, Instant createdAt, Instant lastActiveAt, Long definitionVersionId) { }
     public record RunResponse(String runId, String sessionId, String state, long definitionVersionId, Instant createdAt, int queuePosition) { }
     public record SessionTimelineResponse(String runId, int sequenceNo, String type, String content, Instant createdAt) { }
     public record GuidanceRequest(@NotBlank @Size(max = 4000) String content) { }

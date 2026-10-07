@@ -43,11 +43,11 @@ public class SessionApplicationService {
     }
 
     public AgentSession create(UserId owner, long employeeId) {
-        employees.findPublished(DEFAULT_TENANT, employeeId)
+        var published = employees.findPublished(DEFAULT_TENANT, employeeId)
                 .orElseThrow(() -> new IllegalArgumentException("Published employee was not found"));
         Instant now = clock.instant();
         return store.createSession(new AgentSession(SessionId.newId(), owner, employeeId,
-                AgentSession.Status.ACTIVE, now, now, 0));
+                AgentSession.Status.ACTIVE, now, now, 0, published.definition().id(), false));
     }
 
     public AgentSession get(SessionId sessionId, UserId owner) {
@@ -59,15 +59,23 @@ public class SessionApplicationService {
 
     public AgentRun createRun(SessionId sessionId, UserId owner, String clientRequestId, String input) {
         AgentSession session = get(sessionId, owner);
-        var published = employees.findPublished(DEFAULT_TENANT, session.employeeId()).orElseThrow(() -> new IllegalStateException("Session employee is no longer published"));
+        if (session.status() != AgentSession.Status.ACTIVE)
+            throw new IllegalStateException("Session is closed");
+        // 当前发布记录只验证员工仍可用；版本始终来自 Session，不能跟随发布变化。
+        var published = employees.findPublished(DEFAULT_TENANT, session.employeeId())
+                .orElseThrow(() -> new IllegalStateException("Session employee is no longer published"));
+        if (session.definitionVersionId() == null) {
+            session = store.pinDefinitionVersion(sessionId, owner, published.definition().id());
+        }
+        long versionId = session.definitionVersionId();
         // 能力包在发布时冻结；缺少能力包的定义属于 Harness 运行时之前的产物，
         // 必须重新发布后才能运行（规格 §8/§10.2）。
-        HarnessDefinitionBundle bundle = bundles.findByDefinitionVersionId(published.definition().id())
+        HarnessDefinitionBundle bundle = bundles.findByDefinitionVersionId(versionId)
                 .orElseThrow(() -> new IllegalStateException("Published definition has no runtime bundle; re-publish the employee first"));
         Instant now = clock.instant();
         RunId runId = RunId.newId();
         HarnessRunSpec runSpec = runSpecFactory.create(runId, owner, bundle, null);
-        return store.createRun(new AgentRun(runId, session.id(), owner, session.employeeId(), published.definition().id(), clientRequestId, digest(input), RunState.QUEUED, now, null, null), input, runSpec);
+        return store.createRun(new AgentRun(runId, session.id(), owner, session.employeeId(), versionId, clientRequestId, digest(input), RunState.QUEUED, now, null, null), input, runSpec);
     }
 
     public AgentRun getRun(RunId runId, UserId owner) { return store.findRun(runId, owner).orElseThrow(() -> new IllegalArgumentException("Run was not found")); }

@@ -64,7 +64,8 @@ public final class HarnessJdbcTestSupport {
     public static void createSessionAndGuidanceTables(JdbcTemplate jdbc) {
         jdbc.execute("CREATE TABLE platform_agent_session(session_id VARCHAR(64) PRIMARY KEY,user_id BIGINT NOT NULL,"
                 + "employee_id BIGINT NOT NULL,status VARCHAR(24) NOT NULL,created_at TIMESTAMP NOT NULL,"
-                + "last_active_at TIMESTAMP NOT NULL,row_version BIGINT NOT NULL DEFAULT 0)");
+                + "last_active_at TIMESTAMP NOT NULL,row_version BIGINT NOT NULL DEFAULT 0,"
+                + "definition_version_id BIGINT NULL,legacy_runtime BOOLEAN NOT NULL DEFAULT TRUE)");
         jdbc.execute("CREATE TABLE platform_agent_run_guidance(guidance_id VARCHAR(64) PRIMARY KEY,"
                 + "run_id VARCHAR(64) NOT NULL,author_user_id BIGINT NOT NULL,source VARCHAR(24) NOT NULL,"
                 + "content VARCHAR(4000) NOT NULL,status VARCHAR(24) NOT NULL,created_at TIMESTAMP NOT NULL,"

@@ -91,7 +91,7 @@ public class AgentRuntimeConfiguration {
     @Bean
     AgentRuntime agentRuntime(HarnessTemplateCache templateCache, RuntimeContextFactory contextFactory,
                               AgentScopeEventTranslator translator,
-                              AgentExecutionObserver observer) {
-        return new AgentScopeRuntime(templateCache, contextFactory, translator, observer);
+                              AgentExecutionObserver observer, AgentStateStore agentStateStore) {
+        return new AgentScopeRuntime(templateCache, contextFactory, translator, observer, agentStateStore);
     }
 }
