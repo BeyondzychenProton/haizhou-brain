@@ -26,6 +26,20 @@ class SessionControllerTest {
     @Mock ToolApprovalService toolApprovals;
 
     @Test
+    void sessionResponseExposesFixedVersion() {
+        var owner = new UserId(42);
+        var user = new AuthenticatedUser(owner, Set.of(PlatformRole.USER), 1, false);
+        var id = new SessionId("session-fixed");
+        var now = Instant.parse("2026-10-07T07:00:00Z");
+        when(sessions.get(id, owner)).thenReturn(new com.haizhuo.brain.platform.session.AgentSession(
+                id, owner, 1, com.haizhuo.brain.platform.session.AgentSession.Status.ACTIVE,
+                now, now, 0, 7L, false));
+        StepVerifier.create(new SessionController(sessions, toolApprovals).get(user, id.value()))
+                .assertNext(response -> assertEquals(7L, response.definitionVersionId()))
+                .verifyComplete();
+    }
+
+    @Test
     void timelineReturnsScalarRunIdsSoMessagesFromDifferentRunsDoNotCollide() {
         SessionId sessionId = new SessionId("session-1");
         UserId owner = new UserId(42);

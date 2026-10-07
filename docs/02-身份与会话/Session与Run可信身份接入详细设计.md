@@ -1,5 +1,7 @@
 # 海卓智慧大脑：Session 与 Run 可信身份接入详细设计
 
+> 当前 Session 规则（2026-10-07）：创建时固定员工定义版本；新会话业务 `sessionId` 直接作为 Harness `RuntimeContext.sessionId`，平台不再持久化 Runtime 映射/桥接摘要。存量会话显式保持旧状态槽兼容。具体存储边界、V19 迁移与限制见[Harness 当前实现](../03-Agent与能力/数字员工Harness运行时与版本状态切换详细设计.md)。
+
 > 阶段记录：此页是 2026-09-27 的接入前方案；“业务 API 关闭”“活跃 Run 时直接拒绝新输入”已不符合当前实现。当前普通消息排队、运行控制和历史事件见[专项设计](../04-渠道与执行/Session与Run历史队列及运行中引导详细设计.md)及[项目说明](../../项目说明.md)。下文保留当时的边界与验收记录。
 
 | 项目 | 内容 |
@@ -24,7 +26,7 @@
 | --- | --- | --- | --- |
 | `UserId` | 平台身份服务 | 数据归属与资源授权 | 手机号、员工 ID、请求参数 |
 | WebSession ID | Spring Session / Redis | 浏览器登录态 | 业务 `SessionId`、`RunId` |
-| `SessionId` | Session 应用服务 | 用户与员工的一段业务上下文 | 外部会话号、AgentScope sessionId |
+| `SessionId` | Session 应用服务 | 用户与员工的一段业务上下文 | 外部会话号；AgentScope 的 ID 不反向决定业务属主 |
 | `RunId` | Run 应用服务 | 一次执行、事件和最终结果 | 入站事件 ID、投递 ID |
 | `providerEventId` | 渠道提供方 | 入站去重 | Run ID |
 

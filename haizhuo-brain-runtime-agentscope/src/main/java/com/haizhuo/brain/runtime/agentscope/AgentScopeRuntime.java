@@ -16,6 +16,7 @@ import com.haizhuo.brain.runtime.api.model.ExternalToolResultExecutionInput;
 import com.haizhuo.brain.runtime.api.model.UserPromptExecutionInput;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.event.AgentEvent;
+import io.agentscope.core.state.AgentStateStore;
 import io.agentscope.core.message.TextBlock;
 import io.agentscope.core.message.ToolResultBlock;
 import io.agentscope.core.message.ToolResultMessage;
@@ -44,6 +45,7 @@ public class AgentScopeRuntime implements AgentRuntime {
     private final RuntimeContextFactory contextFactory;
     private final AgentScopeEventTranslator translator;
     private final AgentExecutionObserver observer;
+    private final AgentStateStore stateStore;
 
     public AgentScopeRuntime(HarnessTemplateCache templateCache, RuntimeContextFactory contextFactory,
                              AgentScopeEventTranslator translator) {
@@ -52,16 +54,32 @@ public class AgentScopeRuntime implements AgentRuntime {
 
     public AgentScopeRuntime(HarnessTemplateCache templateCache, RuntimeContextFactory contextFactory,
                              AgentScopeEventTranslator translator, AgentExecutionObserver observer) {
+        this(templateCache, contextFactory, translator, observer, null);
+    }
+
+    public AgentScopeRuntime(HarnessTemplateCache templateCache, RuntimeContextFactory contextFactory,
+                             AgentScopeEventTranslator translator, AgentExecutionObserver observer,
+                             AgentStateStore stateStore) {
         this.templateCache = Objects.requireNonNull(templateCache);
         this.contextFactory = Objects.requireNonNull(contextFactory);
         this.translator = Objects.requireNonNull(translator);
         this.observer = Objects.requireNonNull(observer);
+        this.stateStore = stateStore;
     }
 
     @Override
     public Flux<BrainAgentEvent> execute(AgentExecutionRequest request) {
         return Flux.defer(() -> {
                     safe(() -> observer.onStarted(request));
+                    if (request.binding().stateRequired()) {
+                        if (stateStore == null || !stateStore.exists(Long.toString(request.userId().value()),
+                                request.platformSessionId().value())) {
+                            AgentRunFailedEvent failed = new AgentRunFailedEvent(request.runId(),
+                                    "RUNTIME_STATE_MISSING：会话恢复状态缺失，请核查，禁止以空记忆继续。");
+                            safe(() -> observer.onFailed(request, failed));
+                            return Mono.just(failed);
+                        }
+                    }
                     HarnessRuntimeTemplate template = templateCache.getOrBuild(request.definition());
                     RuntimeContext context = contextFactory.create(request);
                     Flux<AgentEvent> events = stream(template, request.input(), context);

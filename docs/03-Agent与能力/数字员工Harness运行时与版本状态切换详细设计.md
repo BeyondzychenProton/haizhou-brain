@@ -1,5 +1,31 @@
 # 海卓智慧大脑：数字员工 Harness 运行时与版本状态切换详细设计
 
+## 当前实现：Session 固定版本与统一 Runtime 身份（2026-10-07）
+
+新 Session 创建时固定 `definitionVersionId`，后续发布不改变其版本。升级员工版本、切换员工或清空上下文通过新建 Session 完成；API 的 Session 返回对象包含固定版本 ID。
+
+| 数据 | 唯一所有者 | 新会话执行行为 |
+| --- | --- | --- |
+| Session 属主、员工、固定版本、状态、渠道关系 | 平台 | 创建时保存业务身份，执行时校验 |
+| 可恢复 AgentState、对话记忆 | AgentScope JDBC StateStore | Harness 自行恢复和保存，平台不复制、不重建 |
+| Run、工具审批、结果投递、展示事件 | 平台 | 业务控制与展示记录，不用于 Agent 记忆恢复 |
+| Workspace 文件与沙箱快照 | 独立文件/快照能力 | 不视为 AgentStateStore 已持久化的内容 |
+
+新会话数据流：`可信用户 → 业务 Session → 固定版本能力包 → RuntimeContext(userId, sessionId) → Harness → StateStore`。这里 `Business sessionId = RuntimeContext.sessionId`；StateStore 的物理键编码由框架管理。新会话不查询/创建 Binding、Bridge Snapshot，也不注入历史桥接摘要。现有直接调用 Harness 的入口保留，不能换成默认派生 `gw-…` ID 的 Gateway 而不验证寻址契约。
+
+`V19__session_fixed_runtime_identity.sql` 增加 `definition_version_id` 和 `legacy_runtime`。生产新 Session 显式写入固定版本及 `legacy_runtime=false`；存量行保持 `true`，最近 Run 的版本回填为此后固定版本，没有 Run 的旧会话首次执行以属主条件原子固定。数据库创建 Run 时检查版本一致性，渠道创建和等待提升都复用同一应用服务。
+
+兼容分支继续读取旧状态槽；尚未完成离线迁移前保留旧 Binding/Bridge 表和代码。迁移不在线重写 AgentState、不合并多个版本。新会话的工作区键由服务端 Session ID 确定，不增加独立映射表；当前远程文件面仍未启用，不能据此宣称 Workspace 恢复已完成。
+
+继续执行、工具恢复或再次执行尝试需要已存在的 Runtime 状态。缺失时返回 `RUNTIME_STATE_MISSING`，不以空会话继续。该检查是存在性保护，不是跨库事务或精确一次执行保证。平台活动槽、队列、Run 租约/fence 保留；本次未改变租约超时后的至少一次重试策略，Run 的 fence 也不能视为自动保护框架状态写入。状态已保存但业务结算未完成的崩溃、过期 Worker 回写仍须专项验证和后续处理。
+
+验收覆盖发布后旧会话版本不变、渠道等待消息版本不变、新会话不读写 Bridge、JDBC 重建 Agent 后工具恢复、属主隔离与状态缺失失败。验证结果见[Session 固定版本与统一身份验证报告](../07-测试报告/Session固定版本与统一身份验证报告.md)。
+
+## 历史设计：旧 Binding / Bridge 兼容链路
+
+以下为 2026-09 的原设计记录，仅解释存量键和历史实现；其中“每个新 Run 使用最新版本”“禁止业务 SessionId 直接进入 Harness”等规则已由上面的当前实现替代，不适用于新会话。
+
+
 > 实现对照（2026-09-28）：主 Harness、Run 创建时冻结定义/工具视图及部分状态隔离已有代码和测试；本文后段 P0/P1 是原实施计划，不应解释为全部完成。本机当前配置模型与模拟 MCP 的浏览器自动交互已跑通，跨进程重启恢复、完整 Workspace 隔离和真实第三方服务仍需专项验收。当前功能见[项目说明](../../项目说明.md)。
 
 | 项目 | 内容 |

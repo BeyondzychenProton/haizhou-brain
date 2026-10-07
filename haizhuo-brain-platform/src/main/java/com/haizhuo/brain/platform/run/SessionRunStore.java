@@ -12,6 +12,14 @@ public interface SessionRunStore {
     AgentSession createSession(AgentSession session);
 
     Optional<AgentSession> findSession(SessionId sessionId, UserId owner);
+    /** 存量无版本会话的首次固定；原子地只填空值，返回赢家，必须校验属主。 */
+    default AgentSession pinDefinitionVersion(SessionId sessionId, UserId owner, long versionId) {
+        throw new UnsupportedOperationException("Legacy session version pinning is not available");
+    }
+
+    /** 是否有其他已开始执行的 Run；只读业务元数据，不读/拼装 Agent 记忆。 */
+    default boolean hasRuntimeHistory(SessionId sessionId, UserId owner, RunId currentRun) { return false; }
+
     default List<AgentSession> findSessions(UserId owner, int limit) { return List.of(); }
 
     /**

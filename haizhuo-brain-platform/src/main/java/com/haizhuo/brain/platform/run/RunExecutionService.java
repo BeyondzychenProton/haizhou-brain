@@ -227,10 +227,26 @@ public class RunExecutionService {
         HarnessDefinitionBundle bundle = bundles.findByDefinitionVersionId(run.definitionVersionId())
                 .orElseThrow(() -> new IllegalStateException(
                         "Runtime bundle missing for definition version " + run.definitionVersionId()));
-        SessionHarnessBinding binding = bridgeService.getOrCreateBinding(
-                run.userId(), run.sessionId(), run.employeeId(), run.definitionVersionId());
-        SessionBridgeSnapshot snapshot = snapshots.findById(binding.bridgeSnapshotId())
-                .orElseThrow(() -> new IllegalStateException("Bridge snapshot missing: " + binding.bridgeSnapshotId()));
+        var session = runs.findSession(run.sessionId(), run.userId())
+                .orElseThrow(() -> new IllegalStateException("Owned session missing for run"));
+        RuntimeSessionBinding sessionBinding;
+        if (session.legacyRuntime()) {
+            // 仅兼容迁移前的状态槽；新会话不查询、不创建 Binding/Bridge。
+            SessionHarnessBinding binding = bridgeService.getOrCreateBinding(
+                    run.userId(), run.sessionId(), run.employeeId(), run.definitionVersionId());
+            SessionBridgeSnapshot snapshot = snapshots.findById(binding.bridgeSnapshotId())
+                    .orElseThrow(() -> new IllegalStateException("Bridge snapshot missing: " + binding.bridgeSnapshotId()));
+            sessionBinding = new RuntimeSessionBinding(binding.harnessSessionKey(),
+                    binding.workspaceRuntimeKey(), snapshot.contentHash(), snapshot.conversationSummary());
+        } else {
+            if (session.definitionVersionId() == null || session.definitionVersionId() != run.definitionVersionId()
+                    || session.employeeId() != run.employeeId())
+                throw new IllegalStateException("Run does not match fixed session identity");
+            boolean needsState = claim.resumeReason() == ExecutionResumeReason.TOOL_RESULT_READY
+                    || claim.attempt().attemptNo() > 1
+                    || runs.hasRuntimeHistory(run.sessionId(), run.userId(), run.id());
+            sessionBinding = RuntimeSessionBinding.direct(run.sessionId().value(), needsState);
+        }
 
         RuntimeDefinitionSnapshot definition = new RuntimeDefinitionSnapshot(
                 bundle.definitionVersionId(), bundle.employeeName(), bundle.instructions(),
@@ -243,8 +259,6 @@ public class RunExecutionService {
                         .toList());
         RuntimeRunConstraints constraints = new RuntimeRunConstraints(claim.runSpec().toolViewHash(),
                 claim.runSpec().modelVisibleToolNames(), claim.runSpec().effectiveCapabilityHash());
-        RuntimeSessionBinding sessionBinding = new RuntimeSessionBinding(binding.harnessSessionKey(),
-                binding.workspaceRuntimeKey(), snapshot.contentHash(), snapshot.conversationSummary());
         AgentExecutionInput input = claim.resumeReason() == ExecutionResumeReason.TOOL_RESULT_READY
                 ? new ExternalToolResultExecutionInput(deliverables.stream().map(this::toToolResult).toList())
                 : new UserPromptExecutionInput(initialPrompt(run));

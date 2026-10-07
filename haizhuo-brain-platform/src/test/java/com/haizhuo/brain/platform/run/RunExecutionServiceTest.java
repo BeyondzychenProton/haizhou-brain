@@ -71,6 +71,7 @@ class RunExecutionServiceTest {
     private FakeChannelReplies channelReplies;
     private FakeChannelTurns channelTurns;
     private RunExecutionService service;
+    private FakeRuns runs;
 
     @BeforeEach
     void setUp() {
@@ -86,9 +87,41 @@ class RunExecutionServiceTest {
         realtimeEvents = new FakeRealtimeEvents();
         channelReplies = new FakeChannelReplies();
         channelTurns = new FakeChannelTurns();
+        runs = new FakeRuns();
         service = new RunExecutionService(store, new FakeBundles(), bridgeService(), new FakeSnapshots(),
-                new FakeRuns(), toolExecutions, runtime, realtimeEvents, channelReplies, channelTurns,
+                runs, toolExecutions, runtime, realtimeEvents, channelReplies, channelTurns,
                 Clock.fixed(T0, ZoneOffset.UTC));
+    }
+
+    @Test
+    void directSessionDoesNotReadOrWriteBridge() {
+        runs.direct = true;
+        // 这些旧仓储一旦被调用就失败，证明直连链路没有隐藏的 Bridge IO。
+        SessionBridgeSnapshotRepository forbidden = new SessionBridgeSnapshotRepository() {
+            public Optional<SessionBridgeSnapshot> findById(long id) { throw new AssertionError("Bridge read"); }
+            public SessionBridgeSnapshot save(SessionBridgeSnapshot snapshot) { throw new AssertionError("Bridge write"); }
+        };
+        AgentRuntime runtime = request -> {
+            capturedRequest.set(request);
+            return Flux.just(new AgentRunCompletedEvent(RUN, "完成"));
+        };
+        service = new RunExecutionService(store, new FakeBundles(), bridgeService(), forbidden,
+                runs, toolExecutions, runtime, realtimeEvents, channelReplies, channelTurns,
+                Clock.fixed(T0, ZoneOffset.UTC));
+        assertTrue(service.executeNext("worker-1", TTL));
+        assertEquals(SESSION.value(), capturedRequest.get().binding().harnessSessionKey());
+        assertNull(capturedRequest.get().binding().bridgeContext());
+        assertNull(capturedRequest.get().binding().bridgeSnapshotHash());
+        assertFalse(capturedRequest.get().binding().stateRequired());
+        assertNull(store.failedCode);
+    }
+
+    @Test
+    void continuedDirectSessionRequiresExistingRuntimeState() {
+        runs.direct = true;
+        runs.runtimeHistory = true;
+        service.executeNext("worker-1", TTL);
+        assertTrue(capturedRequest.get().binding().stateRequired());
     }
 
     @Test
@@ -378,9 +411,15 @@ class RunExecutionServiceTest {
     }
 
     private static final class FakeRuns implements SessionRunStore {
+        boolean direct;
+        boolean runtimeHistory;
+        @Override public boolean hasRuntimeHistory(SessionId session, UserId user, RunId run) {
+            return runtimeHistory;
+        }
         @Override public AgentSession createSession(AgentSession session) { return session; }
         @Override public Optional<AgentSession> findSession(SessionId sessionId, UserId owner) {
-            return Optional.empty();
+            return Optional.of(new AgentSession(sessionId, owner, 1L, AgentSession.Status.ACTIVE, T0, T0, 0,
+                    7L, !direct));
         }
         @Override public AgentRun createRun(AgentRun run, String input, HarnessRunSpec runSpec) { return run; }
         @Override public Optional<AgentRun> findRun(RunId runId, UserId owner) { return Optional.empty(); }
