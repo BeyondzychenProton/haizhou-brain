@@ -108,7 +108,7 @@ class McpFunctionalMysqlTest {
             assertEquals(2, published.capabilities().size());
 
             var specs = new JdbcHarnessRunSpecRepository(jdbc);
-            var sessions = new JdbcSessionRunStore(jdbc, new JdbcSessionEventProjector(jdbc));
+            var sessions = com.haizhuo.brain.infrastructure.support.HarnessJdbcTestSupport.transactional(new JdbcSessionRunStore(jdbc, new JdbcSessionEventProjector(jdbc)), jdbc);
             var specFactory = new HarnessRunSpecFactory(definitions, executors,
                     () -> new DefaultMcpToolVisibility(catalog, remote, tokens));
             var app = new SessionApplicationService(sessions, definitions, bundles, specFactory, Clock.systemUTC());
@@ -124,7 +124,7 @@ class McpFunctionalMysqlTest {
             var gateway = new DefaultToolExecutionGatewayService(definitions, specs,
                     new JdbcToolExecutionUserDirectory(jdbc), new DefaultToolResourcePolicy(),
                     (user, revision) -> ResolvedCredential.none(), executors, catalog, bundles,
-                    new JdbcToolApprovalRepository(jdbc));
+                    com.haizhuo.brain.infrastructure.support.HarnessJdbcTestSupport.transactional(new JdbcToolApprovalRepository(jdbc), jdbc));
             PlatformToolExecution ownRead = execution(readerRun.id(), readId, "demo_note_read", "{\"noteId\":\"note-b\"}");
             ToolPreparation prepared = gateway.prepare(ownRead, readerRun);
             assertTrue(prepared.allowed());

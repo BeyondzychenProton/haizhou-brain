@@ -42,6 +42,8 @@ export interface RunStreamEvent {
   durability: 'durable' | 'transient'
   occurredAt: string
   payload: RunStreamPayload
+  origin?: { kind: string } | null
+  resultId?: string | null
 }
 
 export interface RunStreamCallbacks {
@@ -57,7 +59,7 @@ export interface RunStreamCallbacks {
  * 避免无权限资源产生重连风暴。运行级端点仍保留在后端，供单 Run 诊断使用。
  */
 export function openSessionStream(sessionId: string, after: number, callbacks: RunStreamCallbacks): () => void {
-  const url = `/api/v1/sessions/${encodeURIComponent(sessionId)}/stream?after=${Math.max(after, 0)}`
+  const url = `/api/v1/sessions/${encodeURIComponent(sessionId)}/stream?after=${Math.max(after, 0)}&format=v2`
   const source = new EventSource(url, { withCredentials: true })
   let closed = false
 

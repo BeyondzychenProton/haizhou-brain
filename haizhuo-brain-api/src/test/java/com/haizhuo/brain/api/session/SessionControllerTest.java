@@ -7,7 +7,12 @@ import com.haizhuo.brain.kernel.identity.RunId;
 import com.haizhuo.brain.kernel.identity.SessionId;
 import com.haizhuo.brain.kernel.identity.UserId;
 import com.haizhuo.brain.platform.run.SessionTimelineItem;
+import com.haizhuo.brain.platform.run.AgentRun;
+import com.haizhuo.brain.platform.run.RunExecutionMode;
+import com.haizhuo.brain.platform.run.RunExecutionTarget;
+import com.haizhuo.brain.platform.run.RunState;
 import com.haizhuo.brain.platform.session.SessionApplicationService;
+import com.haizhuo.brain.platform.session.SessionRoleOption;
 import com.haizhuo.brain.platform.tool.ToolApprovalService;
 import com.haizhuo.brain.security.identity.AuthenticatedUser;
 import com.haizhuo.brain.security.identity.PlatformRole;
@@ -56,6 +61,41 @@ class SessionControllerTest {
                     assertEquals(4, items.size());
                     assertEquals(List.of("run-1", "run-1", "run-2", "run-2"),
                             items.stream().map(SessionController.SessionTimelineResponse::runId).toList());
+                    assertEquals("coordinator", items.get(1).executorRoleId());
+                })
+                .verifyComplete();
+    }
+
+    @Test
+    void rolesExposeOnlySafeRoleMetadataAndRunResponseShowsTheResolvedExecutor() {
+        SessionId sessionId = new SessionId("session-team");
+        UserId owner = new UserId(42);
+        AuthenticatedUser user = new AuthenticatedUser(owner, Set.of(PlatformRole.USER), 1, false);
+        when(sessions.roles(sessionId, owner)).thenReturn(List.of(
+                new SessionRoleOption("coordinator", "协调员", 1L, 10L, true),
+                new SessionRoleOption("researcher", "研究专家", 2L, 20L, true)));
+        StepVerifier.create(new SessionController(sessions, toolApprovals).roles(user, sessionId.value()))
+                .assertNext(roles -> {
+                    assertEquals(List.of("coordinator", "researcher"), roles.stream()
+                            .map(SessionController.SessionRoleResponse::roleId).toList());
+                    assertEquals("研究专家", roles.get(1).displayName());
+                })
+                .verifyComplete();
+
+        Instant now = Instant.parse("2026-10-08T00:00:00Z");
+        AgentRun run = new AgentRun(new RunId("run-researcher"), sessionId, owner, 1L, 10L,
+                "request-1", "digest-1", RunState.QUEUED, now, null, null);
+        when(sessions.createRun(sessionId, owner, "request-1", "帮我研究", "researcher", RunExecutionMode.DIRECT, List.of()))
+                .thenReturn(run);
+        when(sessions.queuePosition(run.id(), owner)).thenReturn(0);
+        when(sessions.executionTarget(run, owner)).thenReturn(
+                new RunExecutionTarget(RunExecutionMode.DIRECT, "researcher", 2L, 20L, "slot-1"));
+        StepVerifier.create(new SessionController(sessions, toolApprovals).createRun(user, sessionId.value(),
+                        new SessionController.CreateRunRequest("request-1", "帮我研究", "researcher", RunExecutionMode.DIRECT)))
+                .assertNext(response -> {
+                    assertEquals("researcher", response.executorRoleId());
+                    assertEquals(2L, response.executorEmployeeId());
+                    assertEquals(20L, response.executorDefinitionVersionId());
                 })
                 .verifyComplete();
     }

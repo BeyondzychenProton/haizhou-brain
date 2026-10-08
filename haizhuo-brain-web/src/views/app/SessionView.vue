@@ -17,6 +17,7 @@
             <pre class="plan-body">{{ item.text }}</pre>
           </div>
           <div v-else-if="item.role === 'assistant'" class="bubble assistant-bubble">
+            <div v-if="item.executorRoleId" class="speaker-label">{{ roleName(item.executorRoleId) }}</div>
             <MarkdownMessage :content="item.text" />
             <span v-if="item.pending" class="stream-caret">▋</span>
           </div>
@@ -82,15 +83,29 @@
         <span class="muted">{{ stateLabel(run.state) }}</span>
         <el-button type="danger" plain @click="cancel">取消本次运行</el-button>
       </div>
+      <el-alert v-else-if="run?.state === 'RECOVERY_REQUIRED'" class="recovery-alert" type="warning" :closable="false" title="本次运行需要管理员核查" description="系统无法确认执行结果，核查完成前不能在此会话启动下一轮。" />
+      <div v-if="roles.length > 1" class="next-run-options">
+        <el-select v-model="selectedRoleId" class="next-run-role" placeholder="选择本条消息的专家" aria-label="选择本条消息的专家">
+          <el-option v-for="role in roles" :key="role.roleId" :label="role.displayName" :value="role.roleId" />
+        </el-select>
+        <el-select v-model="selectedReferenceIds" class="next-run-references" multiple collapse-tags
+                   collapse-tags-tooltip :max-collapse-tags="2" :multiple-limit="8"
+                   placeholder="引用同会话的已完成结果" aria-label="选择要引用的历史结果">
+          <el-option v-for="result in referenceableResults" :key="result.resultId" :label="referenceLabel(result)"
+                     :value="result.resultId" />
+        </el-select>
+        <span class="muted">选择只作用于下一条消息；每位专家保留自己的私有上下文。</span>
+      </div>
       <div class="composer">
-        <el-input v-model="input" type="textarea" :rows="3" maxlength="4000" show-word-limit placeholder="输入消息；运行中消息会自动排队" @keydown.ctrl.enter="send" />
-        <el-button type="primary" :loading="sending" :disabled="!input.trim()" @click="send">发送</el-button>
+        <el-input v-model="input" type="textarea" :rows="3" maxlength="4000" show-word-limit placeholder="输入消息；运行中消息会自动排队" :disabled="run?.state === 'RECOVERY_REQUIRED'" @keydown.ctrl.enter="send" />
+        <el-button type="primary" :loading="sending" :disabled="!input.trim() || run?.state === 'RECOVERY_REQUIRED'" @click="send">发送</el-button>
       </div>
       <el-drawer v-model="inspector" title="运行详情" size="420px">
         <el-descriptions v-if="run" :column="1" border>
           <el-descriptions-item label="Run ID">{{ run.runId }}</el-descriptions-item>
           <el-descriptions-item label="Session ID">{{ run.sessionId }}</el-descriptions-item>
           <el-descriptions-item label="Definition Version">{{ run.definitionVersionId }}</el-descriptions-item>
+          <el-descriptions-item label="实际执行者">{{ roleName(run.executorRoleId) }}</el-descriptions-item>
           <el-descriptions-item label="State">{{ run.state }}</el-descriptions-item>
           <el-descriptions-item label="实时连接">{{ streamStateLabel }}</el-descriptions-item>
           <el-descriptions-item label="队列位置">{{ run.queuePosition || '-' }}</el-descriptions-item>
@@ -111,18 +126,23 @@ import { useRoute, useRouter } from 'vue-router'
 import AppLayout from '../../layouts/AppLayout.vue'
 import MarkdownMessage from '../../components/conversation/MarkdownMessage.vue'
 import * as api from '../../api/app'
-import type { Run, Session, SessionEvent, ToolExecution } from '../../api/app'
+import type { Run, Session, SessionEvent, SessionRole, ReferenceableResult, ToolExecution } from '../../api/app'
 import { openSessionStream, type RunStreamEvent } from '../../api/runStream'
 import { mergeConversationEvent, presentTimeline, type ConversationItem } from '../../presenters/runEventPresenter'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { formatTime, isRetryable, notifyError } from '../../utils/notify'
 
-const ACTIVE_STATES = new Set(['QUEUED', 'RUNNING', 'WAITING_TOOL', 'WAITING_CONFIRMATION', 'CANCELLING'])
+const ACTIVE_STATES = new Set(['QUEUED', 'RUNNING', 'WAITING_TOOL', 'WAITING_CONFIRMATION', 'CANCELLING', 'RECOVERY_REQUIRED'])
 const route = useRoute()
 const router = useRouter()
 const session = ref<Session>()
 const run = ref<Run>()
 const runs = ref<Run[]>([])
+const roles = ref<SessionRole[]>([])
+const referenceableResults = ref<ReferenceableResult[]>([])
+const selectedRoleId = ref('coordinator')
+const selectedReferenceIds = ref<string[]>([])
+const executorRoleByRun = ref<Record<string, string>>({})
 const events = ref<SessionEvent[]>([])
 const toolExecutions = ref<ToolExecution[]>([])
 const messages = ref<ConversationItem[]>([])
@@ -154,7 +174,8 @@ const streamStateLabel = computed(() => ({
 })[streamState.value])
 const sessionId = () => String(route.params.sessionId)
 /** 会话游标是跨 Run 的唯一续传游标；run 内序号只在单个 Run 中有序。 */
-const lastCursor = () => events.value.reduce((maximum, event) => Math.max(maximum, event.sessionCursor ?? 0), 0)
+let scannedCursor = 0
+const lastCursor = () => Math.max(scannedCursor, events.value.reduce((maximum, event) => Math.max(maximum, event.sessionCursor ?? 0), 0))
 
 async function loadTimeline() {
   const pending = messages.value.filter(item => item.pending)
@@ -167,7 +188,10 @@ async function loadTimeline() {
 
 async function loadRuns(): Promise<Run | undefined> {
   runs.value = await api.listRuns(sessionId())
-  for (const state of ['RUNNING', 'WAITING_TOOL', 'WAITING_CONFIRMATION', 'CANCELLING', 'QUEUED']) {
+  for (const item of runs.value) {
+    if (item.executorRoleId) executorRoleByRun.value[item.runId] = item.executorRoleId
+  }
+  for (const state of ['RECOVERY_REQUIRED', 'RUNNING', 'WAITING_TOOL', 'WAITING_CONFIRMATION', 'CANCELLING', 'QUEUED']) {
     const candidate = runs.value.find(item => item.state === state)
     if (candidate) return candidate
   }
@@ -180,7 +204,9 @@ function appendSessionEvents(next: SessionEvent[]) {
     if (event.sessionCursor == null || known.has(event.sessionCursor)) continue
     known.add(event.sessionCursor)
     events.value.push(event)
-    messages.value = mergeConversationEvent(messages.value, event)
+    const executorRoleId = executorRoleByRun.value[event.runId]
+      ?? (run.value?.runId === event.runId ? run.value.executorRoleId : undefined)
+    messages.value = mergeConversationEvent(messages.value, { ...event, executorRoleId })
   }
   events.value.sort((left, right) => (left.sessionCursor ?? 0) - (right.sessionCursor ?? 0))
 }
@@ -189,6 +215,7 @@ function appendSessionEvents(next: SessionEvent[]) {
 function resetSessionEvents() {
   events.value = []
   messages.value = []
+  scannedCursor = 0
 }
 
 /**
@@ -201,13 +228,25 @@ async function syncSessionEvents() {
   for (;;) {
     const page = await api.getSessionEvents(sessionId(), after, 200)
     if (page.cursorExpired) {
+      const snapshot = await api.getSessionSnapshot(sessionId())
       resetSessionEvents()
-      after = 0
+      runs.value = snapshot.runs
+      appendSessionEvents(snapshot.events)
+      scannedCursor = snapshot.snapshotCursor
+      const activeRun = snapshot.runs.find(item => ACTIVE_STATES.has(item.state))
+      if (activeRun) {
+        run.value = activeRun
+        await loadToolExecutions()
+      }
+      after = scannedCursor
       continue
     }
     appendSessionEvents(page.events)
-    if (page.events.length < 200) return
-    after = lastCursor()
+    const next = page.nextCursor ?? lastCursor()
+    scannedCursor = Math.max(scannedCursor, next)
+    if (next <= after) return
+    if (page.nextCursor == null && page.events.length < 200) return
+    after = next
   }
 }
 
@@ -254,8 +293,10 @@ async function refreshCurrentRun(runId: string) {
   const latest = await api.getRun(runId)
   if (run.value?.runId !== runId) return
   run.value = latest
+  if (latest.executorRoleId) executorRoleByRun.value[runId] = latest.executorRoleId
   await loadToolExecutions()
   if (ACTIVE_STATES.has(latest.state)) return
+  await loadShareOptions()
 
   // 该 Run 已终态：先看看会话里还有没有排队/运行中的下一个 Run，
   // 没有才真正停掉传输；这样连续两轮之间不会重建连接。
@@ -269,6 +310,31 @@ async function refreshCurrentRun(runId: string) {
   await loadTimeline()
 }
 
+async function loadShareOptions() {
+  const requestedSession = sessionId()
+  const [availableRoles, availableResults] = await Promise.all([
+    api.getSessionRoles(requestedSession), api.listReferenceableResults(requestedSession),
+  ])
+  if (sessionId() !== requestedSession) return
+  roles.value = availableRoles
+  referenceableResults.value = availableResults
+  if (!availableRoles.some(role => role.roleId === selectedRoleId.value && role.selectable))
+    selectedRoleId.value = availableRoles.find(role => role.roleId === 'coordinator')?.roleId ?? ''
+  const allowedIds = new Set(availableResults.map(result => result.resultId))
+  selectedReferenceIds.value = selectedReferenceIds.value.filter(id => allowedIds.has(id))
+}
+
+function roleName(roleId?: string | null) {
+  return roles.value.find(role => role.roleId === roleId)?.displayName
+    ?? (roleId === 'coordinator' || !roleId ? session.value?.employeeName || '协调员工' : roleId)
+}
+
+function referenceLabel(result: ReferenceableResult) {
+  const executor = roleName(result.executorRoleId)
+  const when = new Date(result.createdAt).toLocaleString()
+  return `${executor} · ${result.kind} · ${when} · ${result.resultId.slice(0, 8)}`
+}
+
 function scheduleRunRefresh(runId: string) {
   if (refreshTimer) window.clearTimeout(refreshTimer)
   refreshTimer = window.setTimeout(() => {
@@ -280,6 +346,18 @@ function scheduleRunRefresh(runId: string) {
 }
 
 function handleStreamEvent(event: RunStreamEvent) {
+  if (event.type === 'SESSION_CURSOR_EXPIRED') {
+    stopTransport()
+    void syncSessionEvents().then(() => {
+      if (active.value) ensureTransport()
+    }).catch(error => {
+      if (isRetryable(error)) {
+        streamState.value = 'polling'
+        scheduleFallback(transportGeneration)
+      } else stopTransport()
+    })
+    return
+  }
   if (event.durability === 'durable' && event.sessionCursor != null) {
     appendSessionEvents([event])
     // 事件可能属于另一个 Run（例如排队中的下一轮），因此按事件自带的 runId 刷新。
@@ -414,17 +492,22 @@ function scheduleFallback(generation: number, delay = 1200) {
 
 async function load() {
   session.value = await api.getSession(sessionId())
+  await loadShareOptions()
   await loadTimeline()
   const inProgress = await loadRuns()
   if (inProgress) await activateRun(inProgress)
 }
 
 async function send() {
+  if (run.value?.state === 'RECOVERY_REQUIRED') return
   const value = input.value.trim()
   if (!value) return
   sending.value = true
   try {
-    const created = await api.createRun(sessionId(), value)
+    const targetRoleId = selectedRoleId.value || undefined
+    const references = [...selectedReferenceIds.value]
+    const created = await api.createRun(sessionId(), value, targetRoleId, references)
+    if (created.executorRoleId) executorRoleByRun.value[created.runId] = created.executorRoleId
     input.value = ''
     const inProgress = await loadRuns()
     await activateRun(inProgress || created)
@@ -524,9 +607,11 @@ function stateLabel(state?: string) {
     WAITING_TOOL: '正在等待工具执行',
     WAITING_CONFIRMATION: '正在等待人工确认',
     CANCELLING: '正在等待安全检查点取消',
+    RECOVERY_REQUIRED: '执行结果待管理员核查',
     SUCCEEDED: '已完成',
     FAILED: '执行失败',
     CANCELLED: '已取消',
+    TERMINATED: '已结束核查',
     EXPIRED: '已过期',
   } as Record<string, string>)[state || ''] || state
 }
@@ -544,6 +629,10 @@ onBeforeUnmount(stopTransport)
   background: linear-gradient(180deg, #fff 0%, #fbfcfe 100%);
   box-shadow: 0 18px 48px rgb(15 23 42 / 5%);
 }
+.next-run-options { display: flex; align-items: center; gap: 10px; margin: 10px 0; flex-wrap: wrap; }
+.next-run-role { width: 190px; }
+.next-run-references { min-width: 320px; flex: 1; }
+.speaker-label { margin-bottom: 6px; color: #64748b; font-size: 12px; font-weight: 600; }
 .message { align-items: flex-end; }
 .bubble {
   max-width: min(82%, 760px);

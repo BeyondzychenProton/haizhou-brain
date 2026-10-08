@@ -10,5 +10,11 @@ import java.time.Instant;
  * run 内的 {@code runSequence} 仍保留，用于回溯该事件在原 Run 中的位置。
  */
 public record SessionEvent(SessionId sessionId, long sessionCursor, RunId runId, Integer runSequence,
-                           String type, EventVisibility visibility, String content, Instant createdAt) {
+                           String type, EventVisibility visibility, String content, Instant createdAt,
+                           DurableEventMetadata metadata) {
+    public SessionEvent(SessionId sessionId, long sessionCursor, RunId runId, Integer runSequence,
+                        String type, EventVisibility visibility, String content, Instant createdAt) {
+        this(sessionId, sessionCursor, runId, runSequence, type, visibility, content, createdAt,
+                DurableEventMetadata.legacy());
+    }
 }

@@ -11,12 +11,14 @@ import com.haizhuo.brain.platform.channel.ChannelTurnPromoter;
 import com.haizhuo.brain.platform.employee.runtime.HarnessDefinitionBundle;
 import com.haizhuo.brain.platform.employee.runtime.HarnessDefinitionBundleRepository;
 import com.haizhuo.brain.platform.employee.runtime.PublishedToolSchema;
+import com.haizhuo.brain.platform.employee.EmployeeRuntimeConfiguration;
 import com.haizhuo.brain.platform.harness.SessionBridgeService;
 import com.haizhuo.brain.platform.harness.SessionBridgeSnapshot;
 import com.haizhuo.brain.platform.harness.SessionBridgeSnapshotRepository;
 import com.haizhuo.brain.platform.harness.SessionHarnessBinding;
 import com.haizhuo.brain.platform.harness.SessionHarnessBindingRepository;
 import com.haizhuo.brain.platform.session.AgentSession;
+import com.haizhuo.brain.platform.session.SessionRoleSlot;
 import com.haizhuo.brain.platform.tool.PlatformToolExecution;
 import com.haizhuo.brain.platform.tool.ToolApproval;
 import com.haizhuo.brain.platform.tool.ToolExecutionRepository;
@@ -33,6 +35,8 @@ import com.haizhuo.brain.runtime.api.event.PendingExternalToolCall;
 import com.haizhuo.brain.runtime.api.model.AgentExecutionRequest;
 import com.haizhuo.brain.runtime.api.model.ExternalToolResult;
 import com.haizhuo.brain.runtime.api.model.ExternalToolResultExecutionInput;
+import com.haizhuo.brain.runtime.api.model.RuntimeProfile;
+import com.haizhuo.brain.runtime.api.model.RuntimeSessionBinding;
 import com.haizhuo.brain.runtime.api.model.UserPromptExecutionInput;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
@@ -125,6 +129,51 @@ class RunExecutionServiceTest {
     }
 
     @Test
+    void directExpertRunUsesFrozenMemberBundleAndIsolatedRoleSlotWithReadOnlyTools() {
+        runs.direct = true;
+        runs.fixedVersion = 10L;
+        HarnessDefinitionBundle coordinator = teamBundle(10L, 1L, "协调员", teamConfiguration(), List.of());
+        HarnessDefinitionBundle member = teamBundle(20L, 2L, "研究专家",
+                EmployeeRuntimeConfiguration.singleSkilled(8), List.of(
+                        new PublishedToolSchema(201L, "research.search", "research_search", "只读查询",
+                                Map.of("type", "object"), true, false, "research.search"),
+                        new PublishedToolSchema(202L, "research.write", "research_write", "写入动作",
+                                Map.of("type", "object"), false, true, "research.write")));
+        FakeBundles bundles = new FakeBundles(coordinator, member);
+        SessionRoleSlot slot = new SessionRoleSlot("slot-research", SESSION, OWNER, "researcher", 2L, 20L,
+                "native-research-session", "workspace-research", T0);
+        runs.roleSlots.put("researcher", slot);
+        runs.targets.put(RUN, new RunExecutionTarget(RunExecutionMode.DIRECT,
+                "researcher", 2L, 20L, slot.id()));
+        AgentRun run = new AgentRun(RUN, SESSION, OWNER, 1L, 10L, "req-1", "d".repeat(64),
+                RunState.RUNNING, T0, T0, null, RuntimeProfile.TEAM_READONLY);
+        HarnessRunSpec spec = new HarnessRunSpec(RUN, 20L, 2L, member.bundleHash(),
+                "[\"research_search\",\"research_write\"]", "t".repeat(64), "e".repeat(64), null, T0);
+        store.claim = new ExecutionClaim(run, spec,
+                new RunExecutionAttempt("attempt-1", RUN, 1, "worker-1", "lease-1", 1L,
+                        T0.plus(TTL), T0, ExecutionAttemptState.RUNNING, T0, null),
+                ExecutionResumeReason.INITIAL_PROMPT);
+        service = new RunExecutionService(store, bundles, bridgeService(), new FakeSnapshots(), runs,
+                toolExecutions, request -> {
+                    capturedRequest.set(request);
+                    return Flux.just(new AgentRunCompletedEvent(RUN, "研究结论"));
+                }, realtimeEvents, channelReplies, channelTurns, Clock.fixed(T0, ZoneOffset.UTC));
+
+        assertTrue(service.executeNext("worker-1", TTL));
+
+        AgentExecutionRequest request = capturedRequest.get();
+        assertEquals(20L, request.definition().definitionVersionId());
+        assertEquals("研究专家", request.definition().employeeName());
+        assertEquals(List.of("research_search"), request.definition().toolCatalog().stream()
+                .map(tool -> tool.toolName()).toList());
+        assertEquals(RuntimeSessionBinding.IdentityMode.ROLE_SLOT, request.binding().identityMode());
+        assertEquals("researcher", request.binding().roleId());
+        assertEquals("native-research-session", request.binding().harnessSessionKey());
+        assertEquals("workspace-research", request.binding().workspaceRuntimeKey());
+        assertEquals("研究结论", store.completedResult);
+    }
+
+    @Test
     void returnsFalseWhenNoQueuedRun() {
         store.claim = null;
         assertFalse(service.executeNext("worker-1", TTL));
@@ -187,17 +236,18 @@ class RunExecutionServiceTest {
     }
 
     @Test
-    void completedRunEnqueuesChannelReplyAndEnqueueFailureStaysIsolated() {
+    void completedRunDoesNotOpenASecondDeliveryTransactionInTheService() {
         runtimeBehavior.set(request -> Flux.just(new AgentRunCompletedEvent(RUN, "答复正文")));
 
         assertTrue(service.executeNext("worker-1", TTL));
 
-        assertEquals(List.of("run-1:答复正文"), channelReplies.enqueued,
-                "Run 有最终答复时必须排进出站队列；Web 会话由实现自行忽略");
+        assertTrue(channelReplies.enqueued.isEmpty(),
+                "完整结果与渠道交付意图由 completeFinal 在同一事务提交");
 
         channelReplies.fail = true;
         assertTrue(service.executeNext("worker-1", TTL));
-        assertEquals("答复正文", store.completedResult, "入队失败不得改写已经落定的终态");
+        assertEquals("答复正文", store.completedResult, "服务层不应在落定后另开交付事务");
+        assertTrue(channelReplies.enqueued.isEmpty());
         assertNull(store.failedCode);
     }
 
@@ -232,6 +282,8 @@ class RunExecutionServiceTest {
 
     @Test
     void suspendFreezesExecutionsApprovalsAndIdempotencyKeys() {
+        store.claim = claim(ExecutionResumeReason.INITIAL_PROMPT, 7L, RuntimeProfile.LEGACY_STABLE,
+                "[\"meeting_room_search\",\"meeting_room_reserve\"]");
         runtimeBehavior.set(request -> Flux.just(new AgentToolSuspendedEvent(RUN, "reply-1",
                 List.of(new PendingExternalToolCall("tu-1", "meeting_room_reserve", Map.of("roomId", "A-201"))))));
 
@@ -343,6 +395,22 @@ class RunExecutionServiceTest {
     }
 
     @Test
+    void nonLegacyUncertainHarnessOutcomesRequireRecovery() {
+        store.claim = claim(ExecutionResumeReason.INITIAL_PROMPT, 7L, RuntimeProfile.SINGLE_SKILLED);
+        runtimeBehavior.set(request -> Flux.empty());
+        assertTrue(service.executeNext("worker-1", TTL));
+        assertEquals("RUNTIME_EMPTY", store.recoveryCode);
+        assertNull(store.failedCode);
+
+        store.reset();
+        store.claim = claim(ExecutionResumeReason.INITIAL_PROMPT, 7L, RuntimeProfile.SINGLE_SKILLED);
+        runtimeBehavior.set(request -> Flux.error(new IllegalStateException("native state may have advanced")));
+        assertTrue(service.executeNext("worker-1", TTL));
+        assertEquals("RUNTIME_OUTCOME_UNKNOWN", store.recoveryCode);
+        assertNull(store.failedCode);
+    }
+
+    @Test
     void missingBundleOrBridgeFailsRun() {
         store.claim = claim(ExecutionResumeReason.INITIAL_PROMPT, 999L);
         assertTrue(service.executeNext("worker-1", TTL));
@@ -354,13 +422,38 @@ class RunExecutionServiceTest {
     }
 
     private static ExecutionClaim claim(ExecutionResumeReason reason, long definitionVersionId) {
+        return claim(reason, definitionVersionId, RuntimeProfile.LEGACY_STABLE);
+    }
+
+    private static ExecutionClaim claim(ExecutionResumeReason reason, long definitionVersionId,
+                                        RuntimeProfile runtimeProfile) {
+        return claim(reason, definitionVersionId, runtimeProfile, "[\"meeting_room_search\"]");
+    }
+
+    private static ExecutionClaim claim(ExecutionResumeReason reason, long definitionVersionId,
+                                        RuntimeProfile runtimeProfile, String modelVisibleToolNamesJson) {
         AgentRun run = new AgentRun(RUN, SESSION, OWNER, 1L, definitionVersionId,
-                "req-1", "d".repeat(64), RunState.RUNNING, T0, T0, null);
+                "req-1", "d".repeat(64), RunState.RUNNING, T0, T0, null, runtimeProfile);
         HarnessRunSpec spec = new HarnessRunSpec(RUN, definitionVersionId, 1L, "b".repeat(64),
-                "[\"meeting_room_search\"]", "t".repeat(64), "e".repeat(64), null, T0);
+                modelVisibleToolNamesJson, "t".repeat(64), "e".repeat(64), null, T0);
         RunExecutionAttempt attempt = new RunExecutionAttempt("attempt-1", RUN, 1, "worker-1",
                 "lease-1", 1L, T0.plusSeconds(120), T0, ExecutionAttemptState.RUNNING, T0, null);
         return new ExecutionClaim(run, spec, attempt, reason);
+    }
+
+    private static EmployeeRuntimeConfiguration teamConfiguration() {
+        return new EmployeeRuntimeConfiguration(2, RuntimeProfile.TEAM_READONLY,
+                new EmployeeRuntimeConfiguration.RuntimePolicy(8, 2, 4, 120, false),
+                new EmployeeRuntimeConfiguration.TeamConfiguration("researcher", List.of("researcher"), List.of()),
+                List.of(new EmployeeRuntimeConfiguration.FixedMember("researcher", 2, 20, 4)));
+    }
+
+    private static HarnessDefinitionBundle teamBundle(long version, long employee, String name,
+                                                       EmployeeRuntimeConfiguration configuration,
+                                                       List<PublishedToolSchema> catalog) {
+        return new HarnessDefinitionBundle(version, version, name, "只读指令", "openai-compatible", "test-model",
+                8, "{}", "w".repeat(64), catalog, "c".repeat(64), null, null,
+                "b".repeat(64), configuration, List.of(), T0);
     }
 
     private static PlatformToolExecution deliverable(String id, String toolUseId,
@@ -386,16 +479,25 @@ class RunExecutionServiceTest {
     }
 
     private static final class FakeBundles implements HarnessDefinitionBundleRepository {
-        @Override public HarnessDefinitionBundle save(HarnessDefinitionBundle bundle) { return bundle; }
-        @Override public Optional<HarnessDefinitionBundle> findByDefinitionVersionId(long definitionVersionId) {
-            if (definitionVersionId != 7L) return Optional.empty();
-            return Optional.of(new HarnessDefinitionBundle(1L, 7L, "行政助理", "你是行政助理。",
+        private final Map<Long, HarnessDefinitionBundle> bundles = new java.util.HashMap<>();
+
+        FakeBundles() {
+            bundles.put(7L, new HarnessDefinitionBundle(1L, 7L, "行政助理", "你是行政助理。",
                     "openai-compatible", "test-model", 8, "{}", "w".repeat(64),
                     List.of(new PublishedToolSchema(101L, "meeting-room.search", "meeting_room_search", "查询",
                                     Map.of("type", "object"), true, false, "meeting_room.availability.read"),
                             new PublishedToolSchema(102L, "meeting-room.reserve", "meeting_room_reserve", "预订",
                                     Map.of("type", "object"), false, true, "meeting_room.booking.create")),
                     "c".repeat(64), null, null, "b".repeat(64), T0));
+        }
+
+        FakeBundles(HarnessDefinitionBundle... bundles) {
+            for (HarnessDefinitionBundle bundle : bundles) this.bundles.put(bundle.definitionVersionId(), bundle);
+        }
+
+        @Override public HarnessDefinitionBundle save(HarnessDefinitionBundle bundle) { return bundle; }
+        @Override public Optional<HarnessDefinitionBundle> findByDefinitionVersionId(long definitionVersionId) {
+            return Optional.ofNullable(bundles.get(definitionVersionId));
         }
         @Override public Optional<HarnessDefinitionBundle> findByBundleHash(String bundleHash) {
             return Optional.empty();
@@ -413,13 +515,25 @@ class RunExecutionServiceTest {
     private static final class FakeRuns implements SessionRunStore {
         boolean direct;
         boolean runtimeHistory;
+        long fixedVersion = 7L;
+        final Map<RunId, RunExecutionTarget> targets = new java.util.HashMap<>();
+        final Map<String, SessionRoleSlot> roleSlots = new java.util.HashMap<>();
         @Override public boolean hasRuntimeHistory(SessionId session, UserId user, RunId run) {
             return runtimeHistory;
+        }
+        @Override public boolean hasRuntimeHistory(SessionId session, UserId user, RunId run, String roleId) {
+            return runtimeHistory;
+        }
+        @Override public Optional<RunExecutionTarget> findExecutionTarget(RunId runId, UserId owner) {
+            return Optional.ofNullable(targets.get(runId));
+        }
+        @Override public Optional<SessionRoleSlot> findRoleSlot(SessionId sessionId, UserId owner, String roleId) {
+            return Optional.ofNullable(roleSlots.get(roleId));
         }
         @Override public AgentSession createSession(AgentSession session) { return session; }
         @Override public Optional<AgentSession> findSession(SessionId sessionId, UserId owner) {
             return Optional.of(new AgentSession(sessionId, owner, 1L, AgentSession.Status.ACTIVE, T0, T0, 0,
-                    7L, !direct));
+                    fixedVersion, !direct));
         }
         @Override public AgentRun createRun(AgentRun run, String input, HarnessRunSpec runSpec) { return run; }
         @Override public Optional<AgentRun> findRun(RunId runId, UserId owner) { return Optional.empty(); }
@@ -471,6 +585,7 @@ class RunExecutionServiceTest {
         List<String> completedDeliveredIds;
         String failedCode;
         String failedMessage;
+        String recoveryCode;
         String cancelledMessage;
         List<String> planSnapshots = new ArrayList<>();
         boolean failPlanSnapshot;
@@ -484,6 +599,7 @@ class RunExecutionServiceTest {
             completedDeliveredIds = null;
             failedCode = null;
             failedMessage = null;
+            recoveryCode = null;
             cancelledMessage = null;
             planSnapshots = new ArrayList<>();
             failPlanSnapshot = false;
@@ -516,6 +632,10 @@ class RunExecutionServiceTest {
         }
         @Override public boolean cancelled(ExecutionClaim c, String safeMessage) {
             cancelledMessage = safeMessage;
+            return true;
+        }
+        @Override public boolean markRecoveryRequired(ExecutionClaim c, String reasonCode, String safeMessage) {
+            recoveryCode = reasonCode;
             return true;
         }
         @Override public boolean recordPlanSnapshot(ExecutionClaim c, String content) {

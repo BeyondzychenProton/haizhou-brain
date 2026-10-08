@@ -10,11 +10,20 @@ import com.haizhuo.brain.runtime.agentscope.factory.AgentScopeModelFactory;
 import com.haizhuo.brain.runtime.agentscope.factory.DefinitionWorkspaceMaterializer;
 import com.haizhuo.brain.runtime.agentscope.factory.HarnessAgentFactory;
 import com.haizhuo.brain.runtime.agentscope.factory.HarnessTemplateCache;
+import com.haizhuo.brain.runtime.agentscope.team.NativeTeamExecutionGateway;
+import com.haizhuo.brain.runtime.agentscope.team.NativeTeamMemberFactory;
+import com.haizhuo.brain.platform.run.RunExecutionStore;
 import com.haizhuo.brain.runtime.api.AgentRuntime;
 import com.haizhuo.brain.runtime.api.RunControlInbox;
+import com.haizhuo.brain.runtime.api.team.TeamExecutionPersistence;
 import io.agentscope.core.state.AgentStateStore;
 import io.agentscope.extensions.jdbc.dialect.vendor.MysqlDialect;
+import io.agentscope.extensions.jdbc.store.JdbcStore;
 import io.agentscope.extensions.jdbc.state.JdbcAgentStateStore;
+import io.agentscope.harness.agent.DistributedStore;
+import io.agentscope.harness.agent.IsolationScope;
+import io.agentscope.harness.agent.filesystem.remote.store.BaseStore;
+import io.agentscope.harness.agent.filesystem.spec.RemoteFilesystemSpec;
 import io.opentelemetry.api.GlobalOpenTelemetry;
 import io.opentelemetry.api.trace.Tracer;
 import java.nio.file.Path;
@@ -51,6 +60,23 @@ public class AgentRuntimeConfiguration {
         return new JdbcAgentStateStore(dataSource, new MysqlDialect());
     }
 
+    /** AgentScope 原生 KV；DDL 由 Flyway V24 管理，运行时不得自行建表。 */
+    @Bean
+    BaseStore agentScopeBaseStore(DataSource dataSource) {
+        return JdbcStore.builder(dataSource).dialect(new MysqlDialect()).initializeSchema(false).build();
+    }
+
+    @Bean
+    DistributedStore agentScopeDistributedStore(AgentStateStore agentStateStore, BaseStore baseStore) {
+        return DistributedStore.builder().agentStateStore(agentStateStore).baseStore(baseStore).build();
+    }
+
+    @Bean
+    RemoteFilesystemSpec agentScopeRemoteFilesystemSpec(BaseStore baseStore) {
+        return new RemoteFilesystemSpec(baseStore).isolationScope(IsolationScope.SESSION)
+                .addSharedPrefix("outputs/");
+    }
+
     @Bean
     AgentScopeModelFactory agentScopeModelFactory(AgentScopeRuntimeProperties properties) {
         return new AgentScopeModelFactory(properties);
@@ -62,15 +88,34 @@ public class AgentRuntimeConfiguration {
     }
 
     @Bean
+    NativeTeamMemberFactory nativeTeamMemberFactory(AgentScopeModelFactory modelFactory,
+                                                     AgentStateStore agentStateStore,
+                                                     DefinitionWorkspaceMaterializer workspaceMaterializer,
+                                                     RunControlInbox controlInbox) {
+        return new NativeTeamMemberFactory(modelFactory, agentStateStore, workspaceMaterializer, controlInbox);
+    }
+
+    @Bean
+    NativeTeamExecutionGateway nativeTeamExecutionGateway(BaseStore baseStore,
+                                                           TeamExecutionPersistence persistence,
+                                                           NativeTeamMemberFactory memberFactory,
+                                                           RunControlInbox controlInbox) {
+        return new NativeTeamExecutionGateway(baseStore, persistence, memberFactory, controlInbox);
+    }
+
+    @Bean
     HarnessAgentFactory harnessAgentFactory(AgentScopeModelFactory modelFactory, AgentStateStore agentStateStore,
+                                            DistributedStore distributedStore, RemoteFilesystemSpec filesystemSpec,
                                             DefinitionWorkspaceMaterializer workspaceMaterializer,
                                             RunControlInbox controlInbox, LangfuseProperties langfuse,
-                                            ObjectProvider<Tracer> tracer) {
+                                            ObjectProvider<Tracer> tracer,
+                                            NativeTeamExecutionGateway nativeTeamExecutionGateway) {
         Tracer otelTracer = tracer.getIfAvailable(
                 () -> GlobalOpenTelemetry.getTracer("com.haizhuo.brain"));
-        return new HarnessAgentFactory(modelFactory, agentStateStore, null, workspaceMaterializer, controlInbox,
+        return new HarnessAgentFactory(modelFactory, agentStateStore, distributedStore, filesystemSpec,
+                workspaceMaterializer, controlInbox,
                 new com.haizhuo.brain.runtime.agentscope.middleware.ObservabilityMiddleware(
-                        otelTracer, langfuse), langfuse.isEnabled());
+                        otelTracer, langfuse), langfuse.isEnabled(), nativeTeamExecutionGateway);
     }
 
     @Bean
@@ -79,8 +124,8 @@ public class AgentRuntimeConfiguration {
     }
 
     @Bean
-    RuntimeContextFactory runtimeContextFactory() {
-        return new RuntimeContextFactory();
+    RuntimeContextFactory runtimeContextFactory(RunExecutionStore runExecutionStore) {
+        return new RuntimeContextFactory(runExecutionStore);
     }
 
     @Bean

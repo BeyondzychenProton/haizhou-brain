@@ -1,6 +1,7 @@
 package com.haizhuo.brain.bootstrap.configuration;
 
 import com.haizhuo.brain.platform.employee.AgentDefinitionRepository;
+import com.haizhuo.brain.platform.employee.CapabilityAssetRepository;
 import com.haizhuo.brain.platform.employee.runtime.DefaultHarnessDefinitionBundleCompiler;
 import com.haizhuo.brain.platform.employee.runtime.HarnessDefinitionBundleCompiler;
 import com.haizhuo.brain.platform.channel.ChannelReplyEnqueuer;
@@ -22,6 +23,8 @@ import com.haizhuo.brain.platform.run.HarnessRunSpecRepository;
 import com.haizhuo.brain.platform.run.RunExecutionService;
 import com.haizhuo.brain.platform.run.RunRealtimeEventPublisher;
 import com.haizhuo.brain.platform.run.RunExecutionStore;
+import com.haizhuo.brain.platform.run.RunRecoveryAdministrationService;
+import com.haizhuo.brain.platform.run.RunRecoveryStore;
 import com.haizhuo.brain.platform.run.SessionRunStore;
 import com.haizhuo.brain.platform.tool.CapabilityExecutor;
 import com.haizhuo.brain.platform.tool.CapabilityExecutorRegistry;
@@ -45,6 +48,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.env.Environment;
+import org.springframework.beans.factory.ObjectProvider;
 import java.util.Arrays;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -58,13 +62,19 @@ import java.util.stream.Collectors;
 public class HarnessRuntimeConfiguration {
 
     @Bean
+    RunRecoveryAdministrationService runRecoveryAdministrationService(RunRecoveryStore recoveryStore) {
+        return new RunRecoveryAdministrationService(recoveryStore);
+    }
+
+    @Bean
     CapabilityExecutorRegistry capabilityExecutorRegistry(List<CapabilityExecutor> executors) {
         return new ListCapabilityExecutorRegistry(executors);
     }
 
     @Bean
-    HarnessDefinitionBundleCompiler harnessDefinitionBundleCompiler(AgentDefinitionRepository definitions) {
-        return new DefaultHarnessDefinitionBundleCompiler(definitions);
+    HarnessDefinitionBundleCompiler harnessDefinitionBundleCompiler(AgentDefinitionRepository definitions,
+                                                                     ObjectProvider<CapabilityAssetRepository> assets) {
+        return new DefaultHarnessDefinitionBundleCompiler(definitions, assets.getIfAvailable());
     }
 
     @Bean

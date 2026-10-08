@@ -24,8 +24,6 @@ import org.springframework.transaction.annotation.Transactional;
 @Repository
 public class JdbcChannelDeliveryOutbox implements ChannelDeliveryOutbox {
 
-    private static final int CONTENT_LIMIT = 4000;
-
     private final JdbcTemplate jdbc;
     private final Clock clock;
 
@@ -42,28 +40,36 @@ public class JdbcChannelDeliveryOutbox implements ChannelDeliveryOutbox {
             return existing.get();
         }
         Instant now = clock.instant();
+        if (delivery.text() == null || delivery.text().getBytes(java.nio.charset.StandardCharsets.UTF_8).length > 1024*1024)
+            throw new com.haizhuo.brain.platform.run.ResultSizeExceededException();
+        if (delivery.resultId() != null && jdbc.query("SELECT result_id FROM platform_agent_result WHERE result_id=? AND run_id=? AND kind='ROOT_FINAL' AND visibility='USER'",
+                (rs,n)->rs.getString(1),delivery.resultId(),delivery.runId().value()).isEmpty())
+            throw new IllegalArgumentException("Delivery result reference invalid");
         jdbc.update("INSERT INTO platform_channel_delivery(delivery_id,run_id,binding_id,provider,reply_target,"
-                        + "content,idempotency_key,state,attempts,created_at,updated_at) "
-                        + "VALUES(?,?,?,?,?,?,?,'PENDING',0,?,?)",
+                        + "content,idempotency_key,state,attempts,created_at,updated_at,result_id) "
+                        + "VALUES(?,?,?,?,?,?,?,'PENDING',0,?,?,?)",
                 delivery.deliveryId(), delivery.runId().value(), delivery.bindingId(), delivery.provider(),
-                delivery.replyTarget(), truncate(delivery.text()), delivery.idempotencyKey(),
-                Timestamp.from(now), Timestamp.from(now));
+                delivery.replyTarget(),delivery.resultId()==null?delivery.text():com.haizhuo.brain.infrastructure.run.JdbcRunEventAppender.summary(delivery.text()),delivery.idempotencyKey(),
+                Timestamp.from(now),Timestamp.from(now),delivery.resultId());
         return delivery;
     }
 
     @Override
     public Optional<ChannelDelivery> claimNextDelivery() {
-        Optional<ChannelDelivery> candidate = jdbc.query("SELECT delivery_id,run_id,binding_id,provider,"
-                        + "reply_target,content,idempotency_key FROM platform_channel_delivery "
-                        + "WHERE state IN ('PENDING','RETRYABLE_FAILURE') ORDER BY created_at,delivery_id LIMIT 1",
+        Instant now = clock.instant();
+        jdbc.update("UPDATE platform_channel_delivery SET state='UNCERTAIN',last_error='SENDING_LEASE_EXPIRED',updated_at=? "
+                        + "WHERE state='SENDING' AND sending_expires_at<=?",Timestamp.from(now),Timestamp.from(now));
+        Optional<ChannelDelivery> candidate = jdbc.query("SELECT delivery.*,result.body result_body FROM platform_channel_delivery delivery "
+                        + "LEFT JOIN platform_agent_result result ON result.result_id=delivery.result_id AND result.run_id=delivery.run_id AND result.visibility='USER' "
+                        + "WHERE delivery.state IN ('PENDING','RETRYABLE_FAILURE') ORDER BY delivery.created_at,delivery.delivery_id LIMIT 1",
                 (rs, row) -> map(rs)).stream().findFirst();
         if (candidate.isEmpty()) {
             return Optional.empty();
         }
         ChannelDelivery delivery = candidate.get();
         int claimed = jdbc.update("UPDATE platform_channel_delivery SET state='SENDING',attempts=attempts+1,"
-                        + "updated_at=? WHERE delivery_id=? AND state IN ('PENDING','RETRYABLE_FAILURE')",
-                Timestamp.from(clock.instant()), delivery.deliveryId());
+                        + "updated_at=?,sending_expires_at=? WHERE delivery_id=? AND state IN ('PENDING','RETRYABLE_FAILURE')",
+                Timestamp.from(now),Timestamp.from(now.plusSeconds(300)),delivery.deliveryId());
         return claimed == 1 ? candidate : Optional.empty();
     }
 
@@ -71,24 +77,24 @@ public class JdbcChannelDeliveryOutbox implements ChannelDeliveryOutbox {
     public void recordOutcome(String deliveryId, ChannelOutboundSender.DeliveryResult result) {
         boolean delivered = result.status() == ChannelOutboundSender.DeliveryResult.Status.DELIVERED;
         jdbc.update("UPDATE platform_channel_delivery SET state=?,external_message_id=?,last_error=?,updated_at=? "
-                        + "WHERE delivery_id=?",
+                        + "WHERE delivery_id=? AND state='SENDING'",
                 result.status().name(), result.externalMessageId(), delivered ? null : result.status().name(),
                 Timestamp.from(clock.instant()), deliveryId);
     }
 
     private Optional<ChannelDelivery> findByKey(String idempotencyKey) {
-        return jdbc.query("SELECT delivery_id,run_id,binding_id,provider,reply_target,content,idempotency_key "
-                        + "FROM platform_channel_delivery WHERE idempotency_key=?",
+        return jdbc.query("SELECT delivery.*,result.body result_body FROM platform_channel_delivery delivery "
+                        + "LEFT JOIN platform_agent_result result ON result.result_id=delivery.result_id AND result.run_id=delivery.run_id AND result.visibility='USER' "
+                        + "WHERE delivery.idempotency_key=?",
                 (rs, row) -> map(rs), idempotencyKey).stream().findFirst();
     }
 
     private static ChannelDelivery map(ResultSet rs) throws SQLException {
+        String resultId = rs.getString("result_id");
+        String body = resultId==null?rs.getString("content"):rs.getString("result_body");
+        if (body==null) throw new SQLException("Complete delivery result missing");
         return new ChannelDelivery(rs.getString("delivery_id"), new RunId(rs.getString("run_id")),
                 rs.getString("binding_id"), rs.getString("provider"), rs.getString("reply_target"),
-                rs.getString("content"), rs.getString("idempotency_key"));
-    }
-
-    private static String truncate(String content) {
-        return content != null && content.length() > CONTENT_LIMIT ? content.substring(0, CONTENT_LIMIT) : content;
+                body,rs.getString("idempotency_key"),resultId);
     }
 }

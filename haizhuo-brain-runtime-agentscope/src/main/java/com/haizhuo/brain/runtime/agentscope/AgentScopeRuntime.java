@@ -1,6 +1,7 @@
 package com.haizhuo.brain.runtime.agentscope;
 
 import com.haizhuo.brain.runtime.agentscope.context.RuntimeContextFactory;
+import com.haizhuo.brain.runtime.agentscope.context.RunScopedDelegationBudget;
 import com.haizhuo.brain.runtime.agentscope.event.AgentScopeEventTranslator;
 import com.haizhuo.brain.runtime.agentscope.factory.HarnessRuntimeTemplate;
 import com.haizhuo.brain.runtime.agentscope.factory.HarnessTemplateCache;
@@ -73,27 +74,44 @@ public class AgentScopeRuntime implements AgentRuntime {
                     safe(() -> observer.onStarted(request));
                     if (request.binding().stateRequired()) {
                         if (stateStore == null || !stateStore.exists(Long.toString(request.userId().value()),
-                                request.platformSessionId().value())) {
+                                request.binding().harnessSessionKey())) {
                             AgentRunFailedEvent failed = new AgentRunFailedEvent(request.runId(),
                                     "RUNTIME_STATE_MISSING：会话恢复状态缺失，请核查，禁止以空记忆继续。");
                             safe(() -> observer.onFailed(request, failed));
                             return Mono.just(failed);
                         }
                     }
-                    HarnessRuntimeTemplate template = templateCache.getOrBuild(request.definition());
                     RuntimeContext context = contextFactory.create(request);
+                    boolean runScopedTemplate = request.definition().configuration().profile()
+                            == com.haizhuo.brain.runtime.api.model.RuntimeProfile.TEAM_READONLY
+                            && request.definition().configuration().team() != null
+                            && !request.definition().configuration().team().allowedDelegations().isEmpty();
+                    HarnessRuntimeTemplate template = runScopedTemplate
+                            ? templateCache.buildForRun(request.definition())
+                            : templateCache.getOrBuild(request.definition());
                     Flux<AgentEvent> events = stream(template, request.input(), context);
                     // 一旦已经翻译出挂起事件，同一条流末尾的完成事件
                     // 就不能再把 Run 翻回 SUCCEEDED（§34）。
                     AtomicBoolean suspended = new AtomicBoolean();
-                    return events.concatMap(event -> translator.translate(request.runId(), event))
+                    Flux<BrainAgentEvent> translated = Flux.using(
+                            () -> translator.forExecution(context.getSessionId(), request.attemptId(),
+                                    request.fenceToken()),
+                            executionTranslator -> events.concatMap(
+                                    event -> executionTranslator.translate(request.runId(), event))
                             .doOnNext(event -> {
                                 if (event instanceof AgentToolSuspendedEvent) {
                                     suspended.set(true);
                                 }
                             })
                             .filter(event -> !(suspended.get() && event instanceof AgentRunCompletedEvent))
-                            .doOnNext(event -> safe(() -> observe(request, event)));
+                            .doOnNext(event -> safe(() -> observe(request, event))),
+                            AgentScopeEventTranslator::close);
+                    if (!runScopedTemplate) return translated;
+                    return translated.doFinally(signal -> {
+                        RunScopedDelegationBudget budget = context.get(RunScopedDelegationBudget.class);
+                        if (budget != null) budget.closeUnstarted();
+                        template.close();
+                    });
                 })
                 .subscribeOn(Schedulers.boundedElastic())
                 .onErrorResume(error -> {

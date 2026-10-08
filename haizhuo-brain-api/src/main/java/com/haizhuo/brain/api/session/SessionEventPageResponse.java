@@ -7,5 +7,8 @@ import java.util.List;
  * {@code cursorExpired} 为真时客户端必须丢弃本地游标、清空本地时间线并从 0 重新补读，
  * 否则会永久停在过期快照上。
  */
-public record SessionEventPageResponse(List<StreamEvent> events, long cursorFloor, boolean cursorExpired) {
+public record SessionEventPageResponse(List<StreamEvent> events, long cursorFloor, boolean cursorExpired, long nextCursor) {
+    public SessionEventPageResponse(List<StreamEvent> events,long floor,boolean expired) {
+        this(events,floor,expired,events.stream().filter(e->e.sessionCursor()!=null).mapToLong(StreamEvent::sessionCursor).max().orElse(0L));
+    }
 }

@@ -145,6 +145,26 @@ export interface CapabilitySelection {
   revision: string
 }
 
+export type RuntimeProfile = 'LEGACY_STABLE' | 'SINGLE_SKILLED' | 'TEAM_READONLY' | 'TEAM_AUTONOMOUS_READONLY'
+
+export interface EmployeeRuntimeConfiguration {
+  schemaVersion: number
+  profile: RuntimeProfile
+  runtimePolicy: {
+    maxIterations: number
+    maxParallelDelegations: number
+    maxExpertInvocationsPerRun: number
+    syncTimeoutSeconds: number
+    memoryEnabled: boolean
+  }
+  team?: {
+    defaultRoleId: string
+    userSelectableRoles: string[]
+    allowedDelegations: { fromRoleId: string; toRoleId: string }[]
+  } | null
+  members: { roleId: string; employeeId: number; definitionVersionId: number; steps: number }[]
+}
+
 /** 与后端 AgentDefinitionDraft 对齐。 */
 export interface AgentDefinitionDraft {
   employeeId: number
@@ -153,6 +173,7 @@ export interface AgentDefinitionDraft {
   modelProvider: string
   modelName: string
   capabilities: CapabilitySelection[]
+  configuration: EmployeeRuntimeConfiguration
   updatedAt: string
 }
 
@@ -162,13 +183,17 @@ export interface DraftUpdatePayload {
   modelProvider: string
   modelName: string
   capabilities: CapabilitySelection[]
+  configuration?: EmployeeRuntimeConfiguration
   reason: string
 }
 
 /** 与后端 ValidationIssue 对齐。 */
 export interface ValidationIssue {
   code: string
+  severity: string
+  fieldPath?: string | null
   message: string
+  relatedId?: string | null
 }
 
 /** 与后端 ValidationResult 对齐。 */
@@ -176,6 +201,7 @@ export interface ValidationResult {
   publishable: boolean
   issues: ValidationIssue[]
   draftRevision: number
+  previewHash: string
 }
 
 /** 值对象 TenantId 序列化为 { value } 形式。 */

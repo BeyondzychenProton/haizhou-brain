@@ -145,15 +145,17 @@ class McpPersistedRunLoopMysqlTest {
             var modelFactory = new AgentScopeModelFactory(new AgentScopeRuntimeProperties(
                     "openai", "deterministic-model", "test-key", "http://localhost", true,
                     workspace.toString()));
+            var agentStateStore = new JdbcAgentStateStore(source, new MysqlDialect());
             var harnessFactory = new HarnessAgentFactory(modelFactory,
-                    new JdbcAgentStateStore(source, new MysqlDialect()), null,
+                    agentStateStore, null,
                     new DefinitionWorkspaceMaterializer(workspace), sessions) {
                 @Override protected ChatModelBase createModel(RuntimeDefinitionSnapshot ignored) {
                     return model;
                 }
             };
             var runtime = new AgentScopeRuntime(new HarnessTemplateCache(harnessFactory),
-                    new RuntimeContextFactory(), new AgentScopeEventTranslator());
+                    new RuntimeContextFactory(), new AgentScopeEventTranslator(),
+                    com.haizhuo.brain.observability.AgentExecutionObserver.noop(), agentStateStore);
             var snapshots = new JdbcSessionBridgeSnapshotRepository(jdbc);
             var bridge = new SessionBridgeService(new JdbcSessionHarnessBindingRepository(jdbc),
                     snapshots, sessions, Clock.systemUTC());

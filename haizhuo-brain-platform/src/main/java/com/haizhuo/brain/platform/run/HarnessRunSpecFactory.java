@@ -37,10 +37,17 @@ public class HarnessRunSpecFactory {
     }
 
     public HarnessRunSpec create(RunId runId, UserId userId, HarnessDefinitionBundle bundle, String channelType) {
+        return create(runId, userId, bundle, channelType, false);
+    }
+
+    /** Team roots and directly selected team members only receive read-only tools. */
+    public HarnessRunSpec create(RunId runId, UserId userId, HarnessDefinitionBundle bundle,
+                                 String channelType, boolean readOnlyOnly) {
         List<String> visible = new ArrayList<>();
         List<String> effective = new ArrayList<>();
         McpToolVisibility mcp = mcpVisibility.get();
         for (PublishedToolSchema tool : bundle.toolCatalog()) {
+            if (readOnlyOnly && !tool.readOnly()) continue;
             var entry = definitions.findCapabilityByRevisionId(tool.capabilityRevisionId());
             if (entry.isEmpty()) continue;
             if (!definitions.isCapabilityEnabled(entry.get().capabilityCode(), entry.get().revision())) continue;

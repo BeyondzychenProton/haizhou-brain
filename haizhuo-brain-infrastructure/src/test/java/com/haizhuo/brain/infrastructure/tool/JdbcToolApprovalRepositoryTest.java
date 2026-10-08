@@ -35,8 +35,8 @@ class JdbcToolApprovalRepositoryTest {
     void setUp() {
         jdbc = newJdbc("approval");
         createRunAndToolTables(jdbc);
-        repository = new JdbcToolApprovalRepository(jdbc);
-        executions = new JdbcToolExecutionRepository(jdbc);
+        repository = com.haizhuo.brain.infrastructure.support.HarnessJdbcTestSupport.transactional(new JdbcToolApprovalRepository(jdbc), jdbc);
+        executions = com.haizhuo.brain.infrastructure.support.HarnessJdbcTestSupport.transactional(new JdbcToolExecutionRepository(jdbc), jdbc);
     }
 
     @Test

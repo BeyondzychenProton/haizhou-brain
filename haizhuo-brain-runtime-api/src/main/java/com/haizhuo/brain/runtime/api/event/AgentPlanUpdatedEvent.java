@@ -11,7 +11,12 @@ import com.haizhuo.brain.kernel.identity.RunId;
  * <p>{@code plan} 在 ENTER/EXIT 阶段为 null：这两个阶段只表达计划模式的开启与提交，
  * 内容以最近一次 WRITE 为准。</p>
  */
-public record AgentPlanUpdatedEvent(RunId runId, Phase phase, String plan) implements BrainAgentEvent {
+public record AgentPlanUpdatedEvent(RunId runId, Phase phase, String plan,
+                                    AgentEventDescriptor descriptor) implements BrainAgentEvent {
+
+    public AgentPlanUpdatedEvent(RunId runId, Phase phase, String plan) {
+        this(runId, phase, plan, null);
+    }
 
     public enum Phase { ENTER, WRITE, EXIT }
 }

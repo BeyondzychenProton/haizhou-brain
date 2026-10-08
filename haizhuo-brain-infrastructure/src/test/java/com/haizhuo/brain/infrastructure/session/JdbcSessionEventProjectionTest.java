@@ -39,7 +39,7 @@ class JdbcSessionEventProjectionTest {
         createRunAndToolTables(jdbc);
         createSessionAndGuidanceTables(jdbc);
         createSessionEventTable(jdbc);
-        projector = new JdbcSessionEventProjector(jdbc);
+        projector = com.haizhuo.brain.infrastructure.support.HarnessJdbcTestSupport.transactional(new JdbcSessionEventProjector(jdbc), jdbc);
     }
 
     @Test
@@ -103,7 +103,7 @@ class JdbcSessionEventProjectionTest {
     void retentionWindowExposesFloorAndTrimsOnlyTheOldestHistory() {
         insertSession(jdbc, SESSION.value(), OWNER.value(), 1L, "ACTIVE");
         insertRun(jdbc, "run-1", SESSION.value(), "RUNNING");
-        JdbcSessionRunStore store = new JdbcSessionRunStore(jdbc, projector);
+        JdbcSessionRunStore store = com.haizhuo.brain.infrastructure.support.HarnessJdbcTestSupport.transactional(new JdbcSessionRunStore(jdbc, projector), jdbc);
         for (int sequence = 1; sequence <= 5; sequence++) {
             projector.project(SESSION, new RunId("run-1"), sequence, "RUN_COMPLETED", "第" + sequence + "条",
                     T0.plusSeconds(sequence));
@@ -127,7 +127,7 @@ class JdbcSessionEventProjectionTest {
         insertSession(jdbc, "session-2", 99L, 1L, "ACTIVE");
         insertRun(jdbc, "run-1", SESSION.value(), "RUNNING");
         insertRun(jdbc, "run-2", "session-2", 99L, "RUNNING");
-        JdbcSessionRunStore store = new JdbcSessionRunStore(jdbc, projector);
+        JdbcSessionRunStore store = com.haizhuo.brain.infrastructure.support.HarnessJdbcTestSupport.transactional(new JdbcSessionRunStore(jdbc, projector), jdbc);
         for (int sequence = 1; sequence <= 3; sequence++) {
             projector.project(SESSION, new RunId("run-1"), sequence, "RUN_COMPLETED", "mine-" + sequence,
                     T0.plusSeconds(sequence));

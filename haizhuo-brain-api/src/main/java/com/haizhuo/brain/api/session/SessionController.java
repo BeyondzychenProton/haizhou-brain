@@ -3,8 +3,11 @@ package com.haizhuo.brain.api.session;
 import com.haizhuo.brain.kernel.identity.SessionId;
 import com.haizhuo.brain.platform.session.AgentSession;
 import com.haizhuo.brain.platform.session.SessionApplicationService;
+import com.haizhuo.brain.platform.session.SessionRoleOption;
 import com.haizhuo.brain.platform.run.AgentRun;
+import com.haizhuo.brain.platform.run.RunExecutionMode;
 import com.haizhuo.brain.platform.run.RunEvent;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.haizhuo.brain.platform.run.RunGuidance;
 import com.haizhuo.brain.platform.tool.ToolApprovalService;
 import com.haizhuo.brain.platform.tool.ToolExecutionState;
@@ -61,12 +64,19 @@ public class SessionController {
         return blocking(() -> response(sessions.get(new SessionId(sessionId), user.userId())));
     }
 
+    @GetMapping("/{sessionId}/roles")
+    public Mono<List<SessionRoleResponse>> roles(@AuthenticationPrincipal AuthenticatedUser user,
+                                                 @PathVariable String sessionId) {
+        return blocking(() -> sessions.roles(new SessionId(sessionId), user.userId()).stream()
+                .map(SessionController::roleResponse).toList());
+    }
+
     @GetMapping("/{sessionId}/timeline")
     public Mono<List<SessionTimelineResponse>> timeline(@AuthenticationPrincipal AuthenticatedUser user, @PathVariable String sessionId,
                                                         @RequestParam(defaultValue = "100") int limit) {
         return blocking(() -> sessions.timeline(new SessionId(sessionId), user.userId(), limit).stream()
                 .map(item -> new SessionTimelineResponse(item.runId().value(), item.sequenceNo(), item.type(),
-                        item.content(), item.createdAt()))
+                        item.content(), item.createdAt(), item.executorRoleId()))
                 .toList());
     }
 
@@ -74,7 +84,7 @@ public class SessionController {
     public Mono<List<RunResponse>> runs(@AuthenticationPrincipal AuthenticatedUser user, @PathVariable String sessionId,
                                         @RequestParam(defaultValue = "20") int limit) {
         return blocking(() -> sessions.runs(new SessionId(sessionId), user.userId(), limit).stream()
-                .map(run -> runResponse(run, sessions.queuePosition(run.id(), user.userId()))).toList());
+                .map(run -> runResponse(run, sessions.queuePosition(run.id(), user.userId()), user.userId())).toList());
     }
 
     @PostMapping("/{sessionId}/runs")
@@ -82,8 +92,9 @@ public class SessionController {
     public Mono<RunResponse> createRun(@AuthenticationPrincipal AuthenticatedUser user, @PathVariable String sessionId,
                                        @Valid @RequestBody CreateRunRequest request) {
         return blocking(() -> {
-            AgentRun run = sessions.createRun(new SessionId(sessionId), user.userId(), request.clientRequestId(), request.input().trim());
-            return runResponse(run, sessions.queuePosition(run.id(), user.userId()));
+            AgentRun run = sessions.createRun(new SessionId(sessionId), user.userId(), request.clientRequestId(),
+                    request.input().trim(), request.targetRoleId(), request.mode(), request.referencedResultIds());
+            return runResponse(run, sessions.queuePosition(run.id(), user.userId()), user.userId());
         });
     }
 
@@ -91,21 +102,33 @@ public class SessionController {
     public Mono<RunResponse> getRun(@AuthenticationPrincipal AuthenticatedUser user, @PathVariable String runId) {
         return blocking(() -> {
             AgentRun run = sessions.getRun(new RunId(runId), user.userId());
-            return runResponse(run, sessions.queuePosition(run.id(), user.userId()));
+            return runResponse(run, sessions.queuePosition(run.id(), user.userId()), user.userId());
         });
     }
 
-    @GetMapping("/runs/{runId}/events")
-    public Mono<java.util.List<RunEvent>> events(@AuthenticationPrincipal AuthenticatedUser user,
+    public Mono<List<RunEventResponse>> events(@AuthenticationPrincipal AuthenticatedUser user,
                                                  @PathVariable String runId,
                                                  @RequestParam(defaultValue = "0") int after,
                                                  @RequestParam(defaultValue = "200") int limit) {
-        return blocking(() -> sessions.events(new RunId(runId), user.userId(), after, limit));
+        return events(user, runId, after, limit, "v1");
+    }
+
+    @GetMapping("/runs/{runId}/events")
+    public Mono<List<RunEventResponse>> events(@AuthenticationPrincipal AuthenticatedUser user,
+                                              @PathVariable String runId,
+                                              @RequestParam(defaultValue = "0") int after,
+                                              @RequestParam(defaultValue = "200") int limit,
+                                              @RequestParam(defaultValue = "v1") String format) {
+        boolean v2 = StreamEvent.isV2(format);
+        return blocking(() -> sessions.events(new RunId(runId), user.userId(), after, limit).stream()
+                .map(event -> new RunEventResponse(event.runId(), event.sequenceNo(), event.type(), event.content(),
+                        event.createdAt(), StreamEvent.origin(event.metadata(), v2),
+                        v2 && event.metadata() != null ? event.metadata().resultId() : null)).toList());
     }
 
     @PostMapping("/runs/{runId}/cancel")
     public Mono<RunResponse> cancel(@AuthenticationPrincipal AuthenticatedUser user, @PathVariable String runId) {
-        return blocking(() -> runResponse(sessions.cancel(new RunId(runId), user.userId()), 0));
+        return blocking(() -> runResponse(sessions.cancel(new RunId(runId), user.userId()), 0, user.userId()));
     }
 
     @PostMapping("/runs/{runId}/guidance")
@@ -152,8 +175,15 @@ public class SessionController {
     private static SessionResponse response(AgentSession session) {
         return new SessionResponse(session.id().value(), session.employeeId(), session.status().name(), session.createdAt(), session.lastActiveAt(), session.definitionVersionId());
     }
-    private static RunResponse runResponse(AgentRun run, int queuePosition) {
-        return new RunResponse(run.id().value(), run.sessionId().value(), run.state().name(), run.definitionVersionId(), run.createdAt(), queuePosition);
+    private RunResponse runResponse(AgentRun run, int queuePosition, com.haizhuo.brain.kernel.identity.UserId owner) {
+        var target = sessions.executionTarget(run, owner);
+        return new RunResponse(run.id().value(), run.sessionId().value(), run.state().name(), run.definitionVersionId(),
+                run.createdAt(), queuePosition, target.roleId(), target.employeeId(), target.definitionVersionId(),
+                target.mode().name());
+    }
+    private static SessionRoleResponse roleResponse(SessionRoleOption option) {
+        return new SessionRoleResponse(option.roleId(), option.displayName(), option.employeeId(),
+                option.definitionVersionId(), option.selectable());
     }
     private static GuidanceResponse guidanceResponse(RunGuidance guidance) { return new GuidanceResponse(guidance.id(), guidance.runId().value(), guidance.status().name(), guidance.createdAt()); }
     private static <T> Mono<T> blocking(java.util.concurrent.Callable<T> callable) {
@@ -161,10 +191,38 @@ public class SessionController {
     }
 
     public record CreateSessionRequest(@Positive long employeeId) { }
-    public record CreateRunRequest(@NotBlank @Size(max = 128) String clientRequestId, @NotBlank @Size(max = 4000) String input) { }
+    public record CreateRunRequest(@NotBlank @Size(max = 128) String clientRequestId,
+                                   @NotBlank @Size(max = 4000) String input,
+                                   @Size(max = 64) String targetRoleId, RunExecutionMode mode,
+                                   @Size(max = 8) List<@NotBlank @Size(max = 64) String> referencedResultIds) {
+        public CreateRunRequest(String clientRequestId, String input) {
+            this(clientRequestId, input, null, RunExecutionMode.DIRECT, List.of());
+        }
+        public CreateRunRequest(String clientRequestId, String input, String targetRoleId, RunExecutionMode mode) {
+            this(clientRequestId, input, targetRoleId, mode, List.of());
+        }
+    }
     public record SessionResponse(String sessionId, long employeeId, String status, Instant createdAt, Instant lastActiveAt, Long definitionVersionId) { }
-    public record RunResponse(String runId, String sessionId, String state, long definitionVersionId, Instant createdAt, int queuePosition) { }
-    public record SessionTimelineResponse(String runId, int sequenceNo, String type, String content, Instant createdAt) { }
+    public record RunResponse(String runId, String sessionId, String state, long definitionVersionId, Instant createdAt,
+                              int queuePosition, String executorRoleId, long executorEmployeeId,
+                              long executorDefinitionVersionId, String mode) {
+        public RunResponse(String runId, String sessionId, String state, long definitionVersionId, Instant createdAt,
+                           int queuePosition) {
+            this(runId, sessionId, state, definitionVersionId, createdAt, queuePosition,
+                    "coordinator", 0L, definitionVersionId, RunExecutionMode.DIRECT.name());
+        }
+    }
+    public record SessionRoleResponse(String roleId, String displayName, long employeeId,
+                                      Long definitionVersionId, boolean selectable) { }
+    public record RunEventResponse(RunId runId, int sequenceNo, String type, String content, Instant createdAt,
+                                   @JsonInclude(JsonInclude.Include.NON_NULL) StreamEvent.Origin origin,
+                                   @JsonInclude(JsonInclude.Include.NON_NULL) String resultId) { }
+    public record SessionTimelineResponse(String runId, int sequenceNo, String type, String content, Instant createdAt,
+                                          String executorRoleId) {
+        public SessionTimelineResponse(String runId, int sequenceNo, String type, String content, Instant createdAt) {
+            this(runId, sequenceNo, type, content, createdAt, "coordinator");
+        }
+    }
     public record GuidanceRequest(@NotBlank @Size(max = 4000) String content) { }
     public record GuidanceResponse(String guidanceId, String runId, String status, Instant createdAt) { }
     public record ToolExecutionResponse(String toolExecutionId, String toolName, String state, String inputJson,

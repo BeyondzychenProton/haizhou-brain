@@ -73,7 +73,7 @@ public class JdbcChannelTurnStore implements ChannelTurnStore {
     /** 活动状态集合必须与 active_marker 生成列保持一致，否则会漏判。 */
     private boolean hasActiveRun(SessionId sessionId) {
         Integer active = jdbc.queryForObject("SELECT COUNT(*) FROM platform_agent_run WHERE session_id=? "
-                        + "AND state IN ('QUEUED','RUNNING','WAITING_TOOL','WAITING_CONFIRMATION','CANCELLING')",
+                        + "AND state IN ('QUEUED','RUNNING','WAITING_TOOL','WAITING_CONFIRMATION','CANCELLING','RECOVERY_REQUIRED')",
                 Integer.class, sessionId.value());
         return active != null && active > 0;
     }

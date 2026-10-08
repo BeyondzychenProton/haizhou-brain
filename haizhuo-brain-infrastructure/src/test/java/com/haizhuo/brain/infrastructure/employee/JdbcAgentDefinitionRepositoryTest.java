@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.haizhuo.brain.kernel.identity.TenantId;
 import com.haizhuo.brain.platform.employee.AgentDefinitionManagementAudit;
+import com.haizhuo.brain.platform.employee.EmployeeRuntimeConfiguration;
 import com.haizhuo.brain.platform.employee.CapabilityCatalogEntry;
 import com.haizhuo.brain.platform.employee.CapabilitySelection;
 import com.haizhuo.brain.platform.employee.ToolInvocationAudit;
@@ -84,7 +85,34 @@ class JdbcAgentDefinitionRepositoryTest {
 
         var current = repository.findPublished(new TenantId(1), 1).orElseThrow();
         assertEquals(published.definition().id(), current.definition().id(), "发布后当前指针应指向新版本");
+        assertEquals(original.definition().id(), repository.findPublishedVersion(new TenantId(1), 1,
+                original.definition().id()).orElseThrow().definition().id(), "历史精确版本仍可按版本 ID 读取");
         assertEquals(1, repository.listEnabled(new TenantId(1)).size());
+    }
+
+    @Test
+    void persistsExplicitRuntimeConfigurationAndExactFixedMemberVersion() {
+        jdbc.update("INSERT INTO digital_employee VALUES(2,1,'sample-member','固定成员',TRUE,2,0)");
+        jdbc.update("INSERT INTO agent_definition_version(id,employee_id,version_no,instructions,model_provider,model_name,content_hash,configuration_json,publish_request_id,published_by,published_at) VALUES(2,2,1,'成员指令','openai','test-model',?,NULL,'member-bootstrap',42,CURRENT_TIMESTAMP)",
+                "e".repeat(64));
+        jdbc.update("UPDATE digital_employee SET current_published_version_id=2 WHERE id=2");
+
+        EmployeeRuntimeConfiguration configuration = new EmployeeRuntimeConfiguration(2,
+                com.haizhuo.brain.runtime.api.model.RuntimeProfile.TEAM_READONLY,
+                new EmployeeRuntimeConfiguration.RuntimePolicy(5, 1, 2, 45, false),
+                new EmployeeRuntimeConfiguration.TeamConfiguration("analyst", List.of("analyst"), List.of()),
+                List.of(new EmployeeRuntimeConfiguration.FixedMember("analyst", 2, 2, 3)));
+        var saved = repository.saveDraft(1, 1, "主员工指令", "openai", "test-model", List.of(),
+                configuration, audit("DRAFT_SAVED", "DIGITAL_EMPLOYEE", "1", null));
+        assertEquals(configuration, repository.findDraft(1).orElseThrow().configuration());
+
+        var published = repository.publish(1, saved.draftRevision(),
+                audit("DEFINITION_PUBLISHED", "DIGITAL_EMPLOYEE", "1", "publish-team-1"));
+        assertEquals(configuration, published.definition().configuration());
+        assertEquals(1, jdbc.queryForObject("SELECT COUNT(*) FROM agent_definition_version_member WHERE parent_definition_version_id=? AND member_employee_id=2 AND member_definition_version_id=2 AND member_steps=3",
+                Integer.class, published.definition().id()));
+        assertEquals(2, repository.findPublishedVersion(new TenantId(1), 2, 2).orElseThrow().definition().id());
+        assertEquals(1, repository.findEmployee(2).orElseThrow().tenantId().value());
     }
 
     @Test
@@ -157,10 +185,11 @@ class JdbcAgentDefinitionRepositoryTest {
         jdbc.execute("CREATE TABLE digital_employee(id BIGINT PRIMARY KEY,tenant_id BIGINT NOT NULL,employee_code VARCHAR(64),display_name VARCHAR(128),enabled BOOLEAN,current_published_version_id BIGINT,row_version BIGINT)");
         jdbc.execute("CREATE TABLE capability_definition(capability_code VARCHAR(128) PRIMARY KEY,capability_type VARCHAR(24),status VARCHAR(24),updated_by BIGINT,updated_at TIMESTAMP,status_reason VARCHAR(500))");
         jdbc.execute("CREATE TABLE capability_revision(capability_revision_id BIGINT AUTO_INCREMENT UNIQUE,capability_code VARCHAR(128),revision VARCHAR(32),display_name VARCHAR(128),description VARCHAR(1000),tool_name VARCHAR(128),implementation_key VARCHAR(64),business_action VARCHAR(128),input_schema_json TEXT,requires_confirmation BOOLEAN DEFAULT FALSE,content_hash CHAR(64),PRIMARY KEY(capability_code,revision),UNIQUE(tool_name),FOREIGN KEY(capability_code) REFERENCES capability_definition(capability_code))");
-        jdbc.execute("CREATE TABLE agent_definition_draft(employee_id BIGINT PRIMARY KEY,draft_revision INT,instructions TEXT,model_provider VARCHAR(32),model_name VARCHAR(128),updated_by BIGINT,updated_at TIMESTAMP,FOREIGN KEY(employee_id) REFERENCES digital_employee(id))");
+        jdbc.execute("CREATE TABLE agent_definition_draft(employee_id BIGINT PRIMARY KEY,draft_revision INT,instructions TEXT,model_provider VARCHAR(32),model_name VARCHAR(128),configuration_json CLOB,updated_by BIGINT,updated_at TIMESTAMP,FOREIGN KEY(employee_id) REFERENCES digital_employee(id))");
         jdbc.execute("CREATE TABLE agent_definition_draft_capability(employee_id BIGINT,capability_code VARCHAR(128),capability_revision VARCHAR(32),position_no INT,PRIMARY KEY(employee_id,capability_code),FOREIGN KEY(employee_id) REFERENCES agent_definition_draft(employee_id),FOREIGN KEY(capability_code,capability_revision) REFERENCES capability_revision(capability_code,revision))");
-        jdbc.execute("CREATE TABLE agent_definition_version(id BIGINT AUTO_INCREMENT PRIMARY KEY,employee_id BIGINT,version_no INT,instructions TEXT,model_provider VARCHAR(32),model_name VARCHAR(128),content_hash CHAR(64),publish_request_id VARCHAR(128),published_by BIGINT,published_at TIMESTAMP,UNIQUE(employee_id,version_no),UNIQUE(employee_id,publish_request_id),FOREIGN KEY(employee_id) REFERENCES digital_employee(id))");
+        jdbc.execute("CREATE TABLE agent_definition_version(id BIGINT AUTO_INCREMENT PRIMARY KEY,employee_id BIGINT,version_no INT,instructions TEXT,model_provider VARCHAR(32),model_name VARCHAR(128),content_hash CHAR(64),configuration_json CLOB,publish_request_id VARCHAR(128),published_by BIGINT,published_at TIMESTAMP,UNIQUE(employee_id,version_no),UNIQUE(employee_id,publish_request_id),UNIQUE(employee_id,id),FOREIGN KEY(employee_id) REFERENCES digital_employee(id))");
         jdbc.execute("CREATE TABLE agent_definition_version_capability(definition_version_id BIGINT,capability_code VARCHAR(128),capability_revision VARCHAR(32),position_no INT,PRIMARY KEY(definition_version_id,capability_code),FOREIGN KEY(definition_version_id) REFERENCES agent_definition_version(id),FOREIGN KEY(capability_code,capability_revision) REFERENCES capability_revision(capability_code,revision))");
+        jdbc.execute("CREATE TABLE agent_definition_version_member(parent_definition_version_id BIGINT,member_role_id VARCHAR(64),member_employee_id BIGINT,member_definition_version_id BIGINT,member_steps INT,position_no INT,PRIMARY KEY(parent_definition_version_id,member_role_id),UNIQUE(parent_definition_version_id,position_no),FOREIGN KEY(parent_definition_version_id) REFERENCES agent_definition_version(id),FOREIGN KEY(member_employee_id,member_definition_version_id) REFERENCES agent_definition_version(employee_id,id))");
         jdbc.execute("CREATE TABLE agent_user_capability_grant(user_id BIGINT,capability_code VARCHAR(128),enabled BOOLEAN,updated_by BIGINT,updated_at TIMESTAMP,PRIMARY KEY(user_id,capability_code),FOREIGN KEY(capability_code) REFERENCES capability_definition(capability_code))");
         jdbc.execute("CREATE TABLE agent_definition_management_audit(id BIGINT AUTO_INCREMENT PRIMARY KEY,actor_user_id BIGINT,event_type VARCHAR(64),target_type VARCHAR(64),target_id VARCHAR(128),request_id VARCHAR(128),reason VARCHAR(500),previous_summary TEXT,new_summary TEXT,occurred_at TIMESTAMP)");
         jdbc.execute("CREATE TABLE agent_run(run_id VARCHAR(36) PRIMARY KEY)");
@@ -172,9 +201,9 @@ class JdbcAgentDefinitionRepositoryTest {
             jdbc.update("INSERT INTO capability_revision(capability_code,revision,display_name,description,tool_name,implementation_key,business_action,input_schema_json,requires_confirmation,content_hash) VALUES(?,?,?,?,?,?,?,?,?,?)",
                     code, "1", code, "测试能力", code.replace('.', '_'), "sample-v1", code, schema, code.endsWith("write"), "f".repeat(64));
         }
-        jdbc.update("INSERT INTO agent_definition_draft VALUES(1,1,'旧指令','openai','test-model',42,CURRENT_TIMESTAMP)");
+        jdbc.update("INSERT INTO agent_definition_draft(employee_id,draft_revision,instructions,model_provider,model_name,updated_by,updated_at) VALUES(1,1,'旧指令','openai','test-model',42,CURRENT_TIMESTAMP)");
         jdbc.update("INSERT INTO agent_definition_draft_capability VALUES(1,'sample.read','1',1),(1,'sample.write','1',2)");
-        jdbc.update("INSERT INTO agent_definition_version VALUES(1,1,1,'旧指令','openai','test-model',?,'bootstrap',42,CURRENT_TIMESTAMP)", "f".repeat(64));
+        jdbc.update("INSERT INTO agent_definition_version(id,employee_id,version_no,instructions,model_provider,model_name,content_hash,publish_request_id,published_by,published_at) VALUES(1,1,1,'旧指令','openai','test-model',?,'bootstrap',42,CURRENT_TIMESTAMP)", "f".repeat(64));
         jdbc.update("INSERT INTO agent_definition_version_capability VALUES(1,'sample.read','1',1),(1,'sample.write','1',2)");
         jdbc.update("UPDATE digital_employee SET current_published_version_id=1 WHERE id=1");
         jdbc.update("INSERT INTO agent_user_capability_grant VALUES(42,'sample.read',TRUE,42,CURRENT_TIMESTAMP),(42,'sample.write',TRUE,42,CURRENT_TIMESTAMP)");

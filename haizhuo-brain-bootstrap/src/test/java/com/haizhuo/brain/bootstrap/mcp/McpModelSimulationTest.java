@@ -10,6 +10,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.haizhuo.brain.infrastructure.mcp.McpCapabilityExecutor;
 import com.haizhuo.brain.infrastructure.mcp.SdkMcpRemoteClient;
 import com.haizhuo.brain.kernel.identity.RunId;
+import com.haizhuo.brain.kernel.json.CanonicalJson;
 import com.haizhuo.brain.kernel.identity.SessionId;
 import com.haizhuo.brain.kernel.identity.TenantId;
 import com.haizhuo.brain.kernel.identity.TraceId;
@@ -94,11 +95,15 @@ class McpModelSimulationTest {
                     CapabilityBinding.CapabilityType.MCP, "1", "读取便笺", "Read owned note",
                     "demo_note_read", "mcp-trusted-v1", "mcp.read", descriptor.inputSchema(), true, false);
 
+            String workspaceManifest = "{\"agents\":\"AGENTS.md\",\"knowledge\":[],"
+                    + "\"schemaVersion\":1,\"skills\":[],\"subagents\":[]}";
+            String workspaceContentHash = CanonicalJson.sha256(Map.of("instructions", "读取当前用户的便笺。",
+                    "manifestJson", workspaceManifest));
             var definition = new RuntimeDefinitionSnapshot(1L, "员工小卓", "读取当前用户的便笺。",
                     "openai", "test-model", 3, "mcp-model-bundle", "mcp-model-workspace",
-                    "mcp-model-content", List.of(new RuntimeToolSchema(7L, "mcp.demo.read",
-                            "demo_note_read", "Read owned note", descriptor.inputSchema(), true,
-                            false, "mcp.read")));
+                    workspaceContentHash, workspaceManifest,
+                    List.of(new RuntimeToolSchema(7L, "mcp.demo.read", "demo_note_read", "Read owned note",
+                            descriptor.inputSchema(), true, false, "mcp.read")), null, List.of());
             var model = new ReadNoteModel();
             var factory = new HarnessAgentFactory(new AgentScopeModelFactory(new AgentScopeRuntimeProperties(
                     "openai", "test-model", "test-key", "http://localhost", true, workspace.toString())),
@@ -118,7 +123,7 @@ class McpModelSimulationTest {
             var firstEvents = runtime.execute(request(runId, userId, definition, constraints, binding,
                     new UserPromptExecutionInput("读取我的便笺"))).collectList().block();
             assertTrue(firstEvents.stream().anyMatch(AgentToolSuspendedEvent.class::isInstance),
-                    "Harness must suspend the schema-only MCP tool");
+                    () -> "Harness must suspend the schema-only MCP tool; events=" + firstEvents);
             var suspended = firstEvents.stream().filter(AgentToolSuspendedEvent.class::isInstance)
                     .map(AgentToolSuspendedEvent.class::cast).findFirst().orElseThrow();
             assertFalse(firstEvents.stream().anyMatch(AgentRunCompletedEvent.class::isInstance));

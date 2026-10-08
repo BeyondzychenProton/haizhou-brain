@@ -27,7 +27,16 @@ public record AgentExecutionRequest(TenantId tenantId, UserId userId, SessionId 
         Objects.requireNonNull(constraints);
         Objects.requireNonNull(binding);
         Objects.requireNonNull(input);
-        if (binding.bridgeSnapshotHash() == null && !platformSessionId.value().equals(binding.harnessSessionKey()))
-            throw new IllegalArgumentException("Direct runtime session id must equal business session id");
+        switch (binding.identityMode()) {
+            case DIRECT -> {
+                if (!platformSessionId.value().equals(binding.harnessSessionKey()))
+                    throw new IllegalArgumentException("Direct runtime session id must equal business session id");
+            }
+            case ROLE_SLOT -> {
+                if (platformSessionId.value().equals(binding.harnessSessionKey()))
+                    throw new IllegalArgumentException("Role-slot runtime identity must use a server-owned isolated key");
+            }
+            case LEGACY_BRIDGE -> { /* Validated by RuntimeSessionBinding; only old sessions may use this mode. */ }
+        }
     }
 }

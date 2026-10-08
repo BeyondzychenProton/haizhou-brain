@@ -45,23 +45,32 @@ public class RunStreamController {
         this.realtimeEvents = realtimeEvents;
     }
 
-    @GetMapping(value = "/{runId}/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public Flux<ServerSentEvent<StreamEvent>> stream(
             @AuthenticationPrincipal AuthenticatedUser user,
             @PathVariable String runId,
             @RequestParam(required = false) Integer after,
             @RequestHeader(value = "Last-Event-ID", required = false) String lastEventId,
             ServerWebExchange exchange) {
+        return stream(user, runId, after, lastEventId, exchange, "v1");
+    }
+
+    @GetMapping(value = "/{runId}/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public Flux<ServerSentEvent<StreamEvent>> stream(
+            @AuthenticationPrincipal AuthenticatedUser user, @PathVariable String runId,
+            @RequestParam(required = false) Integer after,
+            @RequestHeader(value = "Last-Event-ID", required = false) String lastEventId,
+            ServerWebExchange exchange, @RequestParam(defaultValue = "v1") String format) {
+        boolean v2 = StreamEvent.isV2(format);
         exchange.getResponse().getHeaders().setCacheControl(CacheControl.noCache());
         exchange.getResponse().getHeaders().set("X-Accel-Buffering", "no");
 
         RunId id = new RunId(runId);
         int resumeAfter = Math.max(Math.max(after == null ? 0 : after, 0), parseLastEventId(lastEventId));
         return blocking(() -> sessions.getRun(id, user.userId()))
-                .flatMapMany(run -> eventStream(run, user, resumeAfter));
+                .flatMapMany(run -> eventStream(run, user, resumeAfter, v2));
     }
 
-    private Flux<ServerSentEvent<StreamEvent>> eventStream(AgentRun run, AuthenticatedUser user, int resumeAfter) {
+    private Flux<ServerSentEvent<StreamEvent>> eventStream(AgentRun run, AuthenticatedUser user, int resumeAfter, boolean v2) {
         RunId runId = run.id();
         AtomicInteger cursor = new AtomicInteger(resumeAfter);
         Flux<ServerSentEvent<StreamEvent>> durable = Flux
@@ -78,10 +87,10 @@ public class RunStreamController {
                 .flatMapIterable(events -> events)
                 .filter(event -> event.sequenceNo() > cursor.get())
                 .doOnNext(event -> cursor.accumulateAndGet(event.sequenceNo(), Math::max))
-                .map(event -> durableEvent(run.sessionId().value(), event));
+                .map(event -> durableEvent(run.sessionId().value(), event, v2));
 
         Flux<ServerSentEvent<StreamEvent>> transientEvents = realtimeEvents.stream(runId)
-                .map(RunStreamController::transientEvent);
+                .map(event -> transientEvent(event, v2));
 
         Flux<ServerSentEvent<StreamEvent>> heartbeats = Flux.interval(HEARTBEAT_INTERVAL)
                 .map(ignored -> ServerSentEvent.<StreamEvent>builder()
@@ -93,23 +102,32 @@ public class RunStreamController {
     }
 
     static ServerSentEvent<StreamEvent> durableEvent(String sessionId, RunEvent event) {
+        return durableEvent(sessionId, event, false);
+    }
+
+    static ServerSentEvent<StreamEvent> durableEvent(String sessionId, RunEvent event, boolean v2) {
         String messageId = switch (event.type()) {
             case "USER_INPUT" -> event.runId().value() + "-user-" + event.sequenceNo();
             case "RUN_COMPLETED" -> event.runId().value() + "-assistant";
             default -> null;
         };
-        StreamEvent response = new StreamEvent(1,
+        StreamEvent response = new StreamEvent(v2 ? 2 : 1,
                 event.runId().value() + ":" + event.sequenceNo(), sessionId, null, event.runId().value(),
                 event.sequenceNo(), null, null, event.type(), EventVisibility.USER.name(), "durable",
                 event.createdAt(),
-                new StreamEvent.Payload(messageId, messageId == null ? null : "text", null, event.content()));
+                new StreamEvent.Payload(messageId, messageId == null ? null : "text", null, event.content()),
+                StreamEvent.origin(event.metadata(), v2), v2 && event.metadata() != null ? event.metadata().resultId() : null);
         return ServerSentEvent.<StreamEvent>builder(response)
                 .id(Integer.toString(event.sequenceNo()))
                 .build();
     }
 
     static ServerSentEvent<StreamEvent> transientEvent(RunRealtimeEvent event) {
-        StreamEvent response = new StreamEvent(1,
+        return transientEvent(event, false);
+    }
+
+    static ServerSentEvent<StreamEvent> transientEvent(RunRealtimeEvent event, boolean v2) {
+        StreamEvent response = new StreamEvent(v2 ? 2 : 1,
                 event.runId().value() + ":" + event.attemptId() + ":stream:" + event.streamOffset(),
                 event.sessionId().value(), null, event.runId().value(), null, event.attemptId(),
                 event.streamOffset(), event.type(), EventVisibility.USER.name(), "transient",

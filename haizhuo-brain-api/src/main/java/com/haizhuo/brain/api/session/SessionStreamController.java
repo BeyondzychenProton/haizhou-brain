@@ -46,52 +46,85 @@ public class SessionStreamController {
         this.realtimeEvents = realtimeEvents;
     }
 
-    @GetMapping("/{sessionId}/events")
     public Mono<SessionEventPageResponse> events(@AuthenticationPrincipal AuthenticatedUser user,
                                                  @PathVariable String sessionId,
                                                  @RequestParam(defaultValue = "0") long after,
                                                  @RequestParam(defaultValue = "200") int limit) {
+        return events(user, sessionId, after, limit, "v1");
+    }
+
+    @GetMapping("/{sessionId}/events")
+    public Mono<SessionEventPageResponse> events(@AuthenticationPrincipal AuthenticatedUser user,
+                                               @PathVariable String sessionId,
+                                               @RequestParam(defaultValue = "0") long after,
+                                               @RequestParam(defaultValue = "200") int limit,
+                                               @RequestParam(defaultValue = "v1") String format) {
+        boolean v2 = StreamEvent.isV2(format);
         return RunStreamController.blocking(() -> {
             SessionEventPage page = sessions.sessionEventPage(new SessionId(sessionId), user.userId(), after, limit);
             return new SessionEventPageResponse(page.events().stream()
-                    .map(SessionStreamController::envelope)
-                    .toList(), page.cursorFloor(), page.cursorExpired());
+                    .map(event -> envelope(event, v2))
+                    .toList(), page.cursorFloor(), page.cursorExpired(), page.nextCursor());
         });
     }
 
-    @GetMapping(value = "/{sessionId}/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public Flux<ServerSentEvent<StreamEvent>> stream(
             @AuthenticationPrincipal AuthenticatedUser user,
             @PathVariable String sessionId,
             @RequestParam(required = false) Long after,
             @RequestHeader(value = "Last-Event-ID", required = false) String lastEventId,
             ServerWebExchange exchange) {
+        return stream(user, sessionId, after, lastEventId, exchange, "v1");
+    }
+
+    @GetMapping(value = "/{sessionId}/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public Flux<ServerSentEvent<StreamEvent>> stream(
+            @AuthenticationPrincipal AuthenticatedUser user, @PathVariable String sessionId,
+            @RequestParam(required = false) Long after,
+            @RequestHeader(value = "Last-Event-ID", required = false) String lastEventId,
+            ServerWebExchange exchange, @RequestParam(defaultValue = "v1") String format) {
+        boolean v2 = StreamEvent.isV2(format);
         exchange.getResponse().getHeaders().setCacheControl(CacheControl.noCache());
         exchange.getResponse().getHeaders().set("X-Accel-Buffering", "no");
 
         SessionId id = new SessionId(sessionId);
         long resumeAfter = Math.max(after == null ? 0 : after, parseLastEventId(lastEventId));
         return RunStreamController.blocking(() -> sessions.get(id, user.userId()))
-                .flatMapMany(session -> eventStream(id, user, resumeAfter));
+                .flatMapMany(session -> eventStream(id, user, resumeAfter, v2));
     }
 
     private Flux<ServerSentEvent<StreamEvent>> eventStream(SessionId sessionId, AuthenticatedUser user,
-                                                           long resumeAfter) {
+                                                           long resumeAfter, boolean v2) {
         AtomicLong cursor = new AtomicLong(resumeAfter);
         Flux<ServerSentEvent<StreamEvent>> durable = Flux
                 .interval(Duration.ZERO, DATABASE_POLL_INTERVAL)
                 .onBackpressureDrop()
-                .concatMap(ignored -> RunStreamController.blocking(() -> sessions.sessionEventsOfOwnedSession(
+                .concatMap(ignored -> RunStreamController.blocking(() -> sessions.sessionEventPageOfOwnedSession(
                                 sessionId, user.userId(), cursor.get(), BATCH_SIZE))
                         .retryWhen(Retry.backoff(DATABASE_MAX_RETRIES, DATABASE_RETRY_MIN_BACKOFF)
-                                .maxBackoff(DATABASE_RETRY_MAX_BACKOFF)))
-                .flatMapIterable(events -> events)
-                .filter(event -> event.sessionCursor() > cursor.get())
-                .doOnNext(event -> cursor.accumulateAndGet(event.sessionCursor(), Math::max))
-                .map(SessionStreamController::durableEvent);
+                                .maxBackoff(DATABASE_RETRY_MAX_BACKOFF))
+                        .flatMapMany(page -> {
+                    if (page.cursorExpired()) {
+                        StreamEvent expired = new StreamEvent(v2 ? 2 : 1,
+                                sessionId.value() + ":cursor-expired", sessionId.value(), null, null,
+                                null, null, null, "SESSION_CURSOR_EXPIRED", "USER", "control",
+                                java.time.Instant.now(), new StreamEvent.Payload(null, null, null, null,
+                                java.util.Map.of("cursorFloor", page.cursorFloor(), "snapshotUrl",
+                                        "/api/v1/sessions/" + sessionId.value() + "/snapshot")));
+                        return Flux.just(ServerSentEvent.builder(expired).build());
+                    }
+                    if (page.events().isEmpty()) {
+                        cursor.accumulateAndGet(page.nextCursor(), Math::max);
+                    }
+                    return Flux.fromIterable(page.events())
+                            .filter(event -> event.sessionCursor() > cursor.get())
+                            .doOnNext(event -> cursor.accumulateAndGet(event.sessionCursor(), Math::max))
+                            .map(event -> durableEvent(event, v2));
+                }))
+                .takeUntil(event -> event.data() != null && "SESSION_CURSOR_EXPIRED".equals(event.data().type()));
 
         Flux<ServerSentEvent<StreamEvent>> transientEvents = realtimeEvents.streamBySession(sessionId)
-                .map(RunStreamController::transientEvent);
+                .map(event -> RunStreamController.transientEvent(event, v2));
 
         Flux<ServerSentEvent<StreamEvent>> heartbeats = Flux.interval(HEARTBEAT_INTERVAL)
                 .map(ignored -> ServerSentEvent.<StreamEvent>builder()
@@ -99,20 +132,26 @@ public class SessionStreamController {
                         .build());
 
         // 会话流跨 Run 保持开放，因此不按某个 Run 的终态结束；断线由客户端退避重连并按游标补读。
-        return Flux.merge(durable, transientEvents, heartbeats);
+        return Flux.merge(durable, transientEvents, heartbeats)
+                .takeUntil(event -> event.data() != null && "SESSION_CURSOR_EXPIRED".equals(event.data().type()));
     }
 
     static StreamEvent envelope(SessionEvent event) {
-        return new StreamEvent(1,
+        return envelope(event, false);
+    }
+
+    static StreamEvent envelope(SessionEvent event, boolean v2) {
+        return new StreamEvent(v2 ? 2 : 1,
                 event.sessionId().value() + ":" + event.sessionCursor(), event.sessionId().value(),
                 event.sessionCursor(), event.runId() == null ? null : event.runId().value(), event.runSequence(),
                 null, null, event.type(), visibility(event), "durable", event.createdAt(),
                 new StreamEvent.Payload(messageId(event), messageId(event) == null ? null : "text", null,
-                        event.content()));
+                        event.content()), StreamEvent.origin(event.metadata(), v2),
+                v2 && event.metadata() != null ? event.metadata().resultId() : null);
     }
 
-    private static ServerSentEvent<StreamEvent> durableEvent(SessionEvent event) {
-        return ServerSentEvent.<StreamEvent>builder(envelope(event))
+    private static ServerSentEvent<StreamEvent> durableEvent(SessionEvent event, boolean v2) {
+        return ServerSentEvent.<StreamEvent>builder(envelope(event, v2))
                 .id(Long.toString(event.sessionCursor()))
                 .build();
     }

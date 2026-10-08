@@ -1,10 +1,13 @@
 package com.haizhuo.brain.infrastructure.tool;
 
 import com.haizhuo.brain.kernel.identity.RunId;
+import com.haizhuo.brain.infrastructure.run.JdbcRunEventAppender;
+import com.haizhuo.brain.infrastructure.session.JdbcSessionEventProjector;
 import com.haizhuo.brain.kernel.identity.SessionId;
 import com.haizhuo.brain.kernel.identity.UserId;
 import com.haizhuo.brain.platform.run.AgentRun;
 import com.haizhuo.brain.platform.run.RunState;
+import com.haizhuo.brain.runtime.api.model.RuntimeProfile;
 import com.haizhuo.brain.platform.tool.ClaimedToolExecution;
 import com.haizhuo.brain.platform.tool.PlatformToolExecution;
 import com.haizhuo.brain.platform.tool.ResultDeliveryState;
@@ -32,9 +35,15 @@ public class JdbcToolExecutionRepository implements ToolExecutionRepository {
             + "result_delivery_state,error_code,created_at,updated_at";
 
     private final JdbcTemplate jdbc;
+    private final JdbcRunEventAppender events;
 
     public JdbcToolExecutionRepository(JdbcTemplate jdbc) {
+        this(jdbc,new JdbcRunEventAppender(jdbc,new JdbcSessionEventProjector(jdbc)));
+    }
+    @org.springframework.beans.factory.annotation.Autowired
+    public JdbcToolExecutionRepository(JdbcTemplate jdbc, JdbcRunEventAppender events) {
         this.jdbc = jdbc;
+        this.events = events;
     }
 
     @Override
@@ -69,28 +78,36 @@ public class JdbcToolExecutionRepository implements ToolExecutionRepository {
         List<ClaimedToolExecution> claimed = jdbc.query(
                 "SELECT e." + COLUMNS.replace(",", ",e.") + ","
                         + "r.session_id,r.user_id,r.employee_id,r.definition_version_id,r.client_request_id,"
-                        + "r.input_digest,r.state run_state,r.created_at run_created_at,r.started_at,r.finished_at "
+                        + "r.input_digest,r.state run_state,r.runtime_profile run_runtime_profile,r.created_at run_created_at,r.started_at,r.finished_at "
                         + "FROM platform_tool_execution e JOIN platform_agent_run r ON r.run_id=e.run_id "
-                        + "WHERE e.state IN ('REQUESTED','APPROVED') ORDER BY e.created_at,e.tool_execution_id LIMIT 1 "
-                        + "FOR UPDATE SKIP LOCKED",
+                        + "WHERE e.state IN ('REQUESTED','APPROVED') AND r.state IN ('WAITING_TOOL','WAITING_CONFIRMATION') "
+                        + "ORDER BY e.created_at,e.tool_execution_id LIMIT 32",
                 (rs, n) -> new ClaimedToolExecution(map(rs), mapRun(rs)));
-        if (claimed.isEmpty()) return Optional.empty();
-        PlatformToolExecution execution = claimed.get(0).execution();
-        Instant now = Instant.now();
-        jdbc.update("UPDATE platform_tool_execution SET state='EXECUTING',updated_at=? WHERE tool_execution_id=? AND state IN ('REQUESTED','APPROVED')",
-                Timestamp.from(now), execution.id());
-        return findById(execution.id()).map(updated -> new ClaimedToolExecution(updated, claimed.get(0).run()));
+        for (ClaimedToolExecution candidate : claimed) {
+            PlatformToolExecution execution = candidate.execution();
+            if (events.tryLockRun(execution.runId()) == null) continue;
+            String state = jdbc.queryForObject("SELECT state FROM platform_agent_run WHERE run_id=? FOR UPDATE",String.class,execution.runId().value());
+            if (!java.util.Set.of("WAITING_TOOL","WAITING_CONFIRMATION").contains(state)) continue;
+            if (jdbc.update("UPDATE platform_tool_execution SET state='EXECUTING',updated_at=? WHERE tool_execution_id=? AND run_id=? AND state IN ('REQUESTED','APPROVED')",
+                    Timestamp.from(Instant.now()),execution.id(),execution.runId().value()) == 1)
+                return findById(execution.id()).map(updated -> new ClaimedToolExecution(updated,candidate.run()));
+        }
+        return Optional.empty();
     }
 
     @Override
     @Transactional
     public void completeExecution(PlatformToolExecution outcome) {
+        if (events.lockRun(outcome.runId()) == null) throw new IllegalStateException("Tool run missing");
+        if (!java.util.Set.of(ToolExecutionState.SUCCEEDED,ToolExecutionState.FAILED,ToolExecutionState.DENIED,
+                ToolExecutionState.RECONCILIATION_REQUIRED).contains(outcome.state()))
+            throw new IllegalArgumentException("Tool result must be terminal");
         Instant now = Instant.now();
         int updated = jdbc.update("UPDATE platform_tool_execution SET state=?,result_json=?,result_digest=?,"
                         + "result_delivery_state='READY',error_code=?,external_receipt=?,updated_at=? "
-                        + "WHERE tool_execution_id=? AND state='EXECUTING'",
+                        + "WHERE tool_execution_id=? AND run_id=? AND state='EXECUTING'",
                 outcome.state().name(), outcome.resultJson(), outcome.resultDigest(), outcome.errorCode(),
-                outcome.externalReceipt(), Timestamp.from(now), outcome.id());
+                outcome.externalReceipt(), Timestamp.from(now), outcome.id(),outcome.runId().value());
         if (updated != 1) {
             throw new IllegalStateException("Tool execution is no longer executing: " + outcome.id());
         }
@@ -101,6 +118,7 @@ public class JdbcToolExecutionRepository implements ToolExecutionRepository {
     @Override
     @Transactional
     public void requeueRunIfSettled(RunId runId) {
+        if (events.lockRun(runId) == null) return;
         Integer open = jdbc.queryForObject("SELECT COUNT(*) FROM platform_tool_execution WHERE run_id=? AND state IN ('REQUESTED','APPROVAL_REQUIRED','APPROVED','EXECUTING')",
                 Integer.class, runId.value());
         if (open != null && open == 0) {
@@ -114,10 +132,7 @@ public class JdbcToolExecutionRepository implements ToolExecutionRepository {
     }
 
     void appendEvent(RunId runId, String type, String content, Instant now) {
-        jdbc.queryForObject("SELECT run_id FROM platform_agent_run WHERE run_id=? FOR UPDATE", String.class, runId.value());
-        jdbc.update("INSERT INTO platform_agent_run_event(run_id,sequence_no,event_type,content,created_at) "
-                        + "SELECT ?,COALESCE(MAX(sequence_no),0)+1,?,?,? FROM platform_agent_run_event WHERE run_id=?",
-                runId.value(), type, content, Timestamp.from(now), runId.value());
+        events.append(runId,type,content,now);
     }
 
     private PlatformToolExecution map(ResultSet rs) throws SQLException {
@@ -139,6 +154,7 @@ public class JdbcToolExecutionRepository implements ToolExecutionRepository {
                 rs.getString("client_request_id"), rs.getString("input_digest"),
                 RunState.valueOf(rs.getString("run_state")),
                 rs.getTimestamp("run_created_at").toInstant(),
-                startedAt == null ? null : startedAt.toInstant(), finishedAt == null ? null : finishedAt.toInstant());
+                startedAt == null ? null : startedAt.toInstant(), finishedAt == null ? null : finishedAt.toInstant(),
+                RuntimeProfile.valueOf(rs.getString("run_runtime_profile")));
     }
 }

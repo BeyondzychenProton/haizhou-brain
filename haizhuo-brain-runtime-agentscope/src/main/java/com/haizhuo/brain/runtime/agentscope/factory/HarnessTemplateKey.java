@@ -26,7 +26,7 @@ public record HarnessTemplateKey(String value) {
             "memoryHooksEnabled", false,
             "memoryToolsEnabled", false,
             "shellToolEnabled", false,
-            "subagentsEnabled", false));
+            "subagentsEnabled", "profile-scoped-fixed-experts"));
 
     public HarnessTemplateKey {
         Objects.requireNonNull(value);

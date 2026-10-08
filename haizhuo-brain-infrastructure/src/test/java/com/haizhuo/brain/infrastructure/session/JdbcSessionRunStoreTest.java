@@ -18,9 +18,14 @@ import com.haizhuo.brain.kernel.identity.UserId;
 import com.haizhuo.brain.platform.run.AgentRun;
 import com.haizhuo.brain.platform.run.HarnessRunSpec;
 import com.haizhuo.brain.platform.run.RunEvent;
+import com.haizhuo.brain.platform.run.RunExecutionMode;
+import com.haizhuo.brain.platform.run.RunExecutionTarget;
+import com.haizhuo.brain.platform.run.RunResultReference;
 import com.haizhuo.brain.platform.run.RunGuidance;
 import com.haizhuo.brain.platform.run.RunState;
+import com.haizhuo.brain.runtime.api.model.RuntimeProfile;
 import com.haizhuo.brain.platform.session.AgentSession;
+import com.haizhuo.brain.platform.session.SessionRoleSlot;
 import com.haizhuo.brain.runtime.api.RunGuidanceMessage;
 import java.sql.Timestamp;
 import java.time.Instant;
@@ -49,7 +54,8 @@ class JdbcSessionRunStoreTest {
         createRunAndToolTables(jdbc);
         createSessionAndGuidanceTables(jdbc);
         createSessionEventTable(jdbc);
-        store = new JdbcSessionRunStore(jdbc, new JdbcSessionEventProjector(jdbc));
+        store = com.haizhuo.brain.infrastructure.support.HarnessJdbcTestSupport.transactional(
+                new JdbcSessionRunStore(jdbc, new JdbcSessionEventProjector(jdbc)), jdbc);
     }
 
     @Test
@@ -90,6 +96,109 @@ class JdbcSessionRunStoreTest {
         assertEquals("帮我查一下会议室", events.get(0).content());
         AgentSession session = store.findSession(SESSION, OWNER).orElseThrow();
         assertEquals(1, session.rowVersion(), "创建 Run 应推进会话版本");
+    }
+
+    @Test
+    void roleSlotAndRunExecutorAreDurableAndOwnerScoped() {
+        store.createSession(new AgentSession(SESSION, OWNER, 1L, AgentSession.Status.ACTIVE, T0, T0, 0, 10L, false));
+        SessionRoleSlot proposal = new SessionRoleSlot("slot-1", SESSION, OWNER, "researcher", 2L, 20L,
+                "native-session-1", "workspace-1", T0);
+
+        SessionRoleSlot created = store.createRoleSlot(proposal);
+        SessionRoleSlot replay = store.createRoleSlot(new SessionRoleSlot("different-id", SESSION, OWNER,
+                "researcher", 2L, 20L, "different-native-session", "different-workspace", T0.plusSeconds(1)));
+        assertEquals(proposal, created);
+        assertEquals(proposal, replay, "同一 frozen role 重用同一组 AgentScope state 与 workspace 键");
+
+        RunExecutionTarget target = new RunExecutionTarget(RunExecutionMode.DIRECT,
+                "researcher", 2L, 20L, created.id());
+        AgentRun run = new AgentRun(new RunId("run-role"), SESSION, OWNER, 1L, 10L,
+                "req-role", "digest-role", RunState.QUEUED, T0, null, null, RuntimeProfile.TEAM_READONLY);
+        store.createRun(run, "以研究员回答", runSpec("run-role", 20L), target);
+
+        assertEquals(target, store.findExecutionTarget(run.id(), OWNER).orElseThrow());
+        assertEquals(created, store.findRoleSlot(SESSION, OWNER, "researcher").orElseThrow());
+        assertTrue(store.findExecutionTarget(run.id(), new UserId(99)).isEmpty());
+        assertThrows(IllegalStateException.class, () -> store.createRun(
+                new AgentRun(new RunId("run-role-replay"), SESSION, OWNER, 1L, 10L,
+                        "req-role", "digest-role", RunState.QUEUED, T0.plusSeconds(1), null, null,
+                        RuntimeProfile.TEAM_READONLY), "以研究员回答", runSpec("run-role-replay", 20L),
+                new RunExecutionTarget(RunExecutionMode.DIRECT, "reviewer", 3L, 30L, "slot-2")));
+        assertEquals(1, jdbc.queryForObject("SELECT COUNT(*) FROM platform_agent_run_execution_target", Integer.class));
+    }
+
+    @Test
+    void freezesOnlyCompletedSameSessionVisibleResultReferencesWithTheRun() {
+        store.createSession(new AgentSession(SESSION, OWNER, 1L, AgentSession.Status.ACTIVE, T0, T0, 0));
+        AgentRun source = store.createRun(newRun("run-source", "req-source", "digest-source"),
+                "源输入", runSpec("run-source"));
+        jdbc.update("UPDATE platform_agent_run SET state='SUCCEEDED' WHERE run_id=?", source.id().value());
+        String hash = "a".repeat(64);
+        jdbc.update("INSERT INTO platform_agent_result(result_id,run_id,result_key,kind,visibility,body,body_sha256,created_at) "
+                        + "VALUES('result-source',?,'k-source','ROOT_FINAL','USER','完整可见结果',?,?)",
+                source.id().value(), hash, Timestamp.from(T0));
+
+        AgentRun accepted = newRun("run-with-reference", "req-reference", "digest-reference");
+        RunExecutionTarget target = RunExecutionTarget.coordinator(accepted.employeeId(), accepted.definitionVersionId());
+        store.createRun(accepted, "引用该结论", runSpec(accepted.id().value()), target,
+                List.of(new RunResultReference("result-source", source.id(), hash)));
+
+        assertEquals(1, jdbc.queryForObject("SELECT COUNT(*) FROM platform_agent_run_result_reference "
+                + "WHERE run_id=? AND result_id='result-source' AND source_run_id=? AND body_sha256=?",
+                Integer.class, accepted.id().value(), source.id().value(), hash));
+        AgentRun activeSource = store.createRun(newRun("run-active-source", "req-active-source", "digest-active-source"),
+                "尚未完成的源请求", runSpec("run-active-source"));
+        jdbc.update("INSERT INTO platform_agent_result(result_id,run_id,result_key,kind,visibility,body,body_sha256,created_at) "
+                        + "VALUES('result-active',?,'k-active','ROOT_FINAL','USER','尚未完成的结果',?,?)",
+                activeSource.id().value(), hash, Timestamp.from(T0));
+        AgentRun rejected = newRun("run-active-reference", "req-active-reference", "digest-active-reference");
+        assertThrows(IllegalArgumentException.class, () -> store.createRun(rejected, "引用未完成结果",
+                runSpec("run-active-reference"), RunExecutionTarget.coordinator(rejected.employeeId(), rejected.definitionVersionId()),
+                List.of(new RunResultReference("result-active", activeSource.id(), hash))));
+        assertEquals(3, jdbc.queryForObject("SELECT COUNT(*) FROM platform_agent_run", Integer.class),
+                "引用拒绝必须回滚 Run、RunSpec 与事件，不得留下半条受理记录");
+        assertEquals(1, jdbc.queryForObject("SELECT COUNT(*) FROM platform_agent_run_result_reference", Integer.class));
+    }
+
+    @Test
+    void resultReferenceInsertFailureRollsBackRunSpecTargetAndEvents() {
+        store.createSession(new AgentSession(SESSION, OWNER, 1L, AgentSession.Status.ACTIVE, T0, T0, 0));
+        AgentRun source = store.createRun(newRun("run-source", "req-source", "digest-source"),
+                "源输入", runSpec("run-source"));
+        jdbc.update("UPDATE platform_agent_run SET state='SUCCEEDED' WHERE run_id=?", source.id().value());
+        String hash = "b".repeat(64);
+        jdbc.update("INSERT INTO platform_agent_result(result_id,run_id,result_key,kind,visibility,body,body_sha256,created_at) "
+                        + "VALUES('result-source',?,'k-source','ROOT_FINAL','USER','完整可见结果',?,?)",
+                source.id().value(), hash, Timestamp.from(T0));
+        jdbc.execute("ALTER TABLE platform_agent_run_result_reference ADD CONSTRAINT ck_reject_reference CHECK(reference_order < 0)");
+
+        AgentRun rejected = newRun("run-rejected", "req-rejected", "digest-rejected");
+        RunExecutionTarget target = RunExecutionTarget.coordinator(rejected.employeeId(), rejected.definitionVersionId());
+        assertThrows(org.springframework.dao.DataIntegrityViolationException.class, () -> store.createRun(rejected,
+                "引用该结论", runSpec(rejected.id().value()), target,
+                List.of(new RunResultReference("result-source", source.id(), hash))));
+
+        assertEquals(1, jdbc.queryForObject("SELECT COUNT(*) FROM platform_agent_run", Integer.class));
+        assertEquals(1, jdbc.queryForObject("SELECT COUNT(*) FROM platform_agent_run_spec", Integer.class));
+        assertEquals(1, jdbc.queryForObject("SELECT COUNT(*) FROM platform_agent_run_execution_target", Integer.class),
+                "唯一的目标记录属于已存在的源 Run");
+        assertEquals(0, jdbc.queryForObject("SELECT COUNT(*) FROM platform_agent_run_event WHERE run_id='run-rejected'", Integer.class));
+        assertEquals(0, jdbc.queryForObject("SELECT COUNT(*) FROM platform_agent_run_result_reference", Integer.class));
+    }
+
+    @Test
+    void runRuntimeProfileIsFrozenAndRoundTrips() {
+        store.createSession(new AgentSession(SESSION, OWNER, 1L, AgentSession.Status.ACTIVE, T0, T0, 0, 1L, false));
+        AgentRun run = new AgentRun(new RunId("run-skilled"), SESSION, OWNER, 1L, 1L,
+                "req-skilled", "digest-skilled", RunState.QUEUED, T0, null, null, RuntimeProfile.SINGLE_SKILLED);
+
+        AgentRun created = store.createRun(run, "技能请求", runSpec("run-skilled"));
+
+        assertEquals(RuntimeProfile.SINGLE_SKILLED, created.runtimeProfile());
+        assertEquals(RuntimeProfile.SINGLE_SKILLED, store.findRun(run.id(), OWNER).orElseThrow().runtimeProfile());
+        assertEquals(RuntimeProfile.SINGLE_SKILLED, store.findRuns(SESSION, OWNER, 10).get(0).runtimeProfile());
+        assertEquals("SINGLE_SKILLED", jdbc.queryForObject(
+                "SELECT runtime_profile FROM platform_agent_run WHERE run_id='run-skilled'", String.class));
     }
 
     @Test
@@ -249,7 +358,11 @@ class JdbcSessionRunStoreTest {
     }
 
     private static HarnessRunSpec runSpec(String runId) {
-        return new HarnessRunSpec(new RunId(runId), 1L, 1L, "b".repeat(64),
+        return runSpec(runId, 1L);
+    }
+
+    private static HarnessRunSpec runSpec(String runId, long definitionVersionId) {
+        return new HarnessRunSpec(new RunId(runId), definitionVersionId, 1L, "b".repeat(64),
                 "[\"meeting_room_search\"]", "t".repeat(64), "e".repeat(64), null, Instant.now());
     }
 

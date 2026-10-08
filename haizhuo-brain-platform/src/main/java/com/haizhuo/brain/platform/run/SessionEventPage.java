@@ -10,5 +10,10 @@ import java.util.List;
  * 中间事件已被裁剪，续传会静默丢事件，客户端必须丢弃本地游标并转全量快照恢复。
  * 该状态必须显式返回，因为"空批次"与"确实没有新事件"在载荷上无法区分。</p>
  */
-public record SessionEventPage(List<SessionEvent> events, long cursorFloor, boolean cursorExpired) {
+public record SessionEventPage(List<SessionEvent> events, long cursorFloor, boolean cursorExpired, long nextCursor) {
+    public SessionEventPage { events = List.copyOf(events); }
+    public SessionEventPage(List<SessionEvent> events, long cursorFloor, boolean cursorExpired) {
+        this(events, cursorFloor, cursorExpired,
+                events.stream().mapToLong(SessionEvent::sessionCursor).max().orElse(0L));
+    }
 }

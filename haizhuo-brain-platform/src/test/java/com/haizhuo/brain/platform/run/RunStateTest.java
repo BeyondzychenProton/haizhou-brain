@@ -13,9 +13,11 @@ class RunStateTest {
         assertTrue(RunState.WAITING_TOOL.active());
         assertTrue(RunState.WAITING_CONFIRMATION.active());
         assertTrue(RunState.CANCELLING.active());
+        assertTrue(RunState.RECOVERY_REQUIRED.active());
         assertFalse(RunState.SUCCEEDED.active());
         assertFalse(RunState.FAILED.active());
         assertFalse(RunState.CANCELLED.active());
+        assertFalse(RunState.TERMINATED.active());
         assertFalse(RunState.EXPIRED.active());
     }
 }

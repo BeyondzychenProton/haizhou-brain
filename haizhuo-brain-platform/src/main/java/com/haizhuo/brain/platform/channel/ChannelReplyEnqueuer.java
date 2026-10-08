@@ -13,6 +13,11 @@ public interface ChannelReplyEnqueuer {
 
     void enqueueReply(RunId runId, SessionId sessionId, String text);
 
+    /** 只在根结算的当前事务调用；resultId 指向不可变完整正文。 */
+    default void enqueueResult(RunId runId, SessionId sessionId, String resultId, String text) {
+        enqueueReply(runId,sessionId,text);
+    }
+
     /** 未接入渠道时的默认实现：不产生任何投递。 */
     ChannelReplyEnqueuer NOOP = (runId, sessionId, text) -> { };
 }

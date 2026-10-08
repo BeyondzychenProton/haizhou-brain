@@ -23,6 +23,12 @@ public class HarnessTemplateCache {
         return cache.computeIfAbsent(key.value(), ignored -> factory.build(definition, key));
     }
 
+    /** A Run-scoped native subagent tool registry must not be shared across Sessions. */
+    public HarnessRuntimeTemplate buildForRun(RuntimeDefinitionSnapshot definition) {
+        HarnessTemplateKey key = HarnessTemplateKey.from(definition);
+        return factory.build(definition, key);
+    }
+
     /** 仅供测试观察缓存规模。 */
     public int size() {
         return cache.size();

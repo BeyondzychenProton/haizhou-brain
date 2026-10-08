@@ -9,7 +9,12 @@ import java.util.Objects;
  * 平台负责持久化这些调用、释放 worker 租约，并在工具结果落库后恢复该 Run。
  */
 public record AgentToolSuspendedEvent(RunId runId, String replyId,
-                                      List<PendingExternalToolCall> toolCalls) implements BrainAgentEvent {
+                                      List<PendingExternalToolCall> toolCalls,
+                                      AgentEventDescriptor descriptor) implements BrainAgentEvent {
+    public AgentToolSuspendedEvent(RunId runId, String replyId, List<PendingExternalToolCall> toolCalls) {
+        this(runId, replyId, toolCalls, null);
+    }
+
     public AgentToolSuspendedEvent {
         Objects.requireNonNull(runId);
         toolCalls = List.copyOf(Objects.requireNonNull(toolCalls));

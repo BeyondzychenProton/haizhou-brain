@@ -10,9 +10,18 @@ import com.haizhuo.brain.platform.run.EventVisibility;
 import com.haizhuo.brain.platform.run.RunEvent;
 import com.haizhuo.brain.platform.run.SessionEvent;
 import com.haizhuo.brain.platform.run.SessionRunStore;
+import com.haizhuo.brain.platform.run.RunExecutionMode;
+import com.haizhuo.brain.platform.run.RunExecutionTarget;
+import com.haizhuo.brain.platform.run.RunResultReference;
 import com.haizhuo.brain.platform.run.SessionTimelineItem;
 import com.haizhuo.brain.platform.run.RunGuidance;
+import com.haizhuo.brain.platform.run.SessionEventPage;
+import com.haizhuo.brain.platform.run.SessionSnapshot;
+import com.haizhuo.brain.infrastructure.run.JdbcRunEventAppender;
+import com.haizhuo.brain.infrastructure.run.JdbcEventMetadata;
 import com.haizhuo.brain.platform.session.AgentSession;
+import com.haizhuo.brain.platform.session.SessionRoleSlot;
+import com.haizhuo.brain.runtime.api.model.RuntimeProfile;
 import com.haizhuo.brain.runtime.api.RunControlInbox;
 import com.haizhuo.brain.runtime.api.RunGuidanceMessage;
 import java.sql.Timestamp;
@@ -28,11 +37,15 @@ import org.springframework.transaction.annotation.Transactional;
 @Repository
 public class JdbcSessionRunStore implements SessionRunStore, RunControlInbox {
     private final JdbcTemplate jdbc;
-    private final JdbcSessionEventProjector sessionEvents;
+    private final JdbcRunEventAppender events;
 
     public JdbcSessionRunStore(JdbcTemplate jdbc, JdbcSessionEventProjector sessionEvents) {
+        this(jdbc,new JdbcRunEventAppender(jdbc,sessionEvents));
+    }
+    @org.springframework.beans.factory.annotation.Autowired
+    public JdbcSessionRunStore(JdbcTemplate jdbc, JdbcRunEventAppender events) {
         this.jdbc = jdbc;
-        this.sessionEvents = sessionEvents;
+        this.events = events;
     }
 
     @Override
@@ -49,6 +62,45 @@ public class JdbcSessionRunStore implements SessionRunStore, RunControlInbox {
                 (rs, row) -> new AgentSession(new SessionId(rs.getString("session_id")), new UserId(rs.getLong("user_id")), rs.getLong("employee_id"),
                         AgentSession.Status.valueOf(rs.getString("status")), instant(rs.getTimestamp("created_at")), instant(rs.getTimestamp("last_active_at")), rs.getLong("row_version"), rs.getObject("definition_version_id", Long.class), rs.getBoolean("legacy_runtime")),
                 sessionId.value(), owner.value()).stream().findFirst();
+    }
+
+    @Override @Transactional
+    public SessionRoleSlot createRoleSlot(SessionRoleSlot proposed) {
+        var sessions = jdbc.query("SELECT status FROM platform_agent_session WHERE session_id=? AND user_id=? FOR UPDATE",
+                (rs, row) -> rs.getString(1), proposed.sessionId().value(), proposed.userId().value());
+        if (sessions.isEmpty()) throw new IllegalArgumentException("Owned Session was not found");
+        if (!"ACTIVE".equals(sessions.get(0))) throw new IllegalStateException("Session is closed");
+        Optional<SessionRoleSlot> existing = findRoleSlot(proposed.sessionId(), proposed.userId(), proposed.roleId());
+        if (existing.isPresent()) {
+            SessionRoleSlot slot = existing.get();
+            if (slot.employeeId() != proposed.employeeId()
+                    || slot.definitionVersionId() != proposed.definitionVersionId())
+                throw new IllegalStateException("Session role slot conflicts with the frozen role definition");
+            return slot;
+        }
+        jdbc.update("INSERT INTO platform_session_role_slot(slot_id,session_id,user_id,role_id,employee_id,"
+                        + "definition_version_id,harness_session_key,workspace_runtime_key,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                proposed.id(), proposed.sessionId().value(), proposed.userId().value(), proposed.roleId(),
+                proposed.employeeId(), proposed.definitionVersionId(), proposed.harnessSessionKey(),
+                proposed.workspaceRuntimeKey(), Timestamp.from(proposed.createdAt()));
+        return proposed;
+    }
+
+    @Override
+    public Optional<SessionRoleSlot> findRoleSlot(SessionId sessionId, UserId owner, String roleId) {
+        return jdbc.query("SELECT slot.* FROM platform_session_role_slot slot JOIN platform_agent_session session "
+                        + "ON session.session_id=slot.session_id WHERE slot.session_id=? AND session.user_id=? AND slot.role_id=?",
+                (rs, row) -> mapRoleSlot(rs), sessionId.value(), owner.value(), roleId).stream().findFirst();
+    }
+
+    @Override
+    public Optional<RunExecutionTarget> findExecutionTarget(RunId runId, UserId owner) {
+        return jdbc.query("SELECT target.execution_mode,target.role_id,target.employee_id,target.definition_version_id,"
+                        + "target.role_slot_id FROM platform_agent_run_execution_target target JOIN platform_agent_run run "
+                        + "ON run.run_id=target.run_id WHERE target.run_id=? AND run.user_id=?",
+                (rs, row) -> new RunExecutionTarget(RunExecutionMode.valueOf(rs.getString("execution_mode")),
+                        rs.getString("role_id"), rs.getLong("employee_id"), rs.getLong("definition_version_id"),
+                        rs.getString("role_slot_id")), runId.value(), owner.value()).stream().findFirst();
     }
 
     @Override public List<AgentSession> findSessions(UserId owner, int limit) {
@@ -78,12 +130,37 @@ public class JdbcSessionRunStore implements SessionRunStore, RunControlInbox {
         return count != null && count > 0;
     }
 
+    @Override
+    public boolean hasRuntimeHistory(SessionId sessionId, UserId owner, RunId currentRun, String roleId) {
+        Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM platform_agent_run run "
+                        + "LEFT JOIN platform_agent_run_execution_target target ON target.run_id=run.run_id "
+                        + "WHERE run.session_id=? AND run.user_id=? AND run.run_id<>? AND run.started_at IS NOT NULL "
+                        + "AND COALESCE(target.role_id,'coordinator')=?", Integer.class,
+                sessionId.value(), owner.value(), currentRun.value(), roleId);
+        return count != null && count > 0;
+    }
+
     @Override @Transactional
     public AgentRun createRun(AgentRun run, String input, HarnessRunSpec runSpec) {
+        return createRun(run, input, runSpec, RunExecutionTarget.coordinator(run.employeeId(), run.definitionVersionId()));
+    }
+
+    @Override @Transactional
+    public AgentRun createRun(AgentRun run, String input, HarnessRunSpec runSpec, RunExecutionTarget target) {
+        return createRun(run, input, runSpec, target, List.of());
+    }
+
+    @Override @Transactional
+    public AgentRun createRun(AgentRun run, String input, HarnessRunSpec runSpec, RunExecutionTarget target,
+                              List<RunResultReference> references) {
+        List<RunResultReference> frozenReferences = List.copyOf(references == null ? List.of() : references);
         Optional<AgentRun> replay = findByRequest(run.userId(), run.clientRequestId());
         if (replay.isPresent()) {
             AgentRun existing = replay.get();
             if (!existing.sessionId().equals(run.sessionId()) || !existing.inputDigest().equals(run.inputDigest())) throw new IllegalStateException("Client request id conflicts with an existing run");
+            RunExecutionTarget existingTarget = findExecutionTarget(existing.id(), existing.userId())
+                    .orElseGet(() -> RunExecutionTarget.coordinator(existing.employeeId(), existing.definitionVersionId()));
+            if (!existingTarget.equals(target)) throw new IllegalStateException("Client request id conflicts with a different Run executor");
             return existing;
         }
         var sessions = jdbc.query("SELECT employee_id,definition_version_id FROM platform_agent_session WHERE session_id=? AND user_id=? AND status='ACTIVE' FOR UPDATE", (rs, row) -> new Long[] { rs.getLong(1), rs.getObject(2, Long.class) }, run.sessionId().value(), run.userId().value());
@@ -92,63 +169,102 @@ public class JdbcSessionRunStore implements SessionRunStore, RunControlInbox {
         Long fixedVersion = sessions.get(0)[1];
         if (fixedVersion != null && fixedVersion != run.definitionVersionId())
             throw new IllegalStateException("Run version does not match fixed session version");
-        if (runSpec.definitionVersionId() != run.definitionVersionId() || !runSpec.runId().equals(run.id()))
-            throw new IllegalStateException("Run specification does not match run");
+        java.util.Set<String> uniqueReferenceIds = new java.util.HashSet<>();
+        int referenceOrder = 0;
+        for (RunResultReference reference : frozenReferences) {
+            if (!uniqueReferenceIds.add(reference.resultId()))
+                throw new IllegalArgumentException("Duplicate Run result reference");
+            Integer visible = jdbc.queryForObject("SELECT COUNT(*) FROM platform_agent_result result "
+                            + "JOIN platform_agent_run source ON source.run_id=result.run_id "
+                            + "WHERE result.result_id=? AND result.run_id=? AND source.session_id=? "
+                            + "AND source.user_id=? AND source.state='SUCCEEDED' AND result.visibility='USER' "
+                            + "AND result.body IS NOT NULL AND result.body_sha256=?",
+                    Integer.class, reference.resultId(), reference.sourceRunId().value(), run.sessionId().value(),
+                    run.userId().value(), reference.bodySha256());
+            if (visible == null || visible != 1)
+                throw new IllegalArgumentException("Run result reference is missing, changed, or not visible in this Session");
+            referenceOrder++;
+        }
+        if (!runSpec.runId().equals(run.id()) || runSpec.definitionVersionId() != target.definitionVersionId())
+            throw new IllegalStateException("Run specification does not match frozen executor");
+        if (RunExecutionTarget.COORDINATOR_ROLE.equals(target.roleId())) {
+            if (target.roleSlotId() != null || target.employeeId() != run.employeeId()
+                    || target.definitionVersionId() != run.definitionVersionId())
+                throw new IllegalStateException("Coordinator target does not match the Session owner");
+        } else {
+            SessionRoleSlot slot = jdbc.query("SELECT slot.* FROM platform_session_role_slot slot JOIN platform_agent_session session "
+                            + "ON session.session_id=slot.session_id WHERE slot.slot_id=? AND slot.session_id=? "
+                            + "AND session.user_id=? AND slot.role_id=? FOR UPDATE",
+                    (rs, row) -> mapRoleSlot(rs), target.roleSlotId(), run.sessionId().value(), run.userId().value(), target.roleId())
+                    .stream().findFirst().orElseThrow(() -> new IllegalStateException("Run role slot is missing or not owned by this Session"));
+            if (slot.employeeId() != target.employeeId() || slot.definitionVersionId() != target.definitionVersionId())
+                throw new IllegalStateException("Run executor does not match its frozen role slot");
+        }
         try {
-            jdbc.update("INSERT INTO platform_agent_run(run_id,session_id,user_id,employee_id,definition_version_id,client_request_id,input_digest,state,created_at) VALUES(?,?,?,?,?,?,?,?,?)", run.id().value(), run.sessionId().value(), run.userId().value(), run.employeeId(), run.definitionVersionId(), run.clientRequestId(), run.inputDigest(), run.state().name(), Timestamp.from(run.createdAt()));
+            jdbc.update("INSERT INTO platform_agent_run(run_id,session_id,user_id,employee_id,definition_version_id,client_request_id,input_digest,state,runtime_profile,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    run.id().value(), run.sessionId().value(), run.userId().value(), run.employeeId(), run.definitionVersionId(),
+                    run.clientRequestId(), run.inputDigest(), run.state().name(), run.runtimeProfile().name(), Timestamp.from(run.createdAt()));
         } catch (DuplicateKeyException error) { throw new IllegalStateException("Client request id conflicts with an existing run", error); }
+        jdbc.update("INSERT INTO platform_agent_run_execution_target(run_id,execution_mode,role_id,employee_id,"
+                        + "definition_version_id,role_slot_id,created_at) VALUES(?,?,?,?,?,?,?)",
+                run.id().value(), target.mode().name(), target.roleId(), target.employeeId(),
+                target.definitionVersionId(), target.roleSlotId(), Timestamp.from(run.createdAt()));
         jdbc.update("INSERT INTO platform_agent_run_spec(run_id,definition_version_id,definition_bundle_id,definition_bundle_hash,model_visible_tool_names_json,tool_view_hash,effective_capability_hash,channel_type,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
                 runSpec.runId().value(), runSpec.definitionVersionId(), runSpec.definitionBundleId(), runSpec.definitionBundleHash(),
                 runSpec.modelVisibleToolNamesJson(), runSpec.toolViewHash(), runSpec.effectiveCapabilityHash(), runSpec.channelType(), Timestamp.from(runSpec.createdAt()));
-        jdbc.update("INSERT INTO platform_agent_run_event(run_id,sequence_no,event_type,content,created_at) VALUES(?,?,?,?,?)", run.id().value(), 1, "USER_INPUT", input, Timestamp.from(run.createdAt()));
-        sessionEvents.project(run.sessionId(), run.id(), 1, "USER_INPUT", input, run.createdAt());
+        referenceOrder = 0;
+        for (RunResultReference reference : frozenReferences) {
+            jdbc.update("INSERT INTO platform_agent_run_result_reference(run_id,reference_order,result_id,source_run_id,body_sha256,created_at) "
+                            + "VALUES(?,?,?,?,?,?)", run.id().value(), referenceOrder++, reference.resultId(),
+                    reference.sourceRunId().value(), reference.bodySha256(), Timestamp.from(run.createdAt()));
+        }
+        events.append(run.id(),"USER_INPUT",input,run.createdAt());
         jdbc.update("UPDATE platform_agent_session SET last_active_at=?,row_version=row_version+1 WHERE session_id=? AND user_id=?", Timestamp.from(run.createdAt()), run.sessionId().value(), run.userId().value());
         return run;
     }
 
     @Override
     public Optional<AgentRun> findRun(RunId runId, UserId owner) {
-        return jdbc.query("SELECT run_id,session_id,user_id,employee_id,definition_version_id,client_request_id,input_digest,state,created_at,started_at,finished_at FROM platform_agent_run WHERE run_id=? AND user_id=?",
-                (rs, row) -> new AgentRun(new RunId(rs.getString("run_id")), new SessionId(rs.getString("session_id")), new UserId(rs.getLong("user_id")),
-                        rs.getLong("employee_id"), rs.getLong("definition_version_id"), rs.getString("client_request_id"), rs.getString("input_digest"),
-                        RunState.valueOf(rs.getString("state")), instant(rs.getTimestamp("created_at")), nullableInstant(rs.getTimestamp("started_at")),
-                        nullableInstant(rs.getTimestamp("finished_at"))), runId.value(), owner.value()).stream().findFirst();
+        return jdbc.query("SELECT run_id,session_id,user_id,employee_id,definition_version_id,client_request_id,input_digest,state,runtime_profile,created_at,started_at,finished_at FROM platform_agent_run WHERE run_id=? AND user_id=?",
+                (rs, row) -> mapRun(rs), runId.value(), owner.value()).stream().findFirst();
     }
 
     @Override public java.util.List<RunEvent> findEvents(RunId runId, UserId owner, int afterSequence, int limit) {
-        return jdbc.query("SELECT event.sequence_no,event.event_type,event.content,event.created_at FROM platform_agent_run_event event JOIN platform_agent_run run ON run.run_id=event.run_id WHERE event.run_id=? AND run.user_id=? AND event.sequence_no>? ORDER BY event.sequence_no LIMIT ?", (rs, row) -> new RunEvent(runId, rs.getInt("sequence_no"), rs.getString("event_type"), rs.getString("content"), instant(rs.getTimestamp("created_at"))), runId.value(), owner.value(), afterSequence, limit);
+        return jdbc.query("SELECT event.*,COALESCE(result.body,event.content) visible_content FROM platform_agent_run_event event "
+                        + "JOIN platform_agent_run run ON run.run_id=event.run_id LEFT JOIN platform_agent_result result ON result.result_id=event.result_id AND result.run_id=event.run_id AND result.visibility='USER' "
+                        + "WHERE event.run_id=? AND run.user_id=? AND event.visibility='USER' AND event.sequence_no>? ORDER BY event.sequence_no LIMIT ?",
+                (rs,row)->new RunEvent(runId,rs.getInt("sequence_no"),rs.getString("event_type"),rs.getString("visible_content"),instant(rs.getTimestamp("created_at")),
+                        EventVisibility.USER,JdbcEventMetadata.read(rs)),runId.value(),owner.value(),Math.max(0,afterSequence),Math.max(1,Math.min(200,limit)));
     }
 
     @Override public java.util.List<SessionEvent> findSessionEvents(SessionId sessionId, UserId owner, long afterCursor, int limit) {
         int safeLimit = Math.max(1, Math.min(limit, 200));
-        return jdbc.query("SELECT event.session_id,event.session_cursor,event.run_id,event.run_sequence,event.event_type,"
-                        + "event.visibility,event.content,event.created_at FROM platform_agent_session_event event "
+        return jdbc.query("SELECT event.*,COALESCE(result.body,event.content) visible_content FROM platform_agent_session_event event "
                         + "JOIN platform_agent_session session ON session.session_id=event.session_id "
+                        + "LEFT JOIN platform_agent_result result ON result.result_id=event.result_id AND result.run_id=event.run_id AND result.visibility=event.visibility "
                         + "WHERE event.session_id=? AND session.user_id=? AND event.session_cursor>? "
                         + "ORDER BY event.session_cursor LIMIT ?",
                 (rs, row) -> new SessionEvent(new SessionId(rs.getString("session_id")), rs.getLong("session_cursor"),
                         new RunId(rs.getString("run_id")), nullableInt(rs, "run_sequence"), rs.getString("event_type"),
-                        EventVisibility.valueOf(rs.getString("visibility")), rs.getString("content"),
-                        instant(rs.getTimestamp("created_at"))), sessionId.value(), owner.value(), afterCursor, safeLimit);
+                        EventVisibility.valueOf(rs.getString("visibility")), rs.getString("visible_content"),
+                        instant(rs.getTimestamp("created_at")),JdbcEventMetadata.read(rs)), sessionId.value(), owner.value(), afterCursor, safeLimit);
     }
 
     @Override public long oldestSessionCursor(SessionId sessionId, UserId owner) {
-        Long floor = jdbc.query("SELECT MIN(event.session_cursor) FROM platform_agent_session_event event "
-                        + "JOIN platform_agent_session session ON session.session_id=event.session_id "
-                        + "WHERE event.session_id=? AND session.user_id=?",
-                (rs, row) -> rs.getObject(1) == null ? 0L : rs.getLong(1),
+        Long floor = jdbc.query("SELECT COALESCE((SELECT MIN(session_cursor) FROM platform_agent_session_event WHERE session_id=session.session_id),"
+                        + "CASE WHEN session.next_event_cursor>1 THEN session.next_event_cursor ELSE 0 END) "
+                        + "FROM platform_agent_session session WHERE session.session_id=? AND session.user_id=?",
+                (rs, row) -> rs.getLong(1),
                 sessionId.value(), owner.value()).stream().findFirst().orElse(0L);
         return floor == null ? 0L : floor;
     }
 
-    @Override public int trimSessionEvents(SessionId sessionId, UserId owner, int keepLatest) {
+    @Override @Transactional public int trimSessionEvents(SessionId sessionId, UserId owner, int keepLatest) {
         if (keepLatest <= 0) {
             return 0;
         }
         // 先确认属主，避免越权裁剪他人会话的历史。
-        Long max = jdbc.query("SELECT COALESCE(MAX(event.session_cursor),0) FROM platform_agent_session_event event "
-                        + "JOIN platform_agent_session session ON session.session_id=event.session_id "
-                        + "WHERE event.session_id=? AND session.user_id=?",
+        Long max = jdbc.query("SELECT next_event_cursor-1 FROM platform_agent_session WHERE session_id=? AND user_id=? FOR UPDATE",
                 (rs, row) -> rs.getLong(1), sessionId.value(), owner.value()).stream().findFirst().orElse(0L);
         // 分两步取边界再删除：不依赖 MySQL 与 H2 一致支持的自引用删除子查询。
         // 并发写入只会抬高边界下界，已算好的 boundary 仍落在更旧的一侧，因此只可能少删、不会误删。
@@ -162,17 +278,22 @@ public class JdbcSessionRunStore implements SessionRunStore, RunControlInbox {
 
     @Override public List<AgentRun> findRuns(SessionId sessionId, UserId owner, int limit) {
         int safeLimit = Math.max(1, Math.min(limit, 100));
-        return jdbc.query("SELECT run_id,session_id,user_id,employee_id,definition_version_id,client_request_id,input_digest,state,created_at,started_at,finished_at FROM platform_agent_run WHERE session_id=? AND user_id=? ORDER BY created_at DESC,run_id DESC LIMIT ?",
-                (rs, row) -> new AgentRun(new RunId(rs.getString("run_id")), new SessionId(rs.getString("session_id")), new UserId(rs.getLong("user_id")),
-                        rs.getLong("employee_id"), rs.getLong("definition_version_id"), rs.getString("client_request_id"), rs.getString("input_digest"),
-                        RunState.valueOf(rs.getString("state")), instant(rs.getTimestamp("created_at")), nullableInstant(rs.getTimestamp("started_at")),
-                        nullableInstant(rs.getTimestamp("finished_at"))), sessionId.value(), owner.value(), safeLimit);
+        return jdbc.query("SELECT run_id,session_id,user_id,employee_id,definition_version_id,client_request_id,input_digest,state,runtime_profile,created_at,started_at,finished_at FROM platform_agent_run WHERE session_id=? AND user_id=? ORDER BY created_at DESC,run_id DESC LIMIT ?",
+                (rs, row) -> mapRun(rs), sessionId.value(), owner.value(), safeLimit);
     }
 
     @Override public List<SessionTimelineItem> findTimeline(SessionId sessionId, UserId owner, int limit) {
         int safeLimit = Math.max(1, Math.min(limit, 200));
-        return jdbc.query("SELECT event.run_id,event.sequence_no,event.event_type,event.content,event.created_at FROM platform_agent_run_event event JOIN platform_agent_run run ON run.run_id=event.run_id WHERE run.session_id=? AND run.user_id=? ORDER BY event.created_at DESC,event.run_id DESC,event.sequence_no DESC LIMIT ?",
-                (rs, row) -> new SessionTimelineItem(new RunId(rs.getString("run_id")), rs.getInt("sequence_no"), rs.getString("event_type"), rs.getString("content"), instant(rs.getTimestamp("created_at"))), sessionId.value(), owner.value(), safeLimit).stream().sorted(java.util.Comparator.comparing(SessionTimelineItem::createdAt).thenComparing(item -> item.runId().value()).thenComparingInt(SessionTimelineItem::sequenceNo)).toList();
+        return jdbc.query("SELECT event.run_id,event.sequence_no,event.event_type,COALESCE(result.body,event.content) content,event.created_at,"
+                        + "COALESCE(target.role_id,'coordinator') executor_role_id FROM platform_agent_run_event event "
+                        + "JOIN platform_agent_run run ON run.run_id=event.run_id LEFT JOIN platform_agent_result result ON result.result_id=event.result_id AND result.run_id=event.run_id AND result.visibility='USER' "
+                        + "LEFT JOIN platform_agent_run_execution_target target ON target.run_id=run.run_id "
+                        + "WHERE run.session_id=? AND run.user_id=? AND event.visibility='USER' ORDER BY event.session_cursor DESC LIMIT ?",
+                (rs, row) -> new SessionTimelineItem(new RunId(rs.getString("run_id")), rs.getInt("sequence_no"),
+                        rs.getString("event_type"), rs.getString("content"), instant(rs.getTimestamp("created_at")),
+                        rs.getString("executor_role_id")), sessionId.value(), owner.value(), safeLimit).stream()
+                .sorted(java.util.Comparator.comparing(SessionTimelineItem::createdAt)
+                        .thenComparing(item -> item.runId().value()).thenComparingInt(SessionTimelineItem::sequenceNo)).toList();
     }
 
     @Override public int queuePosition(RunId runId, UserId owner) {
@@ -181,6 +302,7 @@ public class JdbcSessionRunStore implements SessionRunStore, RunControlInbox {
     }
 
     @Override @Transactional public AgentRun cancel(RunId runId, UserId owner) {
+        lockOwnedRun(runId,owner);
         AgentRun run = findRun(runId, owner).orElseThrow(() -> new IllegalArgumentException("Run was not found"));
         Instant now = Instant.now();
         if (run.state() == RunState.QUEUED) {
@@ -216,6 +338,7 @@ public class JdbcSessionRunStore implements SessionRunStore, RunControlInbox {
     }
 
     @Override @Transactional public RunGuidance addGuidance(RunId runId, UserId owner, String source, String content) {
+        lockOwnedRun(runId,owner);
         AgentRun run = findRun(runId, owner).orElseThrow(() -> new IllegalArgumentException("Run was not found"));
         if (run.state() != RunState.RUNNING) throw new IllegalStateException("Guidance is accepted only while a Run is running");
         Instant now = Instant.now(); String id = java.util.UUID.randomUUID().toString();
@@ -225,6 +348,7 @@ public class JdbcSessionRunStore implements SessionRunStore, RunControlInbox {
     }
 
     @Override @Transactional public List<RunGuidanceMessage> consumeGuidance(RunId runId) {
+        if (events.lockRun(runId) == null) return List.of();
         Instant now = Instant.now();
         List<RunGuidanceMessage> messages = jdbc.query("SELECT guidance_id,source,content,created_at FROM platform_agent_run_guidance WHERE run_id=? AND status='PENDING' ORDER BY created_at,guidance_id FOR UPDATE", (rs,row) -> new RunGuidanceMessage(rs.getString("guidance_id"), runId, rs.getString("source"), rs.getString("content"), instant(rs.getTimestamp("created_at"))), runId.value());
         for (RunGuidanceMessage message : messages) {
@@ -240,26 +364,66 @@ public class JdbcSessionRunStore implements SessionRunStore, RunControlInbox {
 
     /** run 事件与会话投影必须在同一事务内写入，否则会话游标会出现空洞。 */
     private void appendEvent(RunId id, String type, String text, Instant now) {
-        jdbc.queryForObject("SELECT run_id FROM platform_agent_run WHERE run_id=? FOR UPDATE", String.class, id.value());
-        int sequence = nextSequence(id);
-        jdbc.update("INSERT INTO platform_agent_run_event(run_id,sequence_no,event_type,content,created_at) VALUES(?,?,?,?,?)",
-                id.value(), sequence, type, text, Timestamp.from(now));
-        sessionEvents.project(sessionIdOf(id), id, sequence, type, text, now);
+        events.append(id,type,text,now);
     }
 
-    private int nextSequence(RunId runId) {
-        Integer next = jdbc.queryForObject("SELECT COALESCE(MAX(sequence_no),0)+1 FROM platform_agent_run_event WHERE run_id=?",
-                Integer.class, runId.value());
-        return next == null ? 1 : next;
+    private void lockOwnedRun(RunId runId, UserId owner) {
+        if (findRun(runId,owner).isEmpty() || events.lockRun(runId) == null) throw new IllegalArgumentException("Run was not found");
     }
 
-    private SessionId sessionIdOf(RunId runId) {
-        return new SessionId(jdbc.queryForObject("SELECT session_id FROM platform_agent_run WHERE run_id=?",
-                String.class, runId.value()));
+    @Override @Transactional(readOnly=true,isolation=org.springframework.transaction.annotation.Isolation.REPEATABLE_READ)
+    public SessionEventPage scanSessionEventPage(SessionId sid, UserId owner, long after, int limit) {
+        long requested = Math.max(0,after); long floor = oldestSessionCursor(sid,owner);
+        boolean expired = floor > requested + 1;
+        if (expired) return new SessionEventPage(List.of(),floor,true,requested);
+        List<SessionEvent> raw = findSessionEvents(sid,owner,requested,limit);
+        long next = raw.stream().mapToLong(SessionEvent::sessionCursor).max().orElse(requested);
+        return new SessionEventPage(raw.stream().filter(e->e.visibility()==EventVisibility.USER).toList(),floor,false,next);
+    }
+
+    @Override @Transactional(readOnly=true,isolation=org.springframework.transaction.annotation.Isolation.REPEATABLE_READ)
+    public SessionSnapshot snapshot(SessionId sid, UserId owner, int limit) {
+        Long cursor = jdbc.query("SELECT next_event_cursor-1 FROM platform_agent_session WHERE session_id=? AND user_id=?",
+                (rs,n)->rs.getLong(1),sid.value(),owner.value()).stream().findFirst().orElseThrow(()->new IllegalArgumentException("Session was not found"));
+        List<SessionEvent> content = jdbc.query("SELECT event.*,run.session_id,event.sequence_no run_sequence,COALESCE(result.body,event.content) visible_content "
+                        + "FROM platform_agent_run_event event JOIN platform_agent_run run ON run.run_id=event.run_id "
+                        + "LEFT JOIN platform_agent_result result ON result.result_id=event.result_id AND result.run_id=event.run_id AND result.visibility='USER' "
+                        + "WHERE run.session_id=? AND run.user_id=? AND event.visibility='USER' AND event.session_cursor<=? ORDER BY event.session_cursor DESC LIMIT ?",
+                (rs,n)->new SessionEvent(sid,rs.getLong("session_cursor"),new RunId(rs.getString("run_id")),rs.getInt("run_sequence"),
+                        rs.getString("event_type"),EventVisibility.USER,rs.getString("visible_content"),instant(rs.getTimestamp("created_at")),JdbcEventMetadata.read(rs)),
+                sid.value(),owner.value(),cursor,Math.max(1,Math.min(200,limit))).stream().sorted(java.util.Comparator.comparingLong(SessionEvent::sessionCursor)).toList();
+        return new SessionSnapshot(findSession(sid,owner).orElseThrow(),findRuns(sid,owner,100),content,cursor,oldestSessionCursor(sid,owner));
+    }
+
+    @Transactional public int rebuildProjection(SessionId sid, UserId owner) {
+        if (jdbc.query("SELECT session_id FROM platform_agent_session WHERE session_id=? AND user_id=? FOR UPDATE",
+                (rs,n)->rs.getString(1),sid.value(),owner.value()).isEmpty()) throw new IllegalArgumentException("Session was not found");
+        return jdbc.update("INSERT INTO platform_agent_session_event(session_id,session_cursor,run_id,run_sequence,event_type,visibility,content,created_at,"
+                        + "schema_version,event_id,attempt_id,fence_token,origin_kind,native_refs_json,payload_json,result_id) "
+                        + "SELECT r.session_id,e.session_cursor,e.run_id,e.sequence_no,e.event_type,e.visibility,e.content,e.created_at,"
+                        + "e.schema_version,e.event_id,e.attempt_id,e.fence_token,e.origin_kind,e.native_refs_json,e.payload_json,e.result_id "
+                        + "FROM platform_agent_run_event e JOIN platform_agent_run r ON r.run_id=e.run_id WHERE r.session_id=? AND e.session_cursor IS NOT NULL "
+                        + "AND NOT EXISTS(SELECT 1 FROM platform_agent_session_event p WHERE p.session_id=r.session_id AND p.session_cursor=e.session_cursor)",sid.value());
     }
 
     private Optional<AgentRun> findByRequest(UserId owner, String clientRequestId) {
-        return jdbc.query("SELECT run_id,session_id,user_id,employee_id,definition_version_id,client_request_id,input_digest,state,created_at,started_at,finished_at FROM platform_agent_run WHERE user_id=? AND client_request_id=?", (rs, row) -> new AgentRun(new RunId(rs.getString("run_id")), new SessionId(rs.getString("session_id")), new UserId(rs.getLong("user_id")), rs.getLong("employee_id"), rs.getLong("definition_version_id"), rs.getString("client_request_id"), rs.getString("input_digest"), RunState.valueOf(rs.getString("state")), instant(rs.getTimestamp("created_at")), nullableInstant(rs.getTimestamp("started_at")), nullableInstant(rs.getTimestamp("finished_at"))), owner.value(), clientRequestId).stream().findFirst();
+        return jdbc.query("SELECT run_id,session_id,user_id,employee_id,definition_version_id,client_request_id,input_digest,state,runtime_profile,created_at,started_at,finished_at FROM platform_agent_run WHERE user_id=? AND client_request_id=?",
+                (rs, row) -> mapRun(rs), owner.value(), clientRequestId).stream().findFirst();
+    }
+
+    private static AgentRun mapRun(java.sql.ResultSet rs) throws java.sql.SQLException {
+        return new AgentRun(new RunId(rs.getString("run_id")), new SessionId(rs.getString("session_id")),
+                new UserId(rs.getLong("user_id")), rs.getLong("employee_id"), rs.getLong("definition_version_id"),
+                rs.getString("client_request_id"), rs.getString("input_digest"), RunState.valueOf(rs.getString("state")),
+                instant(rs.getTimestamp("created_at")), nullableInstant(rs.getTimestamp("started_at")),
+                nullableInstant(rs.getTimestamp("finished_at")), RuntimeProfile.valueOf(rs.getString("runtime_profile")));
+    }
+
+    private static SessionRoleSlot mapRoleSlot(java.sql.ResultSet rs) throws java.sql.SQLException {
+        return new SessionRoleSlot(rs.getString("slot_id"), new SessionId(rs.getString("session_id")),
+                new UserId(rs.getLong("user_id")), rs.getString("role_id"), rs.getLong("employee_id"),
+                rs.getLong("definition_version_id"), rs.getString("harness_session_key"),
+                rs.getString("workspace_runtime_key"), instant(rs.getTimestamp("created_at")));
     }
 
     private static Instant instant(Timestamp timestamp) { return timestamp.toInstant(); }

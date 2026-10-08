@@ -63,6 +63,8 @@
         </div>
       </template>
     </el-drawer>
+
+    <CapabilityAssetPanel />
   </section>
 </template>
 
@@ -72,6 +74,7 @@ import { ElMessageBox } from 'element-plus'
 import * as adminApi from '../../api/admin'
 import type { Capability } from '../../api/admin'
 import { notifyError, notifySuccess } from '../../utils/notify'
+import CapabilityAssetPanel from './CapabilityAssetPanel.vue'
 
 const items = ref<Capability[]>([])
 const loading = ref(false)

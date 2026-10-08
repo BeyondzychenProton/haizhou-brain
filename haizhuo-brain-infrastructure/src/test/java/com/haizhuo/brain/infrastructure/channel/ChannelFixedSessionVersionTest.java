@@ -38,7 +38,7 @@ class ChannelFixedSessionVersionTest {
                         "{}", "workspace", List.of(), "tools", "{}", "{}", "bundle-" + id, T0));
             }
         };
-        var store = new JdbcSessionRunStore(jdbc, new JdbcSessionEventProjector(jdbc));
+        var store = com.haizhuo.brain.infrastructure.support.HarnessJdbcTestSupport.transactional(new JdbcSessionRunStore(jdbc, new JdbcSessionEventProjector(jdbc)), jdbc);
         var sessions = new SessionApplicationService(store, employees, bundles, new HarnessRunSpecFactory(null, null), Clock.fixed(T0, ZoneOffset.UTC));
         var inbound = new JdbcChannelTurnStore(jdbc, sessions, Clock.fixed(T0, ZoneOffset.UTC));
         var binding = new ChannelAccountBinding("main", new TenantId(1), "feishu", "account", "ref", 1,

@@ -5,6 +5,7 @@ import com.haizhuo.brain.kernel.identity.SessionId;
 import com.haizhuo.brain.kernel.identity.TenantId;
 import com.haizhuo.brain.kernel.identity.TraceId;
 import com.haizhuo.brain.kernel.identity.UserId;
+import com.haizhuo.brain.kernel.json.CanonicalJson;
 import com.haizhuo.brain.runtime.api.model.AgentExecutionInput;
 import com.haizhuo.brain.runtime.api.model.AgentExecutionRequest;
 import com.haizhuo.brain.runtime.api.model.RuntimeDefinitionSnapshot;
@@ -31,8 +32,11 @@ public final class TestRequests {
     }
 
     public static RuntimeDefinitionSnapshot definition(String bundleHash, List<RuntimeToolSchema> tools) {
+        String instructions = "你是海卓数字员工。";
+        String manifest = "{\"agents\":\"AGENTS.md\",\"knowledge\":[],\"schemaVersion\":1,\"skills\":[],\"subagents\":[]}";
+        String workspaceHash = CanonicalJson.sha256(Map.of("instructions", instructions, "manifestJson", manifest));
         return new RuntimeDefinitionSnapshot(1L, "员工小卓", "你是海卓数字员工。", "openai", "test-model",
-                3, bundleHash, "ws-projection", "workspace-hash-" + bundleHash, tools);
+                3, bundleHash, "ws-projection", workspaceHash, tools);
     }
 
     public static RuntimeRunConstraints constraints(Set<String> visibleTools) {

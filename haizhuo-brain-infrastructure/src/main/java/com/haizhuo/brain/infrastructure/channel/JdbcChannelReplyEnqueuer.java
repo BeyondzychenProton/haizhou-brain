@@ -5,6 +5,7 @@ import com.haizhuo.brain.kernel.identity.SessionId;
 import com.haizhuo.brain.platform.channel.ChannelDelivery;
 import com.haizhuo.brain.platform.channel.ChannelDeliveryOutbox;
 import com.haizhuo.brain.platform.channel.ChannelReplyEnqueuer;
+import com.haizhuo.brain.infrastructure.run.JdbcRunEventAppender;
 import java.util.Optional;
 import java.util.UUID;
 import org.springframework.stereotype.Repository;
@@ -32,7 +33,7 @@ public class JdbcChannelReplyEnqueuer implements ChannelReplyEnqueuer {
         if (sessionId == null || text == null || text.isBlank()) {
             return;
         }
-        Optional<ChannelReplyRoute> route = route(sessionId);
+        Optional<ChannelReplyRoute> route = route(runId,sessionId);
         if (route.isEmpty()) {
             // Web 会话没有渠道映射，这是正常路径而不是异常。
             return;
@@ -42,15 +43,21 @@ public class JdbcChannelReplyEnqueuer implements ChannelReplyEnqueuer {
                 target.provider(), target.replyTarget(), text, runId.value() + ":reply"));
     }
 
+    @Override
+    public void enqueueResult(RunId runId, SessionId sessionId, String resultId, String text) {
+        JdbcRunEventAppender.requireTransaction(jdbc);
+        ChannelReplyRoute target = route(runId,sessionId)
+                .orElseThrow(()->new IllegalStateException("Frozen inbound reply route missing for channel run"));
+        outbox.enqueue(new ChannelDelivery(UUID.randomUUID().toString(),runId,target.bindingId(),target.provider(),
+                target.replyTarget(),text,runId.value()+":reply",resultId));
+    }
+
     /** 回复目标取该会话最近一次入站消息携带的地址：它才属于当前这轮对话。 */
-    private Optional<ChannelReplyRoute> route(SessionId sessionId) {
-        return jdbc.query("SELECT conversation.binding_id,account.provider,inbox.reply_target "
-                        + "FROM platform_channel_conversation conversation "
-                        + "JOIN platform_channel_account account ON account.binding_id=conversation.binding_id "
-                        + "JOIN platform_channel_inbox inbox ON inbox.session_id=conversation.session_id "
-                        + "WHERE conversation.session_id=? ORDER BY inbox.accepted_at DESC LIMIT 1",
+    private Optional<ChannelReplyRoute> route(RunId runId, SessionId sessionId) {
+        return jdbc.query("SELECT binding_id,provider,reply_target FROM platform_channel_inbox "
+                        + "WHERE run_id=? AND session_id=?",
                 (rs, row) -> new ChannelReplyRoute(rs.getString("binding_id"), rs.getString("provider"),
-                        rs.getString("reply_target")), sessionId.value()).stream().findFirst();
+                        rs.getString("reply_target")),runId.value(),sessionId.value()).stream().findFirst();
     }
 
     private record ChannelReplyRoute(String bindingId, String provider, String replyTarget) {

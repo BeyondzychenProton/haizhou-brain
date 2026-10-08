@@ -4,5 +4,9 @@ import com.haizhuo.brain.kernel.identity.RunId;
 
 /** 调用供应商之前落库的、不可变的出站意图。 */
 public record ChannelDelivery(String deliveryId, RunId runId, String bindingId, String provider,
-                              String replyTarget, String text, String idempotencyKey) {
+                              String replyTarget, String text, String idempotencyKey, String resultId) {
+    public ChannelDelivery(String deliveryId, RunId runId, String bindingId, String provider,
+                           String replyTarget, String text, String idempotencyKey) {
+        this(deliveryId,runId,bindingId,provider,replyTarget,text,idempotencyKey,null);
+    }
 }

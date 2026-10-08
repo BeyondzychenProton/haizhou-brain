@@ -3,6 +3,7 @@ package com.haizhuo.brain.bootstrap.configuration;
 import com.haizhuo.brain.platform.employee.EmployeeCatalog;
 import com.haizhuo.brain.platform.employee.runtime.HarnessDefinitionBundleRepository;
 import com.haizhuo.brain.platform.run.HarnessRunSpecFactory;
+import com.haizhuo.brain.platform.run.AgentResultRepository;
 import com.haizhuo.brain.platform.run.SessionRunStore;
 import com.haizhuo.brain.platform.session.SessionApplicationService;
 import java.time.Clock;
@@ -14,7 +15,8 @@ public class SessionRunConfiguration {
     @Bean
     SessionApplicationService sessionApplicationService(SessionRunStore store, EmployeeCatalog employees,
                                                         HarnessDefinitionBundleRepository bundles,
-                                                        HarnessRunSpecFactory runSpecFactory, Clock clock) {
-        return new SessionApplicationService(store, employees, bundles, runSpecFactory, clock);
+                                                        HarnessRunSpecFactory runSpecFactory,
+                                                        AgentResultRepository results, Clock clock) {
+        return new SessionApplicationService(store, employees, bundles, runSpecFactory, results, clock);
     }
 }

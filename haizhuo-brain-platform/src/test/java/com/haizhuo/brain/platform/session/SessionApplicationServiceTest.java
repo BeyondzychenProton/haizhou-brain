@@ -49,8 +49,8 @@ class SessionApplicationServiceTest {
         assertFalse(service.sessionEventPage(SESSION, OWNER, 100L, 200).cursorExpired(),
                 "请求游标恰为下界前一条时仍可无缝续传");
         assertFalse(service.sessionEventPage(SESSION, OWNER, 101L, 200).cursorExpired());
-        assertFalse(service.sessionEventPage(SESSION, OWNER, 0L, 200).cursorExpired(),
-                "全量补读请求天然不涉及失效");
+        assertTrue(service.sessionEventPage(SESSION, OWNER, 0L, 200).cursorExpired(),
+                "即使从游标 0 全量补读，若历史事件已裁剪也必须显式要求快照恢复");
     }
 
     @Test

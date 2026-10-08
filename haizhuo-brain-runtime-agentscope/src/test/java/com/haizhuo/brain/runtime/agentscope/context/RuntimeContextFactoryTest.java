@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 
 import com.haizhuo.brain.runtime.agentscope.TestRequests;
 import com.haizhuo.brain.runtime.api.model.AgentExecutionRequest;
+import com.haizhuo.brain.runtime.api.model.RuntimeSessionBinding;
 import io.agentscope.core.agent.RuntimeContext;
 import java.util.List;
 import java.util.Set;
@@ -31,6 +32,8 @@ class RuntimeContextFactoryTest {
         assertEquals("ws-abc", call.workspaceRuntimeKey());
         assertEquals(Set.of("meeting.reserve"), call.constraints().modelVisibleToolNames());
         assertEquals("桥接摘要", call.bridgeContext());
+        assertEquals(RuntimeSessionBinding.COORDINATOR_ROLE, call.roleId(),
+                "旧桥接 Session 的空角色只代表根协调者，不应拒绝已有会话");
     }
 
     @Test
@@ -42,6 +45,23 @@ class RuntimeContextFactoryTest {
         RuntimeContext context = new RuntimeContextFactory().create(request);
         assertEquals(request.platformSessionId().value(), context.getSessionId());
         assertNull(context.get(HarnessCallContext.class).bridgeContext());
+        assertEquals(RuntimeSessionBinding.COORDINATOR_ROLE,
+                context.get(HarnessCallContext.class).roleId());
+    }
+
+    @Test
+    void roleSlotUsesItsServerOwnedSessionAndWorkspaceKeys() {
+        var binding = com.haizhuo.brain.runtime.api.model.RuntimeSessionBinding.roleSlot(
+                "researcher", "native-role-session", "workspace-role", false);
+        var request = TestRequests.request(TestRequests.definition("bundle-role", List.of()),
+                TestRequests.constraints(Set.of()), binding,
+                new com.haizhuo.brain.runtime.api.model.UserPromptExecutionInput("研究"));
+
+        RuntimeContext context = new RuntimeContextFactory().create(request);
+
+        assertEquals("native-role-session", context.getSessionId());
+        assertEquals("workspace-role", context.get(HarnessCallContext.class).workspaceRuntimeKey());
+        assertEquals("researcher", context.get(HarnessCallContext.class).roleId());
     }
 
     @Test

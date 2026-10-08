@@ -10,7 +10,10 @@ import java.util.Objects;
 public record RuntimeDefinitionSnapshot(long definitionVersionId, String employeeName, String instructions,
                                         String modelProvider, String modelName, int maxIterations,
                                         String definitionBundleHash, String workspaceProjectionKey,
-                                        String workspaceContentHash, List<RuntimeToolSchema> toolCatalog) {
+                                        String workspaceContentHash, String workspaceManifestJson,
+                                        List<RuntimeToolSchema> toolCatalog,
+                                        RuntimeEmployeeConfiguration configuration,
+                                        List<RuntimeWorkspaceFile> workspaceFiles) {
     public RuntimeDefinitionSnapshot {
         if (definitionVersionId <= 0) throw new IllegalArgumentException("definitionVersionId must be positive");
         Objects.requireNonNull(employeeName);
@@ -18,6 +21,21 @@ public record RuntimeDefinitionSnapshot(long definitionVersionId, String employe
         Objects.requireNonNull(modelProvider);
         Objects.requireNonNull(modelName);
         Objects.requireNonNull(definitionBundleHash);
+        Objects.requireNonNull(workspaceManifestJson);
         toolCatalog = List.copyOf(Objects.requireNonNull(toolCatalog));
+        configuration = configuration == null ? RuntimeEmployeeConfiguration.legacyStable() : configuration;
+        workspaceFiles = List.copyOf(Objects.requireNonNull(workspaceFiles));
+    }
+
+    /** Source-compatible constructor for existing LEGACY_STABLE runtime snapshots. */
+    public RuntimeDefinitionSnapshot(long definitionVersionId, String employeeName, String instructions,
+                                     String modelProvider, String modelName, int maxIterations,
+                                     String definitionBundleHash, String workspaceProjectionKey,
+                                     String workspaceContentHash, List<RuntimeToolSchema> toolCatalog) {
+        this(definitionVersionId, employeeName, instructions, modelProvider, modelName, maxIterations,
+                definitionBundleHash, workspaceProjectionKey, workspaceContentHash,
+                "{\"schemaVersion\":1,\"agents\":\"AGENTS.md\",\"skills\":[],\"subagents\":[],\"knowledge\":[]}",
+                toolCatalog,
+                RuntimeEmployeeConfiguration.legacyStable(), List.of());
     }
 }

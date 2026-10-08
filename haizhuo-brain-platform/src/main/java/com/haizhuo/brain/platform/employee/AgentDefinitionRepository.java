@@ -7,6 +7,11 @@ import java.util.Optional;
 /** 员工定义、能力目录、授权种子和 Run 能力快照的持久化边界。 */
 public interface AgentDefinitionRepository extends EmployeeCatalog {
     Optional<AgentDefinitionDraft> findDraft(long employeeId);
+    default Optional<DigitalEmployee> findEmployee(long employeeId) { return Optional.empty(); }
+    default Optional<PublishedEmployee> findPublishedVersion(TenantId tenantId, long employeeId, long definitionVersionId) {
+        return findPublished(tenantId, employeeId)
+                .filter(published -> published.definition().id() == definitionVersionId);
+    }
     List<CapabilityCatalogEntry> listCapabilities();
     Optional<CapabilityCatalogEntry> findCapability(String capabilityCode, String revision);
     Optional<CapabilityCatalogEntry> findCapabilityByRevisionId(long capabilityRevisionId);
@@ -15,6 +20,17 @@ public interface AgentDefinitionRepository extends EmployeeCatalog {
     AgentDefinitionDraft saveDraft(long employeeId, int expectedDraftRevision, String instructions,
                                    String modelProvider, String modelName,
                                    List<CapabilitySelection> capabilities, AgentDefinitionManagementAudit audit);
+
+    /** Compatibility path for existing repository adapters. Non-legacy configuration must never be silently dropped. */
+    default AgentDefinitionDraft saveDraft(long employeeId, int expectedDraftRevision, String instructions,
+                                           String modelProvider, String modelName,
+                                           List<CapabilitySelection> capabilities,
+                                           EmployeeRuntimeConfiguration configuration,
+                                           AgentDefinitionManagementAudit audit) {
+        if (configuration != null && !configuration.equals(EmployeeRuntimeConfiguration.legacyStable()))
+            throw new UnsupportedOperationException("Repository does not persist employee runtime configuration");
+        return saveDraft(employeeId, expectedDraftRevision, instructions, modelProvider, modelName, capabilities, audit);
+    }
 
     PublishedEmployee publish(long employeeId, int expectedDraftRevision, AgentDefinitionManagementAudit audit);
     void setCapabilityEnabled(String capabilityCode, boolean enabled, AgentDefinitionManagementAudit audit);

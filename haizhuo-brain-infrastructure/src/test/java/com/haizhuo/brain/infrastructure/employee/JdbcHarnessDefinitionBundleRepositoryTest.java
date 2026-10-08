@@ -3,8 +3,11 @@ package com.haizhuo.brain.infrastructure.employee;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.haizhuo.brain.platform.employee.EmployeeRuntimeConfiguration;
 import com.haizhuo.brain.platform.employee.runtime.HarnessDefinitionBundle;
 import com.haizhuo.brain.platform.employee.runtime.PublishedToolSchema;
+import com.haizhuo.brain.runtime.api.model.RuntimeProfile;
+import com.haizhuo.brain.runtime.api.model.RuntimeWorkspaceFile;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -34,7 +37,8 @@ class JdbcHarnessDefinitionBundleRepositoryTest {
                 + "model_provider VARCHAR(64) NOT NULL,model_name VARCHAR(128) NOT NULL,max_iterations INT NOT NULL,"
                 + "instructions TEXT NOT NULL,workspace_manifest_json TEXT NOT NULL,workspace_content_hash CHAR(64) NOT NULL,"
                 + "tool_catalog_json TEXT NOT NULL,tool_catalog_hash CHAR(64) NOT NULL,subagent_manifest_json TEXT NULL,"
-                + "policy_json TEXT NULL,bundle_hash CHAR(64) NOT NULL,created_at TIMESTAMP NOT NULL,"
+                + "policy_json TEXT NULL,configuration_json CLOB NULL,workspace_files_json CLOB NULL,"
+                + "bundle_hash CHAR(64) NOT NULL,created_at TIMESTAMP NOT NULL,"
                 + "UNIQUE(definition_version_id),UNIQUE(bundle_hash))");
         repository = new JdbcHarnessDefinitionBundleRepository(jdbc, new ObjectMapper());
     }
@@ -78,6 +82,27 @@ class JdbcHarnessDefinitionBundleRepositoryTest {
         assertEquals(saved.id(), byHash.id(), "内容寻址查找（§18 模板键的一部分）");
         assertTrue(repository.findByDefinitionVersionId(999L).isEmpty());
         assertTrue(repository.findByBundleHash("f".repeat(64)).isEmpty());
+    }
+
+    @Test
+    void roundTripsPublishedProfileAndFrozenWorkspaceFileContents() {
+        Instant now = Instant.parse("2026-01-01T00:00:00Z");
+        EmployeeRuntimeConfiguration configuration = EmployeeRuntimeConfiguration.singleSkilled(8);
+        RuntimeWorkspaceFile skill = new RuntimeWorkspaceFile("skills/customer-analysis/SKILL.md", "abc",
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", 3,
+                "skill.customer-analysis", "1", "SKILL");
+        HarnessDefinitionBundle bundle = new HarnessDefinitionBundle(0, 8, "分析员工", "分析指令", "openai",
+                "test-model", 8, "{\"skills\":[]}", "w".repeat(64), List.of(), "c".repeat(64),
+                "{\"subagents\":[]}", "{\"policy\":\"v2\"}", "a".repeat(64), configuration,
+                List.of(skill), now);
+
+        var saved = repository.save(bundle);
+        var loaded = repository.findByDefinitionVersionId(8).orElseThrow();
+
+        assertEquals(saved.id(), loaded.id());
+        assertEquals(RuntimeProfile.SINGLE_SKILLED, loaded.configuration().profile());
+        assertEquals(8, loaded.configuration().runtimePolicy().maxIterations());
+        assertEquals(List.of(skill), loaded.workspaceFiles());
     }
 
     @Test

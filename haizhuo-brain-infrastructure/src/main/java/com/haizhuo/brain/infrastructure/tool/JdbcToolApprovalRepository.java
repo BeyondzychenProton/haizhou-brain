@@ -1,6 +1,8 @@
 package com.haizhuo.brain.infrastructure.tool;
 
 import com.haizhuo.brain.kernel.identity.RunId;
+import com.haizhuo.brain.infrastructure.run.JdbcRunEventAppender;
+import com.haizhuo.brain.infrastructure.session.JdbcSessionEventProjector;
 import com.haizhuo.brain.kernel.identity.UserId;
 import com.haizhuo.brain.kernel.json.CanonicalJson;
 import com.haizhuo.brain.platform.tool.ApprovalState;
@@ -28,9 +30,15 @@ public class JdbcToolApprovalRepository implements ToolApprovalRepository {
     static final String DENIED_SAFE_MESSAGE = "该操作未获得授权/确认。";
 
     private final JdbcTemplate jdbc;
+    private final JdbcRunEventAppender events;
 
     public JdbcToolApprovalRepository(JdbcTemplate jdbc) {
+        this(jdbc,new JdbcRunEventAppender(jdbc,new JdbcSessionEventProjector(jdbc)));
+    }
+    @org.springframework.beans.factory.annotation.Autowired
+    public JdbcToolApprovalRepository(JdbcTemplate jdbc, JdbcRunEventAppender events) {
         this.jdbc = jdbc;
+        this.events = events;
     }
 
     @Override
@@ -44,10 +52,14 @@ public class JdbcToolApprovalRepository implements ToolApprovalRepository {
     @Override
     @Transactional
     public void createPending(PlatformToolExecution execution, long requestedForUserId) {
+        if (events.lockRun(execution.runId()) == null) throw new IllegalStateException("Approval run missing");
+        String runState = jdbc.queryForObject("SELECT state FROM platform_agent_run WHERE run_id=? FOR UPDATE",String.class,execution.runId().value());
+        if (!java.util.Set.of("WAITING_TOOL","WAITING_CONFIRMATION").contains(runState))
+            throw new IllegalStateException("Run no longer accepts approval");
         Instant now = Instant.now();
         int updated = jdbc.update("UPDATE platform_tool_execution SET state='APPROVAL_REQUIRED',updated_at=? "
-                        + "WHERE tool_execution_id=? AND state IN ('REQUESTED','EXECUTING')",
-                Timestamp.from(now), execution.id());
+                        + "WHERE tool_execution_id=? AND run_id=? AND state IN ('REQUESTED','EXECUTING')",
+                Timestamp.from(now), execution.id(),execution.runId().value());
         if (updated != 1) {
             throw new IllegalStateException("Tool execution cannot be parked for approval: " + execution.id());
         }
@@ -65,6 +77,13 @@ public class JdbcToolApprovalRepository implements ToolApprovalRepository {
     @Override
     @Transactional
     public boolean decide(String toolExecutionId, ApprovalState decision, long decidedByUserId, String reason) {
+        if (decision == ApprovalState.PENDING) throw new IllegalArgumentException("Approval decision required");
+        Optional<ToolApproval> candidate = findByToolExecutionId(toolExecutionId);
+        if (candidate.isEmpty() || events.lockRun(candidate.get().runId()) == null) return false;
+        String runState = jdbc.queryForObject("SELECT state FROM platform_agent_run WHERE run_id=? FOR UPDATE",String.class,candidate.get().runId().value());
+        if (!java.util.Set.of("WAITING_TOOL","WAITING_CONFIRMATION").contains(runState)) return false;
+        if (jdbc.query("SELECT tool_execution_id FROM platform_tool_execution WHERE tool_execution_id=? AND run_id=? AND state='APPROVAL_REQUIRED' FOR UPDATE",
+                (rs,n)->rs.getString(1),toolExecutionId,candidate.get().runId().value()).isEmpty()) return false;
         Instant now = Instant.now();
         Optional<ToolApproval> pending = jdbc.query("SELECT approval_id,tool_execution_id,run_id,requested_for_user_id,"
                         + "decision,decided_by_user_id,reason,created_at,decided_at FROM platform_tool_approval "
@@ -108,10 +127,7 @@ public class JdbcToolApprovalRepository implements ToolApprovalRepository {
     }
 
     private void appendEvent(RunId runId, String type, String content, Instant now) {
-        jdbc.queryForObject("SELECT run_id FROM platform_agent_run WHERE run_id=? FOR UPDATE", String.class, runId.value());
-        jdbc.update("INSERT INTO platform_agent_run_event(run_id,sequence_no,event_type,content,created_at) "
-                        + "SELECT ?,COALESCE(MAX(sequence_no),0)+1,?,?,? FROM platform_agent_run_event WHERE run_id=?",
-                runId.value(), type, content, Timestamp.from(now), runId.value());
+        events.append(runId,type,content,now);
     }
 
     private ToolApproval map(ResultSet rs) throws SQLException {

@@ -22,19 +22,29 @@ import com.haizhuo.brain.runtime.api.model.ExternalToolResult;
 import com.haizhuo.brain.runtime.api.model.ExternalToolResultExecutionInput;
 import com.haizhuo.brain.runtime.api.model.RuntimeDefinitionSnapshot;
 import io.agentscope.core.message.TextBlock;
+import io.agentscope.core.event.TextBlockDeltaEvent;
 import io.agentscope.core.message.ToolUseBlock;
 import io.agentscope.core.model.ChatModelBase;
 import io.agentscope.core.model.ChatResponse;
 import io.agentscope.core.model.GenerateOptions;
 import io.agentscope.core.model.ToolSchema;
 import io.agentscope.core.state.InMemoryAgentStateStore;
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.lang.reflect.Proxy;
+import java.util.concurrent.atomic.AtomicReference;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.Timeout;
 import reactor.core.publisher.Flux;
 
 /**
@@ -44,10 +54,16 @@ import reactor.core.publisher.Flux;
  */
 class AgentScopeRuntimeTest {
 
-    @TempDir
     Path workspaceDir;
 
     private HarnessTemplateCache templateCache;
+
+    @BeforeEach
+    void useBuildDirectoryForWorkspaceMaterialization() throws IOException {
+        Path testRoot = Path.of("target", "agent-scope-runtime-test");
+        Files.createDirectories(testRoot);
+        workspaceDir = Files.createTempDirectory(testRoot, "runtime-");
+    }
 
     @Test
     void refusesMissingStateBeforeConstructingOrInvokingModel() {
@@ -63,6 +79,37 @@ class AgentScopeRuntimeTest {
         var failure = assertInstanceOf(AgentRunFailedEvent.class, events.get(0));
         assertTrue(failure.message().contains("RUNTIME_STATE_MISSING"));
         assertEquals(0, cache.size(), "不能把缺失状态当成新会话");
+    }
+
+    @Test
+    void roleSlotRecoveryChecksTheRoleSessionRatherThanTheBusinessSession() {
+        AtomicReference<String> checkedSession = new AtomicReference<>();
+        io.agentscope.core.state.AgentStateStore stateStore = (io.agentscope.core.state.AgentStateStore)
+                Proxy.newProxyInstance(io.agentscope.core.state.AgentStateStore.class.getClassLoader(),
+                        new Class<?>[]{io.agentscope.core.state.AgentStateStore.class}, (proxy, method, args) -> {
+                            if (method.getName().equals("exists")) {
+                                checkedSession.set((String) args[1]);
+                                return false;
+                            }
+                            if (method.getReturnType() == boolean.class) return false;
+                            if (method.getReturnType() == int.class) return 0;
+                            if (method.getReturnType() == long.class) return 0L;
+                            return null;
+                        });
+        var cache = new HarnessTemplateCache(new FakeFactory(new TextOnlyModel(), workspaceDir));
+        var runtime = new AgentScopeRuntime(cache, new RuntimeContextFactory(), new AgentScopeEventTranslator(),
+                com.haizhuo.brain.observability.AgentExecutionObserver.noop(), stateStore);
+        var request = TestRequests.request(TestRequests.definition("bundle-role-required", List.of()),
+                TestRequests.constraints(Set.of()),
+                com.haizhuo.brain.runtime.api.model.RuntimeSessionBinding.roleSlot(
+                        "researcher", "role-session-key", "role-workspace-key", true),
+                new com.haizhuo.brain.runtime.api.model.UserPromptExecutionInput("继续"));
+
+        var events = runtime.execute(request).collectList().block();
+
+        assertInstanceOf(AgentRunFailedEvent.class, events.get(0));
+        assertEquals("role-session-key", checkedSession.get());
+        assertEquals(0, cache.size(), "缺少角色槽状态时不能按空状态继续");
     }
 
     @Test
@@ -136,6 +183,104 @@ class AgentScopeRuntimeTest {
         assertInstanceOf(AgentRunFailedEvent.class, events.get(events.size() - 1));
     }
 
+    @Test
+    @Timeout(30)
+    void closesSeparateTranslatorForEveryCompletedSubscription() {
+        var tracker = new TrackingTranslator();
+        var definition = TestRequests.definition("bundle-lifecycle-complete", List.of());
+        var runtime = trackedRuntime(new TextOnlyModel(), tracker);
+        var request = TestRequests.promptRequest(definition, "synthetic prompt");
+        try {
+            runtime.execute(request).collectList().block(Duration.ofSeconds(10));
+            runtime.execute(request).collectList().block(Duration.ofSeconds(10));
+            assertEquals(2, tracker.scopes.size());
+            org.junit.jupiter.api.Assertions.assertNotSame(tracker.scopes.get(0), tracker.scopes.get(1));
+            assertClosed(tracker, request);
+        } finally {
+            templateCache.getOrBuild(definition).agent().close();
+        }
+    }
+
+    @Test
+    @Timeout(30)
+    void closesTranslatorWhenNativeExecutionFails() {
+        var tracker = new TrackingTranslator();
+        var definition = TestRequests.definition("bundle-lifecycle-error", List.of());
+        var model = new TextOnlyModel() {
+            @Override protected Flux<ChatResponse> doStream(List<io.agentscope.core.message.Msg> messages,
+                                                             List<ToolSchema> tools, GenerateOptions options) {
+                return Flux.error(new IllegalStateException("synthetic model failure"));
+            }
+        };
+        var runtime = trackedRuntime(model, tracker);
+        var request = TestRequests.promptRequest(definition, "synthetic prompt");
+        try {
+            var events = runtime.execute(request).collectList().block(Duration.ofSeconds(15));
+            assertTrue(events.stream().anyMatch(AgentRunFailedEvent.class::isInstance));
+            assertEquals(1, tracker.scopes.size());
+            assertClosed(tracker, request);
+        } finally {
+            templateCache.getOrBuild(definition).agent().close();
+        }
+    }
+
+    @Test
+    @Timeout(30)
+    void closesTranslatorWhenSubscriberCancelsNativeExecution() throws InterruptedException {
+        var tracker = new TrackingTranslator();
+        var definition = TestRequests.definition("bundle-lifecycle-cancel", List.of());
+        var model = new TextOnlyModel() {
+            @Override protected Flux<ChatResponse> doStream(List<io.agentscope.core.message.Msg> messages,
+                                                             List<ToolSchema> tools, GenerateOptions options) {
+                return Flux.never();
+            }
+        };
+        var runtime = trackedRuntime(model, tracker);
+        var request = TestRequests.promptRequest(definition, "synthetic prompt");
+        var subscription = runtime.execute(request).subscribe();
+        try {
+            assertTrue(tracker.opened.await(5, TimeUnit.SECONDS));
+            subscription.dispose();
+            assertEquals(1, tracker.scopes.size());
+            assertTrue(tracker.closed.await(5, TimeUnit.SECONDS), "取消后必须关闭本次执行的事件翻译器");
+            assertClosed(tracker, request);
+        } finally {
+            subscription.dispose();
+            templateCache.getOrBuild(definition).agent().close();
+        }
+    }
+
+    private AgentScopeRuntime trackedRuntime(ChatModelBase model, TrackingTranslator tracker) {
+        templateCache = new HarnessTemplateCache(new FakeFactory(model, workspaceDir));
+        return new AgentScopeRuntime(templateCache, new RuntimeContextFactory(), tracker);
+    }
+
+    private static void assertClosed(TrackingTranslator tracker, AgentExecutionRequest request) {
+        tracker.scopes.forEach(scope -> assertTrue(scope.translate(request.runId(),
+                new TextBlockDeltaEvent("late-reply", "late-block", "late-text"))
+                .collectList().block().isEmpty(), "已结束订阅不再接收迟到事件"));
+    }
+
+    private static final class TrackingTranslator extends AgentScopeEventTranslator {
+        private final List<AgentScopeEventTranslator> scopes = new CopyOnWriteArrayList<>();
+        private final CountDownLatch opened = new CountDownLatch(1);
+        private final CountDownLatch closed = new CountDownLatch(1);
+
+        @Override
+        public AgentScopeEventTranslator forExecution(String nativeSessionId, String attemptId, long fenceToken) {
+            var scope = new AgentScopeEventTranslator() {
+                @Override
+                public synchronized void close() {
+                    super.close();
+                    closed.countDown();
+                }
+            };
+            scopes.add(scope);
+            opened.countDown();
+            return scope;
+        }
+    }
+
     private AgentScopeRuntime runtimeWith(ChatModelBase model) {
         templateCache = new HarnessTemplateCache(new FakeFactory(model, workspaceDir));
         return new AgentScopeRuntime(templateCache, new RuntimeContextFactory(), new AgentScopeEventTranslator());
@@ -171,7 +316,7 @@ class AgentScopeRuntimeTest {
         }
     }
 
-    private static final class TextOnlyModel extends ChatModelBase {
+    private static class TextOnlyModel extends ChatModelBase {
         @Override
         protected Flux<ChatResponse> doStream(List<io.agentscope.core.message.Msg> messages,
                                               List<ToolSchema> tools, GenerateOptions options) {

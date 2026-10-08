@@ -91,7 +91,8 @@ class SessionStreamControllerTest {
                 AgentSession.Status.ACTIVE, T0, T0, 0));
         SessionEvent completed = new SessionEvent(SESSION, 3L, RUN, 2, "RUN_COMPLETED", EventVisibility.USER,
                 "第一轮结果", T0.plusSeconds(1));
-        when(sessions.sessionEventsOfOwnedSession(SESSION, OWNER, 2L, 200)).thenReturn(List.of(completed));
+        when(sessions.sessionEventPageOfOwnedSession(SESSION, OWNER, 2L, 200))
+                .thenReturn(new SessionEventPage(List.of(completed), 1, false, 3));
         var exchange = MockServerWebExchange.from(MockServerHttpRequest.get(
                 "/api/v1/sessions/session-1/stream?after=1"));
 
@@ -107,7 +108,7 @@ class SessionStreamControllerTest {
                 .verify();
 
         verify(sessions).get(SESSION, OWNER);
-        verify(sessions).sessionEventsOfOwnedSession(SESSION, OWNER, 2L, 200);
+        verify(sessions).sessionEventPageOfOwnedSession(SESSION, OWNER, 2L, 200);
     }
 
     @Test
@@ -121,6 +122,6 @@ class SessionStreamControllerTest {
                         && "Session was not found".equals(error.getMessage()))
                 .verify();
 
-        verify(sessions, never()).sessionEventsOfOwnedSession(SESSION, OWNER, 0L, 200);
+        verify(sessions, never()).sessionEventPageOfOwnedSession(SESSION, OWNER, 0L, 200);
     }
 }

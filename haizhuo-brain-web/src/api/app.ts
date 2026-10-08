@@ -2,7 +2,15 @@ import { httpClient } from './httpClient'
 import type { RunStreamEvent } from './runStream'
 export interface Employee { id:number; code:string; name:string; description:string; available:boolean }
 export interface Session { sessionId:string; employeeId:number; definitionVersionId?:number|null; employeeName?:string; status:string; createdAt:string; lastActiveAt:string }
-export interface Run { runId:string; sessionId:string; state:string; definitionVersionId:number; createdAt:string; queuePosition:number }
+export interface Run { runId:string; sessionId:string; state:string; definitionVersionId:number; createdAt:string; queuePosition:number;
+  executorRoleId?:string; executorEmployeeId?:number; executorDefinitionVersionId?:number; mode?:string }
+export interface SessionRole { roleId:string; displayName:string; employeeId:number; definitionVersionId:number|null; selectable:boolean }
+export interface ReferenceableResult { resultId:string; runId:string; kind:string; mediaType:string; bodySha256:string;
+  byteSize:number; createdAt:string; executorRoleId:string|null; executorEmployeeId:number|null;
+  executorDefinitionVersionId:number|null }
+export interface RunResult { resultId:string|null; runId:string; mediaType:string; body:string; bodySha256:string;
+  byteSize:number; schemaVersion:number; createdAt:string; legacySummary:boolean; executorRoleId:string|null;
+  executorEmployeeId:number|null; executorDefinitionVersionId:number|null }
 export interface RunEvent { runId:string; sequenceNo:number; type:string; content:string; createdAt:string }
 /** 会话级持久事件，形状与后端统一事件信封一致。 */
 export type SessionEvent = RunStreamEvent
@@ -13,13 +21,24 @@ export async function listSessions(){return(await httpClient.get<Session[]>('/ap
 export async function getSession(id:string){return(await httpClient.get<Session>(`/api/v1/sessions/${id}`)).data}
 export async function listRuns(sessionId:string){return(await httpClient.get<Run[]>(`/api/v1/sessions/${sessionId}/runs`)).data}
 export async function createSession(employeeId:number){return(await httpClient.post<Session>('/api/v1/sessions',{employeeId})).data}
-export async function createRun(sessionId:string,input:string){return(await httpClient.post<Run>(`/api/v1/sessions/${sessionId}/runs`,{clientRequestId:crypto.randomUUID(),input})).data}
+export async function getSessionRoles(sessionId:string){return(await httpClient.get<SessionRole[]>(`/api/v1/sessions/${sessionId}/roles`)).data}
+export async function listReferenceableResults(sessionId:string){return(await httpClient.get<ReferenceableResult[]>(`/api/v1/sessions/${sessionId}/results`)).data}
+export async function createRun(sessionId:string,input:string,targetRoleId?:string,referencedResultIds:string[]=[]){
+  return(await httpClient.post<Run>(`/api/v1/sessions/${sessionId}/runs`,{
+    clientRequestId:crypto.randomUUID(),input,targetRoleId,mode:'DIRECT',referencedResultIds,
+  })).data
+}
 export async function getRun(runId:string){return(await httpClient.get<Run>(`/api/v1/sessions/runs/${runId}`)).data}
+export async function getRunResult(runId:string){return(await httpClient.get<RunResult>(`/api/v1/sessions/runs/${runId}/result`)).data}
 export async function getEvents(runId:string,after:number,limit=200){return(await httpClient.get<RunEvent[]>(`/api/v1/sessions/runs/${runId}/events`,{params:{after,limit}})).data}
 /** 会话级补读/历史分页：返回统一信封，sessionCursor 是跨 Run 的续传游标。 */
-export interface SessionEventPage { events:SessionEvent[]; cursorFloor:number; cursorExpired:boolean }
+export interface SessionEventPage { events:SessionEvent[]; cursorFloor:number; cursorExpired:boolean; nextCursor:number }
+export interface SessionSnapshot { sessionId:string; runs:Run[]; events:SessionEvent[]; snapshotCursor:number; cursorFloor:number }
+export async function getSessionSnapshot(sessionId:string){
+  return(await httpClient.get<SessionSnapshot>(`/api/v1/sessions/${sessionId}/snapshot`,{params:{format:'v2'}})).data
+}
 export async function getSessionEvents(sessionId:string,after:number,limit=200){
-  return(await httpClient.get<SessionEventPage>(`/api/v1/sessions/${sessionId}/events`,{params:{after,limit}})).data
+  return(await httpClient.get<SessionEventPage>(`/api/v1/sessions/${sessionId}/events`,{params:{after,limit,format:'v2'}})).data
 }
 export async function timeline(sessionId:string):Promise<TimelineItem[]>{
   const items=(await httpClient.get<TimelineWireItem[]>(`/api/v1/sessions/${sessionId}/timeline`)).data

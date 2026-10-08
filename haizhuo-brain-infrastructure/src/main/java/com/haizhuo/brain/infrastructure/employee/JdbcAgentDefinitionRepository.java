@@ -38,26 +38,35 @@ public class JdbcAgentDefinitionRepository implements AgentDefinitionRepository 
     }
 
     @Override public Optional<PublishedEmployee> findPublished(TenantId tenantId, long employeeId) {
-        List<DefinitionRow> rows = jdbc.query("SELECT e.id employee_id,e.tenant_id,e.employee_code,e.display_name,e.enabled,v.id version_id,v.version_no,v.instructions,v.model_provider,v.model_name,v.content_hash,v.published_at FROM digital_employee e JOIN agent_definition_version v ON v.id=e.current_published_version_id WHERE e.tenant_id=? AND e.id=? AND e.enabled=TRUE",
+        List<DefinitionRow> rows = jdbc.query("SELECT e.id employee_id,e.tenant_id,e.employee_code,e.display_name,e.enabled,v.id version_id,v.version_no,v.instructions,v.model_provider,v.model_name,v.content_hash,v.configuration_json,v.published_at FROM digital_employee e JOIN agent_definition_version v ON v.id=e.current_published_version_id WHERE e.tenant_id=? AND e.id=? AND e.enabled=TRUE",
                 (rs, n) -> definitionRow(rs), tenantId.value(), employeeId);
         if (rows.isEmpty()) return Optional.empty();
-        DefinitionRow row = rows.get(0);
-        List<CapabilityBinding> bindings = jdbc.query("SELECT b.capability_code,b.capability_revision,d.capability_type FROM agent_definition_version_capability b JOIN capability_definition d ON d.capability_code=b.capability_code WHERE b.definition_version_id=? ORDER BY b.position_no",
-                (rs, n) -> new CapabilityBinding(row.versionId(), CapabilityBinding.CapabilityType.valueOf(rs.getString("capability_type")),
-                        rs.getString("capability_code"), rs.getString("capability_revision")), row.versionId());
-        DigitalEmployee employee = new DigitalEmployee(row.employeeId(), new TenantId(row.tenantId()), row.employeeCode(), row.displayName(), row.employeeEnabled());
-        AgentDefinitionVersion version = new AgentDefinitionVersion(row.versionId(), row.employeeId(), row.versionNo(), row.instructions(), row.modelProvider(), row.modelName(), row.publishedAt(), row.contentHash());
-        return Optional.of(new PublishedEmployee(employee, version, bindings));
+        return Optional.of(mapPublished(rows.get(0)));
+    }
+
+    @Override public Optional<DigitalEmployee> findEmployee(long employeeId) {
+        List<DigitalEmployee> rows = jdbc.query("SELECT id,tenant_id,employee_code,display_name,enabled FROM digital_employee WHERE id=?",
+                (rs, n) -> new DigitalEmployee(rs.getLong("id"), new TenantId(rs.getLong("tenant_id")),
+                        rs.getString("employee_code"), rs.getString("display_name"), rs.getBoolean("enabled")), employeeId);
+        return rows.stream().findFirst();
+    }
+
+    @Override public Optional<PublishedEmployee> findPublishedVersion(TenantId tenantId, long employeeId, long definitionVersionId) {
+        List<DefinitionRow> rows = jdbc.query("SELECT e.id employee_id,e.tenant_id,e.employee_code,e.display_name,e.enabled,v.id version_id,v.version_no,v.instructions,v.model_provider,v.model_name,v.content_hash,v.configuration_json,v.published_at FROM digital_employee e JOIN agent_definition_version v ON v.employee_id=e.id WHERE e.tenant_id=? AND e.id=? AND v.id=? AND e.enabled=TRUE",
+                (rs, n) -> definitionRow(rs), tenantId.value(), employeeId, definitionVersionId);
+        return rows.stream().findFirst().map(this::mapPublished);
     }
 
     @Override public Optional<AgentDefinitionDraft> findDraft(long employeeId) {
-        List<DraftRow> rows = jdbc.query("SELECT draft_revision,instructions,model_provider,model_name,updated_at FROM agent_definition_draft WHERE employee_id=?",
-                (rs, n) -> new DraftRow(rs.getInt(1), rs.getString(2), rs.getString(3), rs.getString(4), rs.getTimestamp(5).toInstant()), employeeId);
+        List<DraftRow> rows = jdbc.query("SELECT draft_revision,instructions,model_provider,model_name,configuration_json,updated_at FROM agent_definition_draft WHERE employee_id=?",
+                (rs, n) -> new DraftRow(rs.getInt(1), rs.getString(2), rs.getString(3), rs.getString(4), rs.getString(5),
+                        rs.getTimestamp(6).toInstant()), employeeId);
         if (rows.isEmpty()) return Optional.empty();
         DraftRow row = rows.get(0);
         List<CapabilitySelection> selected = jdbc.query("SELECT capability_code,capability_revision FROM agent_definition_draft_capability WHERE employee_id=? ORDER BY position_no",
                 (rs, n) -> new CapabilitySelection(rs.getString(1), rs.getString(2)), employeeId);
-        return Optional.of(new AgentDefinitionDraft(employeeId, row.revision(), row.instructions(), row.provider(), row.model(), selected, row.updatedAt()));
+        return Optional.of(new AgentDefinitionDraft(employeeId, row.revision(), row.instructions(), row.provider(), row.model(),
+                selected, readConfiguration(row.configurationJson()), row.updatedAt()));
     }
 
     @Override public List<CapabilityCatalogEntry> listCapabilities() {
@@ -79,6 +88,16 @@ public class JdbcAgentDefinitionRepository implements AgentDefinitionRepository 
 
     @Override public AgentDefinitionDraft saveDraft(long employeeId, int expectedDraftRevision, String instructions,
             String modelProvider, String modelName, List<CapabilitySelection> capabilities, AgentDefinitionManagementAudit audit) {
+        EmployeeRuntimeConfiguration configuration = findDraft(employeeId)
+                .orElseThrow(() -> new IllegalArgumentException("Agent draft not found")).configuration();
+        return saveDraft(employeeId, expectedDraftRevision, instructions, modelProvider, modelName,
+                capabilities, configuration, audit);
+    }
+
+    @Override public AgentDefinitionDraft saveDraft(long employeeId, int expectedDraftRevision, String instructions,
+            String modelProvider, String modelName, List<CapabilitySelection> capabilities,
+            EmployeeRuntimeConfiguration configuration, AgentDefinitionManagementAudit audit) {
+        Objects.requireNonNull(configuration, "configuration");
         return tx.execute(status -> {
             List<Integer> current = jdbc.query("SELECT draft_revision FROM agent_definition_draft WHERE employee_id=? FOR UPDATE",
                     (rs, n) -> rs.getInt(1), employeeId);
@@ -87,15 +106,16 @@ public class JdbcAgentDefinitionRepository implements AgentDefinitionRepository 
             AgentDefinitionDraft previous = findDraft(employeeId).orElseThrow(() -> new IllegalArgumentException("Agent draft not found"));
             int next = expectedDraftRevision + 1;
             Instant now = Instant.now();
-            jdbc.update("UPDATE agent_definition_draft SET draft_revision=?,instructions=?,model_provider=?,model_name=?,updated_by=?,updated_at=? WHERE employee_id=?",
-                    next, instructions, modelProvider, modelName, audit.actorUserId(), Timestamp.from(now), employeeId);
+            jdbc.update("UPDATE agent_definition_draft SET draft_revision=?,instructions=?,model_provider=?,model_name=?,configuration_json=?,updated_by=?,updated_at=? WHERE employee_id=?",
+                    next, instructions, modelProvider, modelName, writeJson(configuration), audit.actorUserId(), Timestamp.from(now), employeeId);
             jdbc.update("DELETE FROM agent_definition_draft_capability WHERE employee_id=?", employeeId);
             int position = 0;
             for (CapabilitySelection selection : capabilities) {
                 jdbc.update("INSERT INTO agent_definition_draft_capability(employee_id,capability_code,capability_revision,position_no) VALUES(?,?,?,?)",
                         employeeId, selection.capabilityCode(), selection.revision(), ++position);
             }
-            AgentDefinitionDraft saved = new AgentDefinitionDraft(employeeId, next, instructions, modelProvider, modelName, capabilities, now);
+            AgentDefinitionDraft saved = new AgentDefinitionDraft(employeeId, next, instructions, modelProvider, modelName,
+                    capabilities, configuration, now);
             appendManagementAudit(audit.completed(draftSummary(previous), draftSummary(saved), now));
             return saved;
         });
@@ -131,10 +151,11 @@ public class JdbcAgentDefinitionRepository implements AgentDefinitionRepository 
             Instant now = Instant.now();
             KeyHolder key = new GeneratedKeyHolder();
             jdbc.update(connection -> {
-                PreparedStatement statement = connection.prepareStatement("INSERT INTO agent_definition_version(employee_id,version_no,instructions,model_provider,model_name,content_hash,publish_request_id,published_by,published_at) VALUES(?,?,?,?,?,?,?,?,?)", new String[]{"id"});
+                PreparedStatement statement = connection.prepareStatement("INSERT INTO agent_definition_version(employee_id,version_no,instructions,model_provider,model_name,content_hash,configuration_json,publish_request_id,published_by,published_at) VALUES(?,?,?,?,?,?,?,?,?,?)", new String[]{"id"});
                 statement.setLong(1, employeeId); statement.setInt(2, versionNo); statement.setString(3, draft.instructions());
                 statement.setString(4, draft.modelProvider()); statement.setString(5, draft.modelName()); statement.setString(6, contentHash);
-                statement.setString(7, requestId); statement.setLong(8, audit.actorUserId()); statement.setTimestamp(9, Timestamp.from(now));
+                statement.setString(7, writeJson(draft.configuration())); statement.setString(8, requestId);
+                statement.setLong(9, audit.actorUserId()); statement.setTimestamp(10, Timestamp.from(now));
                 return statement;
             }, key);
             Number generated = key.getKey();
@@ -144,6 +165,11 @@ public class JdbcAgentDefinitionRepository implements AgentDefinitionRepository 
             for (CapabilitySelection capability : draft.capabilities()) {
                 jdbc.update("INSERT INTO agent_definition_version_capability(definition_version_id,capability_code,capability_revision,position_no) VALUES(?,?,?,?)",
                         id, capability.capabilityCode(), capability.revision(), ++position);
+            }
+            int memberPosition = 0;
+            for (EmployeeRuntimeConfiguration.FixedMember member : draft.configuration().members()) {
+                jdbc.update("INSERT INTO agent_definition_version_member(parent_definition_version_id,member_role_id,member_employee_id,member_definition_version_id,member_steps,position_no) VALUES(?,?,?,?,?,?)",
+                        id, member.roleId(), member.employeeId(), member.definitionVersionId(), member.steps(), ++memberPosition);
             }
             jdbc.update("UPDATE digital_employee SET current_published_version_id=?,row_version=row_version+1 WHERE id=?", id, employeeId);
             PublishedEmployee result = findByVersionId(employeeId, id);
@@ -213,6 +239,7 @@ public class JdbcAgentDefinitionRepository implements AgentDefinitionRepository 
         summary.put("draftRevision", draft.draftRevision());
         summary.put("modelProvider", draft.modelProvider());
         summary.put("modelName", draft.modelName());
+        summary.put("runtimeProfile", draft.configuration().profile().name());
         summary.put("capabilities", draft.capabilities().stream()
                 .map(item -> item.capabilityCode() + "@" + item.revision()).toList());
         summary.put("contentHash", definitionHash(draft));
@@ -243,14 +270,22 @@ public class JdbcAgentDefinitionRepository implements AgentDefinitionRepository 
     }
 
     private PublishedEmployee findByVersionId(long employeeId, long versionId) {
-        List<DefinitionRow> rows = jdbc.query("SELECT e.id employee_id,e.tenant_id,e.employee_code,e.display_name,e.enabled,v.id version_id,v.version_no,v.instructions,v.model_provider,v.model_name,v.content_hash,v.published_at FROM digital_employee e JOIN agent_definition_version v ON v.employee_id=e.id WHERE e.id=? AND v.id=?",
+        List<DefinitionRow> rows = jdbc.query("SELECT e.id employee_id,e.tenant_id,e.employee_code,e.display_name,e.enabled,v.id version_id,v.version_no,v.instructions,v.model_provider,v.model_name,v.content_hash,v.configuration_json,v.published_at FROM digital_employee e JOIN agent_definition_version v ON v.employee_id=e.id WHERE e.id=? AND v.id=?",
                 (rs, n) -> definitionRow(rs), employeeId, versionId);
         if (rows.isEmpty()) throw new IllegalStateException("Published definition was not found after commit");
-        DefinitionRow row = rows.get(0);
+        return mapPublished(rows.get(0));
+    }
+
+    private PublishedEmployee mapPublished(DefinitionRow row) {
         List<CapabilityBinding> bindings = jdbc.query("SELECT b.capability_code,b.capability_revision,d.capability_type FROM agent_definition_version_capability b JOIN capability_definition d ON d.capability_code=b.capability_code WHERE b.definition_version_id=? ORDER BY b.position_no",
-                (rs, n) -> new CapabilityBinding(versionId, CapabilityBinding.CapabilityType.valueOf(rs.getString(3)), rs.getString(1), rs.getString(2)), versionId);
-        return new PublishedEmployee(new DigitalEmployee(row.employeeId(), new TenantId(row.tenantId()), row.employeeCode(), row.displayName(), row.employeeEnabled()),
-                new AgentDefinitionVersion(versionId, employeeId, row.versionNo(), row.instructions(), row.modelProvider(), row.modelName(), row.publishedAt(), row.contentHash()), bindings);
+                (rs, n) -> new CapabilityBinding(row.versionId(), CapabilityBinding.CapabilityType.valueOf(rs.getString(3)),
+                        rs.getString(1), rs.getString(2)), row.versionId());
+        DigitalEmployee employee = new DigitalEmployee(row.employeeId(), new TenantId(row.tenantId()), row.employeeCode(),
+                row.displayName(), row.employeeEnabled());
+        AgentDefinitionVersion version = new AgentDefinitionVersion(row.versionId(), row.employeeId(), row.versionNo(),
+                row.instructions(), row.modelProvider(), row.modelName(), row.publishedAt(), row.contentHash(),
+                readConfiguration(row.configurationJson()));
+        return new PublishedEmployee(employee, version, bindings);
     }
 
     private CapabilityCatalogEntry mapCapability(ResultSet rs) throws SQLException {
@@ -266,17 +301,28 @@ public class JdbcAgentDefinitionRepository implements AgentDefinitionRepository 
     private DefinitionRow definitionRow(ResultSet rs) throws SQLException {
         return new DefinitionRow(rs.getLong("employee_id"), rs.getLong("tenant_id"), rs.getString("employee_code"), rs.getString("display_name"),
                 rs.getBoolean("enabled"), rs.getLong("version_id"), rs.getInt("version_no"), rs.getString("instructions"),
-                rs.getString("model_provider"), rs.getString("model_name"), rs.getString("content_hash"), rs.getTimestamp("published_at").toInstant());
+                rs.getString("model_provider"), rs.getString("model_name"), rs.getString("content_hash"),
+                rs.getString("configuration_json"), rs.getTimestamp("published_at").toInstant());
+    }
+    private EmployeeRuntimeConfiguration readConfiguration(String raw) {
+        if (raw == null || raw.isBlank()) return EmployeeRuntimeConfiguration.legacyStable();
+        try { return json.readValue(raw, EmployeeRuntimeConfiguration.class); }
+        catch (Exception e) { throw new IllegalStateException("Invalid employee runtime configuration JSON", e); }
     }
     private String writeJson(Object value) {
         try { return json.writeValueAsString(value); } catch (Exception e) { throw new IllegalStateException("Could not serialize runtime capability snapshot", e); }
     }
     private String definitionHash(AgentDefinitionDraft draft) {
         String caps = draft.capabilities().stream().map(c -> c.capabilityCode() + "@" + c.revision()).sorted().reduce((a,b) -> a + "|" + b).orElse("");
-        try { return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest((draft.instructions() + "|" + draft.modelProvider() + "|" + draft.modelName() + "|" + caps).getBytes(StandardCharsets.UTF_8))); }
+        String legacyContent = draft.instructions() + "|" + draft.modelProvider() + "|" + draft.modelName() + "|" + caps;
+        String content = draft.configuration().profile() == com.haizhuo.brain.runtime.api.model.RuntimeProfile.LEGACY_STABLE
+                ? legacyContent : legacyContent + "|" + writeJson(draft.configuration());
+        try { return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(content.getBytes(StandardCharsets.UTF_8))); }
         catch (Exception e) { throw new IllegalStateException("SHA-256 is unavailable", e); }
     }
-    private record DraftRow(int revision, String instructions, String provider, String model, Instant updatedAt) {}
+    private record DraftRow(int revision, String instructions, String provider, String model,
+                            String configurationJson, Instant updatedAt) {}
     private record DefinitionRow(long employeeId, long tenantId, String employeeCode, String displayName, boolean employeeEnabled,
-            long versionId, int versionNo, String instructions, String modelProvider, String modelName, String contentHash, Instant publishedAt) {}
+            long versionId, int versionNo, String instructions, String modelProvider, String modelName, String contentHash,
+            String configurationJson, Instant publishedAt) {}
 }

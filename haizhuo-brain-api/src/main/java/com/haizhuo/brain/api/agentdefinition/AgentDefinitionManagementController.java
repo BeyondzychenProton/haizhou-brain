@@ -2,6 +2,7 @@ package com.haizhuo.brain.api.agentdefinition;
 
 import com.haizhuo.brain.platform.employee.AgentDefinitionDraft;
 import com.haizhuo.brain.platform.employee.AgentDefinitionManagementService;
+import com.haizhuo.brain.platform.employee.EmployeeRuntimeConfiguration;
 import com.haizhuo.brain.platform.employee.CapabilityCatalogEntry;
 import com.haizhuo.brain.platform.employee.CapabilitySelection;
 import com.haizhuo.brain.platform.employee.PublishedEmployee;
@@ -9,7 +10,6 @@ import com.haizhuo.brain.platform.employee.UserCapabilityGrant;
 import com.haizhuo.brain.security.identity.AuthenticatedUser;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
-import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Positive;
 import jakarta.validation.constraints.Size;
@@ -55,7 +55,8 @@ public class AgentDefinitionManagementController {
                                                    @Valid @RequestBody DraftRequest request) {
         return blocking(() -> management.saveDraft(employeeId, request.expectedDraftRevision(),
                 new AgentDefinitionManagementService.DraftUpdate(request.instructions(), request.modelProvider(),
-                        request.modelName(), request.capabilities()), actor.userId().value(), request.reason()));
+                        request.modelName(), request.capabilities(), request.configuration()),
+                actor.userId().value(), request.reason()));
     }
 
     @PostMapping("/agents/{employeeId}/validate")
@@ -105,8 +106,14 @@ public class AgentDefinitionManagementController {
 
     public record DraftRequest(@Positive int expectedDraftRevision, @NotBlank String instructions,
                                @NotBlank String modelProvider, @NotBlank String modelName,
-                               @NotEmpty List<@NotNull CapabilitySelection> capabilities,
+                               @NotNull List<@NotNull CapabilitySelection> capabilities,
+                               EmployeeRuntimeConfiguration configuration,
                                @NotBlank @Size(max = 500) String reason) {
+        /** Compatibility for callers that predate explicit runtime profiles. */
+        public DraftRequest(int expectedDraftRevision, String instructions, String modelProvider,
+                            String modelName, List<CapabilitySelection> capabilities, String reason) {
+            this(expectedDraftRevision, instructions, modelProvider, modelName, capabilities, null, reason);
+        }
     }
 
     public record PublishRequest(@Positive int expectedDraftRevision, @NotBlank @Size(max = 128) String requestId,
