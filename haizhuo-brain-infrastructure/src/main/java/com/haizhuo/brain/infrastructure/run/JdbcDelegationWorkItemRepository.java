@@ -51,14 +51,18 @@ public class JdbcDelegationWorkItemRepository {
         if (maxInvocations < 1 || maxParallel < 1)
             throw new IllegalStateException("delegation is disabled by the frozen Run policy");
         requireCurrentRun(runId, attemptId, fenceToken);
-        if (calls.size() > maxParallel) throw new IllegalStateException("delegation batch exceeds parallel budget");
-
         Set<String> toolIds = new HashSet<>();
         Set<String> spawnRoles = new HashSet<>();
+        Map<String, DelegationAcceptanceProvider.AcceptedDelegation> accepted = new LinkedHashMap<>();
         List<Prepared> prepared = new ArrayList<>(calls.size());
         for (var call : calls) {
             if (!toolIds.add(call.toolUseId())) throw new IllegalArgumentException("duplicate toolUseId in delegation batch");
             if (call.payload().length() > MAX_PAYLOAD_CHARS) throw new IllegalArgumentException("work-item payload is too large");
+            var receipt = findReceipt(runId, attemptId, fenceToken, call);
+            if (receipt.isPresent()) {
+                accepted.put(call.toolUseId(), receipt.get());
+                continue;
+            }
             if (call.operation() == DelegationAcceptanceProvider.Operation.SPAWN) {
                 if (!spawnRoles.add(call.roleId())) throw new IllegalStateException("a batch cannot spawn the same role twice");
                 prepared.add(prepareSpawn(runId, call));
@@ -66,18 +70,17 @@ public class JdbcDelegationWorkItemRepository {
                 prepared.add(prepareFollowUp(runId, call));
             }
         }
+        if (prepared.size() > maxParallel) throw new IllegalStateException("delegation batch exceeds parallel budget");
 
-        Integer used = jdbc.queryForObject("SELECT COUNT(*) FROM platform_run_delegation_invocation WHERE run_id=?",
-                Integer.class, runId.value());
-        if (used != null && used + calls.size() > maxInvocations)
+        List<String> states = jdbc.query("SELECT state FROM platform_run_delegation_invocation WHERE run_id=? FOR UPDATE",
+                (rs, row) -> rs.getString(1), runId.value());
+        if (states.size() + prepared.size() > maxInvocations)
             throw new IllegalStateException("delegation invocation budget exhausted");
-        Integer active = jdbc.queryForObject("SELECT COUNT(*) FROM platform_run_delegation_invocation "
-                        + "WHERE run_id=? AND state IN ('ACTIVE','ACCEPTED')", Integer.class, runId.value());
-        if (active != null && active + calls.size() > maxParallel)
+        long active = states.stream().filter(state -> "ACTIVE".equals(state) || "ACCEPTED".equals(state)).count();
+        if (active + prepared.size() > maxParallel)
             throw new IllegalStateException("parallel delegation budget exhausted");
 
         Instant now = Instant.now();
-        List<DelegationAcceptanceProvider.AcceptedDelegation> accepted = new ArrayList<>(prepared.size());
         for (Prepared item : prepared) {
             if (item.createWorkItem()) {
                 jdbc.update("INSERT INTO platform_run_work_item(work_item_ref,run_id,role_id,source_kind,employee_id,"
@@ -101,20 +104,47 @@ public class JdbcDelegationWorkItemRepository {
             String invocationId = UUID.randomUUID().toString();
             jdbc.update("INSERT INTO platform_run_delegation_invocation(invocation_id,run_id,attempt_id,fence_token,"
                             + "role_id,state,started_at,tool_use_id,work_item_ref,assignment_revision,source_kind,employee_id,"
-                            + "definition_version_id,definition_hash,input_sha256) "
-                            + "VALUES(?,?,?,?,?,'ACCEPTED',?,?,?,?,?,?,?,?,?)",
+                            + "definition_version_id,definition_hash,input_sha256,request_sha256,accepted_payload) "
+                            + "VALUES(?,?,?,?,?,'ACCEPTED',?,?,?,?,?,?,?,?,?,?,?)",
                     invocationId, runId.value(), attemptId, fenceToken, item.roleId(), Timestamp.from(now),
                     item.call().toolUseId(), item.workItemRef(), item.revision(), item.sourceKind().name(),
-                    item.employeeId(), item.definitionVersionId(), item.definitionHash(), item.inputHash());
+                    item.employeeId(), item.definitionVersionId(), item.definitionHash(), item.inputHash(),
+                    requestHash(item.call()), item.normalizedPayload());
             events.append(runId, item.createWorkItem() ? "WORK_ITEM_ACCEPTED" : "WORK_ITEM_REVISED",
                     "只读协作工作项已受理", EventVisibility.INTERNAL,
                     eventMetadata(attemptId, fenceToken), "work-item:" + item.workItemRef() + ":" + item.revision(), now);
-            accepted.add(new DelegationAcceptanceProvider.AcceptedDelegation(
+            accepted.put(item.call().toolUseId(), new DelegationAcceptanceProvider.AcceptedDelegation(
                     reservation(invocationId, runId, attemptId, fenceToken), item.roleId(), item.workItemRef(),
                     item.revision(), item.normalizedPayload(), item.workItemRef(), item.sourceKind(),
                     item.employeeId(), item.definitionVersionId(), item.definitionHash()));
         }
-        return List.copyOf(accepted);
+        return calls.stream().map(call -> accepted.get(call.toolUseId())).toList();
+    }
+
+    private Optional<DelegationAcceptanceProvider.AcceptedDelegation> findReceipt(
+            RunId runId, String attemptId, long fenceToken, DelegationAcceptanceProvider.DelegationCall call) {
+        return jdbc.query("SELECT invocation.invocation_id,invocation.fence_token,invocation.request_sha256,"
+                        + "invocation.role_id,invocation.work_item_ref,invocation.assignment_revision,invocation.source_kind,"
+                        + "invocation.employee_id,invocation.definition_version_id,invocation.definition_hash,"
+                        + "invocation.accepted_payload FROM platform_run_delegation_invocation invocation "
+                        + "WHERE invocation.run_id=? AND invocation.attempt_id=? AND invocation.tool_use_id=? FOR UPDATE",
+                (rs, row) -> {
+                    if (rs.getString(3) == null || rs.getString(11) == null)
+                        throw new IllegalStateException("legacy delegation receipt requires recovery verification");
+                    if (rs.getLong(2) != fenceToken || !requestHash(call).equals(rs.getString(3)))
+                        throw new IllegalStateException("delegation toolUseId idempotency conflict");
+                    String ref = rs.getString(5);
+                    int revision = rs.getInt(6);
+                    return new DelegationAcceptanceProvider.AcceptedDelegation(
+                            reservation(rs.getString(1), runId, attemptId, fenceToken, false), rs.getString(4), ref, revision,
+                            rs.getString(11), ref,
+                            DelegationAcceptanceProvider.SourceKind.valueOf(rs.getString(7)), nullableLong(rs, 8),
+                            nullableLong(rs, 9), rs.getString(10));
+                }, runId.value(), attemptId, call.toolUseId()).stream().findFirst();
+    }
+
+    private static String requestHash(DelegationAcceptanceProvider.DelegationCall call) {
+        return CanonicalJson.sha256Hex(json(call).getBytes(StandardCharsets.UTF_8));
     }
 
     @Transactional
@@ -211,15 +241,16 @@ public class JdbcDelegationWorkItemRepository {
         return Optional.of(resultId);
     }
 
-    @Transactional(readOnly = true)
+    @Transactional
     public boolean requiredWorkItemsAccepted(RunId runId) {
-        Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM platform_run_work_item item "
+        List<String> pending = jdbc.query("SELECT item.work_item_ref FROM platform_run_work_item item "
                         + "JOIN platform_run_work_item_revision revision ON revision.work_item_ref=item.work_item_ref "
                         + "AND revision.assignment_revision=item.latest_assignment_revision "
                         + "WHERE item.run_id=? AND item.required=1 AND (revision.result_id IS NULL "
                         + "OR revision.format_status<>'VALID' OR revision.review_status<>'ACCEPTED' "
-                        + "OR revision.reviewed_result_id<>revision.result_id)", Integer.class, runId.value());
-        return count == null || count == 0;
+                        + "OR revision.reviewed_result_id<>revision.result_id) FOR UPDATE",
+                (rs, row) -> rs.getString(1), runId.value());
+        return pending.isEmpty();
     }
 
     private Prepared prepareSpawn(RunId runId, DelegationAcceptanceProvider.DelegationCall call) {
@@ -287,6 +318,15 @@ public class JdbcDelegationWorkItemRepository {
         String definitionHash = old == null ? call.definitionHash() : old.definitionHash();
         if (old != null && !Objects.equals(call.roleId(), null) && !old.roleId().equals(call.roleId()))
             throw new SecurityException("follow-up role does not match its work item");
+        String payloadJson = json(payload.raw());
+        String hash = CanonicalJson.sha256Hex(call.payload().getBytes(StandardCharsets.UTF_8));
+        return new Prepared(call, role, source, employee, definitionVersion, definitionHash, ref, revision,
+                required, payload.objective(), payload.mediaType(), payload.contractVersion(),
+                json(payload.requiredFields()), json(payload.inputRefs()), json(payload.dependencies()),
+                payloadJson, hash, normalizedPayload(ref, revision, payload, required), create);
+    }
+
+    private static String normalizedPayload(String ref, int revision, ParsedPayload payload, boolean required) {
         Map<String, Object> normalized = new LinkedHashMap<>();
         normalized.put("workItemRef", ref);
         normalized.put("assignmentRevision", revision);
@@ -297,13 +337,7 @@ public class JdbcDelegationWorkItemRepository {
         normalized.put("inputRefs", payload.inputRefs());
         normalized.put("dependsOn", payload.dependencies());
         normalized.put("instructions", "仅依据给定资料完成目标；严格符合 deliverable 契约。不要执行外部动作或修改文件。返回完整最终结果。");
-        String normalizedPayload = json(normalized);
-        String payloadJson = json(payload.raw());
-        String hash = CanonicalJson.sha256Hex(call.payload().getBytes(StandardCharsets.UTF_8));
-        return new Prepared(call, role, source, employee, definitionVersion, definitionHash, ref, revision,
-                required, payload.objective(), payload.mediaType(), payload.contractVersion(),
-                json(payload.requiredFields()), json(payload.inputRefs()), json(payload.dependencies()),
-                payloadJson, hash, normalizedPayload, create);
+        return json(normalized);
     }
 
     private void validateReferences(RunId runId, ParsedPayload payload) {
@@ -331,9 +365,8 @@ public class JdbcDelegationWorkItemRepository {
     }
 
     private boolean existsForRole(RunId runId, String roleId) {
-        Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM platform_run_work_item WHERE run_id=? AND role_id=?",
-                Integer.class, runId.value(), roleId);
-        return count != null && count > 0;
+        return !jdbc.query("SELECT work_item_ref FROM platform_run_work_item WHERE run_id=? AND role_id=? FOR UPDATE",
+                (rs, row) -> rs.getString(1), runId.value(), roleId).isEmpty();
     }
 
     private static String roleFromKey(String agentKey) {
@@ -348,23 +381,39 @@ public class JdbcDelegationWorkItemRepository {
 
     private DelegationBudgetProvider.Reservation reservation(String invocationId, RunId runId,
                                                               String attemptId, long fenceToken) {
+        return reservation(invocationId, runId, attemptId, fenceToken, true);
+    }
+
+    private DelegationBudgetProvider.Reservation reservation(String invocationId, RunId runId,
+                                                              String attemptId, long fenceToken, boolean acceptanceOwner) {
+        var activated = new java.util.concurrent.atomic.AtomicBoolean();
         return new DelegationBudgetProvider.Reservation() {
             @Override public String invocationId() { return invocationId; }
             @Override public boolean activate() {
                 Instant now = Instant.now();
-                return jdbc.update("UPDATE platform_run_delegation_invocation SET state='ACTIVE',started_at=? "
+                boolean started = jdbc.update("UPDATE platform_run_delegation_invocation SET state='ACTIVE',started_at=? "
                                 + "WHERE invocation_id=? AND run_id=? AND attempt_id=? AND fence_token=? AND state='ACCEPTED' "
-                                + "AND EXISTS (SELECT 1 FROM platform_run_execution_attempt attempt WHERE attempt.run_id=? "
+                                + "AND EXISTS (SELECT 1 FROM platform_run_execution_attempt attempt "
+                                + "JOIN platform_agent_run run ON run.run_id=attempt.run_id "
+                                + "WHERE attempt.run_id=? AND run.state='RUNNING' AND run.runtime_profile='TEAM_READONLY' "
                                 + "AND attempt.attempt_id=? AND attempt.fence_token=? AND attempt.state='RUNNING' "
                                 + "AND attempt.lease_expires_at>?)",
                         Timestamp.from(now), invocationId, runId.value(), attemptId, fenceToken,
                         runId.value(), attemptId, fenceToken, Timestamp.from(now)) == 1;
+                if (started) activated.set(true);
+                return started;
             }
             @Override public void close() {
                 Instant now = Instant.now();
-                jdbc.update("UPDATE platform_run_delegation_invocation SET state=IF(state='ACTIVE','FINISHED','NOT_STARTED'),finished_at=? "
-                                + "WHERE invocation_id=? AND state IN ('ACTIVE','ACCEPTED')",
-                        Timestamp.from(now), invocationId);
+                if (activated.getAndSet(false)) {
+                    jdbc.update("UPDATE platform_run_delegation_invocation SET state='FINISHED',finished_at=? "
+                                    + "WHERE invocation_id=? AND state='ACTIVE'",
+                            Timestamp.from(now), invocationId);
+                } else if (acceptanceOwner) {
+                    jdbc.update("UPDATE platform_run_delegation_invocation SET state='NOT_STARTED',finished_at=? "
+                                    + "WHERE invocation_id=? AND state='ACCEPTED'",
+                            Timestamp.from(now), invocationId);
+                }
             }
         };
     }
@@ -383,8 +432,11 @@ public class JdbcDelegationWorkItemRepository {
     private boolean lockAndValidate(ExecutionClaim claim) {
         Instant now = Instant.now();
         if (events.lockRun(claim.run().id()) == null) return false;
-        return !jdbc.query("SELECT attempt_id FROM platform_run_execution_attempt WHERE run_id=? AND attempt_id=? "
-                        + "AND lease_token=? AND fence_token=? AND state='RUNNING' AND lease_expires_at>? FOR UPDATE",
+        return !jdbc.query("SELECT attempt.attempt_id FROM platform_run_execution_attempt attempt "
+                        + "JOIN platform_agent_run run ON run.run_id=attempt.run_id "
+                        + "WHERE run.run_id=? AND run.state='RUNNING' AND run.runtime_profile='TEAM_READONLY' "
+                        + "AND attempt.attempt_id=? AND attempt.lease_token=? AND attempt.fence_token=? "
+                        + "AND attempt.state='RUNNING' AND attempt.lease_expires_at>? FOR UPDATE",
                 (rs, row) -> rs.getString(1), claim.run().id().value(), claim.attempt().attemptId(),
                 claim.attempt().leaseToken(), claim.attempt().fenceToken(), Timestamp.from(now)).isEmpty();
     }

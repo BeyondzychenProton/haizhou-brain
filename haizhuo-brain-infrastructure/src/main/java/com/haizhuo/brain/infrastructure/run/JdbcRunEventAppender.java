@@ -57,7 +57,7 @@ public class JdbcRunEventAppender {
             dedup = "native:" + metadata.attemptId() + ":" + metadata.nativeRefs().nativeEventId() + ":" + type;
         String key = dedup == null ? null : CanonicalJson.sha256Hex(dedup.getBytes(StandardCharsets.UTF_8));
         if (key != null) {
-            List<Long> replay = jdbc.query("SELECT session_cursor FROM platform_agent_run_event WHERE run_id=? AND business_key=?",
+            List<Long> replay = jdbc.query("SELECT session_cursor FROM platform_agent_run_event WHERE run_id=? AND business_key=? FOR UPDATE",
                     (rs, n) -> rs.getLong(1), runId.value(), key);
             if (!replay.isEmpty()) return replay.get(0);
         }
@@ -71,7 +71,11 @@ public class JdbcRunEventAppender {
         } else if (!latest.isEmpty()) {
             attempt = (String) latest.get(0)[0]; fence = (Long) latest.get(0)[1];
         }
-        Integer seq = jdbc.queryForObject("SELECT COALESCE(MAX(sequence_no),0)+1 FROM platform_agent_run_event WHERE run_id=?", Integer.class, runId.value());
+        // MySQL REPEATABLE READ may retain a snapshot created before waiting for the Session lock.
+        // Read the last row with a locking current read; a snapshot MAX can reuse a committed sequence.
+        List<Integer> previous = jdbc.query("SELECT sequence_no FROM platform_agent_run_event WHERE run_id=? "
+                        + "ORDER BY sequence_no DESC LIMIT 1 FOR UPDATE", (rs, n) -> rs.getInt(1), runId.value());
+        int seq = previous.isEmpty() ? 1 : previous.get(0) + 1;
         long cursor = projector.allocateCursor(sessionId);
         String eventId = runId.value() + ":" + seq;
         DurableEventMetadata stored = new DurableEventMetadata(metadata.schemaVersion(), eventId, attempt, fence,

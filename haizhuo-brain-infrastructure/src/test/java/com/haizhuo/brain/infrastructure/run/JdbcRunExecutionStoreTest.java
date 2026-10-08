@@ -62,7 +62,7 @@ class JdbcRunExecutionStoreTest {
                 + "role_id VARCHAR(64) NOT NULL,state VARCHAR(16) NOT NULL,started_at TIMESTAMP NOT NULL,"
                 + "finished_at TIMESTAMP NULL,tool_use_id VARCHAR(128),work_item_ref VARCHAR(64),"
                 + "assignment_revision INT,source_kind VARCHAR(32),employee_id BIGINT,definition_version_id BIGINT,"
-                + "definition_hash CHAR(64),input_sha256 CHAR(64))");
+                + "definition_hash CHAR(64),input_sha256 CHAR(64),request_sha256 CHAR(64),accepted_payload CLOB)");
         jdbc.execute("CREATE TABLE platform_run_work_item(work_item_ref VARCHAR(64) PRIMARY KEY,run_id VARCHAR(64) NOT NULL,"
                 + "role_id VARCHAR(64) NOT NULL,source_kind VARCHAR(32) NOT NULL,employee_id BIGINT,"
                 + "definition_version_id BIGINT,definition_hash CHAR(64),required BOOLEAN NOT NULL,"
@@ -242,6 +242,63 @@ class JdbcRunExecutionStoreTest {
                 Integer.class, "run-work-item-refs"));
         assertEquals(0, jdbc.queryForObject("SELECT COUNT(*) FROM platform_run_delegation_invocation WHERE run_id=?",
                 Integer.class, "run-work-item-refs"));
+    }
+
+    @Test
+    void delegationAcceptanceReusesTheSameNativeToolReceipt() {
+        insertRun(jdbc, "run-idempotent", "session-1", "QUEUED");
+        insertRunSpec(jdbc, "run-idempotent");
+        jdbc.update("UPDATE platform_agent_run SET runtime_profile='TEAM_READONLY' WHERE run_id='run-idempotent'");
+        var claim = store.claimNext("worker-idempotent", TTL).orElseThrow();
+        var call = new DelegationAcceptanceProvider.DelegationCall("spawn-idempotent",
+                DelegationAcceptanceProvider.Operation.SPAWN, "researcher",
+                DelegationAcceptanceProvider.SourceKind.PUBLISHED_EXPERT, 22L, 202L, "a".repeat(64),
+                null, null, workItemPayload("research", true, "text/plain", "v1", List.of(), List.of(), List.of()));
+        var first = store.acceptBatch(claim.run().id(), claim.attempt().attemptId(), claim.attempt().fenceToken(),
+                1, 1, List.of(call)).get(0);
+        var replay = store.acceptBatch(claim.run().id(), claim.attempt().attemptId(), claim.attempt().fenceToken(),
+                1, 1, List.of(call)).get(0);
+        assertEquals(first.reservation().invocationId(), replay.reservation().invocationId());
+        assertEquals(first.normalizedPayload(), replay.normalizedPayload());
+        assertEquals(1, jdbc.queryForObject("SELECT COUNT(*) FROM platform_run_delegation_invocation", Integer.class));
+        var changedIdentity = new DelegationAcceptanceProvider.DelegationCall(call.toolUseId(), call.operation(),
+                call.roleId(), call.sourceKind(), call.employeeId(), call.definitionVersionId(), "b".repeat(64),
+                call.agentKey(), call.label(), call.payload());
+        assertThrows(IllegalStateException.class, () -> store.acceptBatch(claim.run().id(),
+                claim.attempt().attemptId(), claim.attempt().fenceToken(), 1, 1, List.of(changedIdentity)));
+        replay.reservation().close();
+        assertEquals("ACCEPTED", jdbc.queryForObject("SELECT state FROM platform_run_delegation_invocation", String.class));
+        assertTrue(first.reservation().activate());
+        assertFalse(replay.reservation().activate());
+        replay.reservation().close();
+        assertEquals("ACTIVE", jdbc.queryForObject("SELECT state FROM platform_run_delegation_invocation", String.class));
+        first.reservation().close();
+        assertEquals("FINISHED", jdbc.queryForObject("SELECT state FROM platform_run_delegation_invocation", String.class));
+        jdbc.update("UPDATE platform_run_delegation_invocation SET request_sha256=NULL");
+        assertThrows(IllegalStateException.class, () -> store.acceptBatch(claim.run().id(),
+                claim.attempt().attemptId(), claim.attempt().fenceToken(), 1, 1, List.of(call)));
+    }
+
+    @Test
+    void lateChildResultCannotCommitWhileParentIsCancelling() {
+        insertRun(jdbc, "run-child-cancel", "session-1", "QUEUED");
+        insertRunSpec(jdbc, "run-child-cancel");
+        jdbc.update("UPDATE platform_agent_run SET runtime_profile='TEAM_READONLY' WHERE run_id='run-child-cancel'");
+        var claim = store.claimNext("worker-child-cancel", TTL).orElseThrow();
+        var call = new DelegationAcceptanceProvider.DelegationCall("spawn-child-cancel",
+                DelegationAcceptanceProvider.Operation.SPAWN, "researcher",
+                DelegationAcceptanceProvider.SourceKind.PUBLISHED_EXPERT, 22L, 202L, "a".repeat(64),
+                null, null, workItemPayload("research", true, "text/plain", "v1", List.of(), List.of(), List.of()));
+        var accepted = store.acceptBatch(claim.run().id(), claim.attempt().attemptId(), claim.attempt().fenceToken(),
+                4, 2, List.of(call)).get(0);
+        assertTrue(accepted.reservation().activate());
+        jdbc.update("UPDATE platform_agent_run SET state='CANCELLING' WHERE run_id='run-child-cancel'");
+        var descriptor = new AgentEventDescriptor("late-child", Instant.now().toString(), "AgentEndEvent",
+                "session-1/researcher", "reply-1", null, null, "sub-child", null, "session-1",
+                AgentExecutionRole.CHILD, claim.attempt().attemptId(), claim.attempt().fenceToken());
+        assertTrue(store.recordDelegationResult(claim,
+                new AgentDelegationResult("researcher", 22L, 202L, "late result", descriptor)).isEmpty());
+        assertEquals(0, jdbc.queryForObject("SELECT COUNT(*) FROM platform_agent_result", Integer.class));
     }
 
     private static String workItemPayload(String objective, boolean required, String mediaType,
