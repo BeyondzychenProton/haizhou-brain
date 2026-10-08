@@ -5,6 +5,9 @@ import com.haizhuo.brain.runtime.agentscope.context.RunScopedDelegationBudget;
 import io.agentscope.core.agent.Agent;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.event.AgentEvent;
+import io.agentscope.core.event.AgentResultEvent;
+import com.haizhuo.brain.runtime.api.event.AgentEventDescriptor;
+import com.haizhuo.brain.runtime.api.event.AgentExecutionRole;
 import io.agentscope.core.middleware.AgentInput;
 import io.agentscope.harness.agent.middleware.HarnessRuntimeMiddleware;
 import java.util.function.Function;
@@ -46,11 +49,18 @@ public final class FixedExpertScopeMiddleware implements HarnessRuntimeMiddlewar
             return Flux.error(new SecurityException("fixed expert Run fence or delegation budget is missing"));
         RunScopedDelegationBudget.Lease lease;
         try {
-            lease = budget.activate(roleId);
+            lease = budget.activate(roleId, input.msgs().get(0).getTextContent());
         } catch (RuntimeException denied) {
             return Flux.error(denied);
         }
-        return next.apply(input).doFinally(signal -> lease.close());
+        return next.apply(input).doOnNext(event -> {
+            if (event instanceof AgentResultEvent result) {
+                budget.complete(lease, result.getResult().getTextContent(),
+                        new AgentEventDescriptor(event.getId(), event.getCreatedAt(), event.getType().name(),
+                                event.getSource(), result.getResult().getId(), null, null, context.getSessionId(),
+                                null, trustedParentSessionId, AgentExecutionRole.CHILD, call.attemptId(), call.fenceToken()));
+            }
+        }).doFinally(signal -> budget.release(lease));
     }
 
     private boolean sameRun(HarnessCallContext expected, HarnessCallContext actual) {

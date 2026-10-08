@@ -3,6 +3,7 @@ package com.haizhuo.brain.runtime.agentscope.harness;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -48,6 +49,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -116,6 +119,61 @@ class NativeTeamExecutionGatewayTest {
         assertTrue(persistence.memberEvents.stream().anyMatch(event -> event.endsWith(":lead:ENDED")));
         assertTrue(lead.toolResults.stream().anyMatch(value -> value.contains("worker-result")));
         assertTrue(worker.toolResults.stream().anyMatch(value -> value.contains("task-1")));
+    }
+
+    @Test
+    @Timeout(25)
+    void cancellationDisposesActiveHarnessAndRequiresRecoveryInsteadOfCompletingTeam() throws Exception {
+        AtomicBoolean cancelled = new AtomicBoolean();
+        AtomicInteger modelCalls = new AtomicInteger();
+        ChatModelBase blockedLead = new ChatModelBase() {
+            @Override protected Flux<ChatResponse> doStream(List<Msg> messages, List<ToolSchema> tools,
+                                                             GenerateOptions options) {
+                modelCalls.incrementAndGet();
+                return Flux.never();
+            }
+            @Override public String getModelName() { return "blocked-team-lead"; }
+        };
+        ScriptedModel worker = new WorkerModel();
+        AgentScopeModelFactory models = new AgentScopeModelFactory(new AgentScopeRuntimeProperties(
+                "openai", "test-model", "not-used", "http://localhost", true, workspace.toString())) {
+            @Override public ChatModelBase create(RuntimeDefinitionSnapshot definition) {
+                return definition.definitionVersionId() == 201 ? blockedLead : worker;
+            }
+        };
+        NoopInbox inbox = new NoopInbox() {
+            @Override public boolean isCancellationRequested(RunId runId) { return cancelled.get(); }
+        };
+        NativeTeamMemberFactory members = new NativeTeamMemberFactory(models, new InMemoryAgentStateStore(),
+                new DefinitionWorkspaceMaterializer(workspace.resolve("definitions")), inbox);
+        TestPersistence persistence = new TestPersistence();
+        NativeTeamExecutionGateway gateway = new NativeTeamExecutionGateway(new InMemoryStore(), persistence,
+                members, inbox);
+        RuntimeContext rootContext = RuntimeContext.builder().userId("55").sessionId("business-session")
+                .put(HarnessCallContext.class, new HarnessCallContext(new RunId("parent-run-cancel"), "attempt-cancel", 4,
+                        "business-workspace", new RuntimeRunConstraints("view", Set.of(), "caps"), null,
+                        "coordinator"))
+                .build();
+        ExecutorService caller = Executors.newSingleThreadExecutor();
+        try {
+            var execution = caller.submit(() -> gateway.execute(ownerDefinition(workerDefinition()),
+                    "Wait for cancellation", rootContext));
+            long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (modelCalls.get() == 0 && System.nanoTime() < until) Thread.sleep(10);
+            assertEquals(1, modelCalls.get(), "lead Harness should be actively waiting on its model stream");
+            cancelled.set(true);
+            ExecutionException failure = assertThrows(ExecutionException.class,
+                    () -> execution.get(10, TimeUnit.SECONDS));
+            assertTrue(failure.getCause() instanceof IllegalStateException, String.valueOf(failure.getCause()));
+            assertTrue(persistence.recoveryRequired);
+            assertFalse(persistence.completed);
+            assertTrue(persistence.memberEvents.stream().anyMatch(event -> event.endsWith(":lead:STOPPED")),
+                    persistence.memberEvents.toString());
+        } finally {
+            cancelled.set(true);
+            caller.shutdownNow();
+            assertTrue(caller.awaitTermination(10, TimeUnit.SECONDS));
+        }
     }
 
     private RuntimeDefinitionSnapshot ownerDefinition(RuntimeDefinitionSnapshot worker) {
@@ -211,7 +269,7 @@ class NativeTeamExecutionGatewayTest {
         @Override public String getModelName() { return "deterministic-team-worker"; }
     }
 
-    private static final class NoopInbox implements RunControlInbox {
+    private static class NoopInbox implements RunControlInbox {
         @Override public List<RunGuidanceMessage> consumeGuidance(RunId runId) { return List.of(); }
         @Override public boolean isCancellationRequested(RunId runId) { return false; }
     }

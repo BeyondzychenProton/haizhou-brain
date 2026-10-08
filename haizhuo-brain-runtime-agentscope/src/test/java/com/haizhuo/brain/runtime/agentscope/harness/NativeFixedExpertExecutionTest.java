@@ -63,6 +63,8 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import java.util.UUID;
 import reactor.core.publisher.Flux;
 
@@ -71,9 +73,10 @@ class NativeFixedExpertExecutionTest {
     private final Path work = Path.of(System.getProperty("user.dir"), "target", "native-fixed-experts-tests",
             UUID.randomUUID().toString());
 
-    @Test
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
     @Timeout(30)
-    void nativeSpawnUsesOnlyAuthorizedFrozenExpertAndPropagatesParentScope() {
+    void nativeSpawnUsesOnlyAuthorizedFrozenExpertAndPropagatesParentScope(boolean persistenceFailure) {
         ScriptedRootModel rootModel = new ScriptedRootModel();
         ScriptedExpertModel expertModel = new ScriptedExpertModel();
         AgentStateStore states = new InMemoryAgentStateStore();
@@ -107,6 +110,13 @@ class NativeFixedExpertExecutionTest {
                 return () -> invocationId;
             };
             DelegationAcceptanceProvider acceptance = new DelegationAcceptanceProvider() {
+                @Override public Optional<String> completeInvocation(RunId runId, String attemptId, long fenceToken,
+                                                                      CompletedInvocation completed) {
+                    assertEquals("research-result", completed.body());
+                    assertNotNull(completed.descriptor().nativeSessionId());
+                    if (persistenceFailure) throw new IllegalStateException("injected complete Msg persistence failure");
+                    return Optional.of("probe-result");
+                }
                 @Override public List<AcceptedDelegation> acceptBatch(RunId runId, String attemptId, long fenceToken,
                                                                        int maxInvocations, int maxParallel,
                                                                        List<DelegationCall> calls) {
@@ -133,6 +143,15 @@ class NativeFixedExpertExecutionTest {
                 }
             };
             var context = new RuntimeContextFactory(reservations, acceptance).create(request);
+            if (persistenceFailure) {
+                var runtime = new com.haizhuo.brain.runtime.agentscope.AgentScopeRuntime(
+                        new com.haizhuo.brain.runtime.agentscope.factory.HarnessTemplateCache(factory),
+                        new RuntimeContextFactory(reservations, acceptance), new AgentScopeEventTranslator());
+                assertThrows(com.haizhuo.brain.runtime.api.DelegationPersistenceException.class,
+                        () -> runtime.execute(request).collectList().block(Duration.ofSeconds(20)));
+                assertEquals(1, expertModel.calls.get(), "native child actually executed before result persistence failed");
+                return;
+            }
             List<io.agentscope.core.event.AgentEvent> events = template.agent()
                     .streamEvents("请研究这个问题", context).collectList().block(Duration.ofSeconds(20));
 
@@ -178,6 +197,12 @@ class NativeFixedExpertExecutionTest {
                 return () -> invocationId;
             };
             DelegationAcceptanceProvider acceptance = new DelegationAcceptanceProvider() {
+                @Override public Optional<String> completeInvocation(RunId runId, String attemptId, long fenceToken,
+                                                                      CompletedInvocation completed) {
+                    assertEquals("research-result", completed.body());
+                    assertNotNull(completed.descriptor().nativeSessionId());
+                    return Optional.of("probe-dynamic-result");
+                }
                 @Override public List<AcceptedDelegation> acceptBatch(RunId runId, String attemptId, long fenceToken,
                                                                        int maxInvocations, int maxParallel,
                                                                        List<DelegationCall> calls) {

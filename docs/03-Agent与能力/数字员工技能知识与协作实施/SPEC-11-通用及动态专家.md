@@ -1,6 +1,6 @@
 # SPEC-11 通用及动态专家
 
-状态：通用与动态专家工厂已接入原生 Harness 中间件；动态路径通过确定性模型探针验证了同一 Run 内 `agent_generate` 生成、原生注册并由 `agent_spawn` 执行。只读子 Agent 继承可信用户和 Run fence，且模型工具表为空。真实模型、通用专家实际执行、并行实例隔离、重启后定义读取及拒绝路径矩阵尚未验收；本 SPEC 与动态 profile 仍保持关闭。任务：C14。依赖：SPEC-00 动态/并行契约、09、10。设计依据：[详细设计](../数字员工技能知识与只读协作改造详细设计.md) §8.6、§9、§13.6。
+状态：通用与动态专家工厂已接入原生 Harness 中间件；动态路径通过确定性模型探针验证了同一 Run 内 `agent_generate` 生成、原生注册并由 `agent_spawn` 执行。只读子 Agent 继承可信用户和 Run fence，且模型工具表为空。同类型两实例的 Session 隔离、label 跟进及完整结果关联已通过原生确定性探针，V33/MySQL 验证了准确 invocation 结果绑定。真实模型、实际同时执行/独立取消、重启后定义读取及拒绝路径矩阵尚未全部验收；本 SPEC 与动态 profile 仍保持关闭。任务：C14。依赖：SPEC-00 动态/并行契约、09、10。设计依据：[详细设计](../数字员工技能知识与只读协作改造详细设计.md) §8.6、§9、§13.6。
 
 ## 原生复用
 
@@ -8,7 +8,8 @@
 
 ## 安全与生命周期
 
-- general-purpose 同实例 active 1；同类型并行必须有 agent_key/childSession/toolUseId/source 独立映射证据，未证明时不开放。
+- general-purpose 同实例 active 1；原生 source 不是独立实例证据。同类型两实例通过已受理工作项/输入修订/invocation 与实际 childSession 关联，原生 label 保留各自上下文；并行执行、独立取消和恢复门槛仍须验证。
+- 生产跟进使用服务端受理的 workItem label。原生 agent_key 尚无持久的可信 key → workItem 映射，本切片拒绝仅凭 key 定位；不从其角色片段选择某个最新实例。需要支持 key 时先补真实原生 handle 映射与恢复验证。
 - 动态角色使用 dyn- 名称空间，不允许覆盖固定角色/通用名称；限制数量、定义长度、步骤、工具和文件来源。
 - 生成声明审核归一为 Session scoped 的只读有效规格，绑定创建来源/父版本/hash；不将模型声明直接视为批准策略。
 - 原生默认生成路径的 middleware 必须显式接线并验证 leaf 工具集，不能只启用 agent_generate 就声称可执行安全专家。

@@ -2,6 +2,7 @@ package com.haizhuo.brain.infrastructure.run;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.haizhuo.brain.kernel.identity.RunId;
 import com.haizhuo.brain.kernel.json.CanonicalJson;
 import com.haizhuo.brain.platform.run.AgentDelegationResult;
@@ -32,6 +33,8 @@ import org.springframework.transaction.annotation.Transactional;
 public class JdbcDelegationWorkItemRepository {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final int MAX_PAYLOAD_CHARS = 64_000;
+    private static final int MAX_INLINE_MATERIALS = 8;
+    private static final int MAX_INLINE_MATERIAL_BYTES = 32_000;
     private final JdbcTemplate jdbc;
     private final JdbcRunEventAppender events;
     private final JdbcAgentResultRepository results;
@@ -64,7 +67,9 @@ public class JdbcDelegationWorkItemRepository {
                 continue;
             }
             if (call.operation() == DelegationAcceptanceProvider.Operation.SPAWN) {
-                if (!spawnRoles.add(call.roleId())) throw new IllegalStateException("a batch cannot spawn the same role twice");
+                if (call.sourceKind() == DelegationAcceptanceProvider.SourceKind.PUBLISHED_EXPERT
+                        && !spawnRoles.add(call.roleId()))
+                    throw new IllegalStateException("a batch cannot spawn the same fixed role twice");
                 prepared.add(prepareSpawn(runId, call));
             } else {
                 prepared.add(prepareFollowUp(runId, call));
@@ -81,7 +86,8 @@ public class JdbcDelegationWorkItemRepository {
             throw new IllegalStateException("parallel delegation budget exhausted");
 
         Instant now = Instant.now();
-        for (Prepared item : prepared) {
+        for (Prepared acceptedInput : prepared) {
+            Prepared item = persistInlineMaterials(runId, attemptId, fenceToken, acceptedInput, now);
             if (item.createWorkItem()) {
                 jdbc.update("INSERT INTO platform_run_work_item(work_item_ref,run_id,role_id,source_kind,employee_id,"
                                 + "definition_version_id,definition_hash,required,latest_assignment_revision,state,created_at,updated_at) "
@@ -203,28 +209,77 @@ public class JdbcDelegationWorkItemRepository {
     }
 
     @Transactional
+    public Optional<String> completeInvocation(RunId runId, String attemptId, long fenceToken,
+            DelegationAcceptanceProvider.CompletedInvocation completed) {
+        requireCurrentRun(runId, attemptId, fenceToken);
+        if (!attemptId.equals(completed.descriptor().attemptId())
+                || !Objects.equals(fenceToken, completed.descriptor().fenceToken()))
+            throw new SecurityException("child result provenance differs from its Run fence");
+        List<CompletionTarget> rows = jdbc.query("SELECT invocation.invocation_id,invocation.work_item_ref,"
+                        + "invocation.assignment_revision,invocation.source_kind,invocation.employee_id,"
+                        + "invocation.definition_version_id,revision.deliverable_media_type,revision.contract_version,"
+                        + "revision.required_fields_json,invocation.role_id,invocation.accepted_payload,invocation.state,"
+                        + "invocation.native_session_id,revision.result_id,revision.result_sha256 "
+                        + "FROM platform_run_delegation_invocation invocation "
+                        + "JOIN platform_run_work_item_revision revision ON revision.work_item_ref=invocation.work_item_ref "
+                        + "AND revision.assignment_revision=invocation.assignment_revision "
+                        + "WHERE invocation.run_id=? AND invocation.attempt_id=? AND invocation.fence_token=? "
+                        + "AND invocation.invocation_id=? FOR UPDATE",
+                (rs, row) -> new CompletionTarget(new InvocationTarget(rs.getString(1), rs.getString(2), rs.getInt(3),
+                        DelegationAcceptanceProvider.SourceKind.valueOf(rs.getString(4)), nullableLong(rs, 5),
+                        nullableLong(rs, 6), rs.getString(7), rs.getString(8), rs.getString(9), rs.getString(11)),
+                        rs.getString(10), rs.getString(11), rs.getString(12), rs.getString(13),
+                        rs.getString(14), rs.getString(15)),
+                runId.value(), attemptId, fenceToken, completed.invocationId());
+        if (rows.size() != 1) return Optional.empty();
+        CompletionTarget row = rows.get(0);
+        if (!row.roleId().equals(completed.roleId()) || !Objects.equals(row.acceptedPayload(), completed.acceptedPayload()))
+            throw new SecurityException("child result does not match its immutable accepted input");
+        String nativeSession = completed.descriptor().nativeSessionId();
+        if (row.nativeSessionId() != null && !row.nativeSessionId().equals(nativeSession))
+            throw new SecurityException("child invocation changed native Session");
+        if (row.resultId() != null) {
+            if (!CanonicalJson.sha256Hex(completed.body().getBytes(StandardCharsets.UTF_8)).equals(row.resultHash()))
+                throw new IllegalStateException("immutable invocation result conflicts");
+            return Optional.of(row.resultId());
+        }
+        if (!"ACTIVE".equals(row.state())) return Optional.empty();
+        jdbc.update("UPDATE platform_run_delegation_invocation SET native_session_id=? WHERE invocation_id=?",
+                nativeSession, completed.invocationId());
+        var target = row.target();
+        return saveCompletedResult(runId, attemptId, target, new AgentDelegationResult(row.roleId(),
+                target.employeeId(), target.definitionVersionId(), completed.body(), completed.descriptor()));
+    }
+
+    @Transactional
     public Optional<String> recordDelegationResult(ExecutionClaim claim, AgentDelegationResult result) {
         if (!lockAndValidate(claim)) return Optional.empty();
         List<InvocationTarget> targets = jdbc.query("SELECT invocation.invocation_id,invocation.work_item_ref,"
                         + "invocation.assignment_revision,invocation.source_kind,invocation.employee_id,"
                         + "invocation.definition_version_id,revision.deliverable_media_type,revision.contract_version,"
-                        + "revision.required_fields_json FROM platform_run_delegation_invocation invocation "
+                        + "revision.required_fields_json,invocation.accepted_payload FROM platform_run_delegation_invocation invocation "
                         + "JOIN platform_run_work_item_revision revision ON revision.work_item_ref=invocation.work_item_ref "
                         + "AND revision.assignment_revision=invocation.assignment_revision "
                         + "WHERE invocation.run_id=? AND invocation.attempt_id=? AND invocation.fence_token=? "
                         + "AND invocation.role_id=? AND invocation.state='ACTIVE' FOR UPDATE",
                 (rs, row) -> new InvocationTarget(rs.getString(1), rs.getString(2), rs.getInt(3),
                         DelegationAcceptanceProvider.SourceKind.valueOf(rs.getString(4)), nullableLong(rs, 5),
-                        nullableLong(rs, 6), rs.getString(7), rs.getString(8), rs.getString(9)),
+                        nullableLong(rs, 6), rs.getString(7), rs.getString(8), rs.getString(9), rs.getString(10)),
                 claim.run().id().value(), claim.attempt().attemptId(), claim.attempt().fenceToken(), result.roleId());
         if (targets.size() != 1) return Optional.empty();
         InvocationTarget target = targets.get(0);
         if (!Objects.equals(target.employeeId(), result.employeeId())
                 || !Objects.equals(target.definitionVersionId(), result.definitionVersionId()))
             throw new SecurityException("child executor identity differs from its accepted work item");
-        String formatStatus = validateBody(target.mediaType(), target.requiredFieldsJson(), result.body());
+        return saveCompletedResult(claim.run().id(), claim.attempt().attemptId(), target, result);
+    }
+
+    private Optional<String> saveCompletedResult(RunId runId, String attemptId, InvocationTarget target,
+                                                AgentDelegationResult result) {
+        String formatStatus = validateBody(target.mediaType(), target.requiredFieldsJson(), result.body(),
+                reviewedResultFromAcceptedPayload(target.acceptedPayload()));
         Instant now = Instant.now();
-        String resultId = results.saveDelegation(claim, target.invocationId(), result.roleId(),
+        String resultId = results.saveDelegation(runId, attemptId, target.invocationId(), result.roleId(),
                 result.employeeId(), result.definitionVersionId(), target.mediaType(), result.body(),
                 result.descriptor(), now);
         String hash = CanonicalJson.sha256Hex(result.body().getBytes(StandardCharsets.UTF_8));
@@ -233,7 +288,7 @@ public class JdbcDelegationWorkItemRepository {
                 resultId, hash, formatStatus, target.workItemRef(), target.revision());
         jdbc.update("UPDATE platform_run_work_item SET state='RESULT_READY',updated_at=? WHERE work_item_ref=?",
                 Timestamp.from(now), target.workItemRef());
-        events.append(claim.run().id(), "WORK_ITEM_RESULT_READY", "子 Agent 完整结果已保存并等待根 Agent 验收",
+        events.append(runId, "WORK_ITEM_RESULT_READY", "子 Agent 完整结果已保存并等待根 Agent 验收",
                 EventVisibility.INTERNAL, DurableEventMetadata.execution(result.descriptor()).withResult(resultId),
                 "work-item-result:" + target.workItemRef() + ":" + target.revision(), now);
         jdbc.update("UPDATE platform_run_delegation_invocation SET state='FINISHED',finished_at=? "
@@ -264,33 +319,34 @@ public class JdbcDelegationWorkItemRepository {
         if (call.sourceKind() == DelegationAcceptanceProvider.SourceKind.PUBLISHED_EXPERT
                 && (call.employeeId() == null || call.definitionVersionId() == null))
             throw new SecurityException("published expert identity is incomplete");
-        if (existsForRole(runId, call.roleId()))
+        if (call.sourceKind() == DelegationAcceptanceProvider.SourceKind.PUBLISHED_EXPERT
+                && existsForRole(runId, call.roleId()))
             throw new IllegalStateException("this Run already has a work item for the delegated role; use agent_send for revisions");
         String ref = "wi-" + UUID.randomUUID();
         int revision = 1;
-        validateReferences(runId, payload);
-        return prepared(call, ref, revision, payload, true, payload.required());
+        List<ResolvedMaterial> materials = validateReferences(runId, payload);
+        return prepared(call, ref, revision, payload, true, payload.required(), null, materials);
     }
 
     private Prepared prepareFollowUp(RunId runId, DelegationAcceptanceProvider.DelegationCall call) {
         String workItemRef = call.label() != null && call.label().matches("wi-[0-9a-fA-F-]{36}")
                 ? call.label() : null;
-        String roleId = workItemRef == null ? roleFromKey(call.agentKey()) : null;
+        if (workItemRef == null)
+            throw new SecurityException("follow-up requires the accepted work-item label; native keys are not identity proof");
         List<WorkItemState> rows = jdbc.query("SELECT item.work_item_ref,item.role_id,item.source_kind,item.employee_id,"
                         + "item.definition_version_id,item.definition_hash,item.required,item.latest_assignment_revision,"
                         + "revision.deliverable_media_type,revision.contract_version,revision.required_fields_json,"
-                        + "revision.review_status,revision.result_id,invocation.state "
+                        + "revision.review_status,revision.result_id,revision.result_sha256,invocation.state "
                         + "FROM platform_run_work_item item JOIN platform_run_work_item_revision revision "
                         + "ON revision.work_item_ref=item.work_item_ref AND revision.assignment_revision=item.latest_assignment_revision "
                         + "LEFT JOIN platform_run_delegation_invocation invocation ON invocation.work_item_ref=item.work_item_ref "
                         + "AND invocation.assignment_revision=item.latest_assignment_revision "
-                        + "WHERE item.run_id=? AND ((? IS NOT NULL AND item.work_item_ref=?) "
-                        + "OR (? IS NULL AND item.role_id=?)) ORDER BY invocation.started_at DESC LIMIT 1 FOR UPDATE",
+                        + "WHERE item.run_id=? AND item.work_item_ref=? FOR UPDATE",
                 (rs, row) -> new WorkItemState(rs.getString(1), rs.getString(2),
                         DelegationAcceptanceProvider.SourceKind.valueOf(rs.getString(3)), nullableLong(rs,4), nullableLong(rs,5),
                         rs.getString(6), rs.getBoolean(7), rs.getInt(8), rs.getString(9), rs.getString(10),
-                        rs.getString(11), rs.getString(12), rs.getString(13), rs.getString(14)),
-                runId.value(), workItemRef, workItemRef, workItemRef, roleId);
+                        rs.getString(11), rs.getString(12), rs.getString(13), rs.getString(14), rs.getString(15)),
+                runId.value(), workItemRef);
         if (rows.size() != 1) throw new SecurityException("follow-up does not reference a work item in this Run");
         WorkItemState state = rows.get(0);
         if (!"ACCEPTED".equals(state.reviewStatus())
@@ -298,19 +354,23 @@ public class JdbcDelegationWorkItemRepository {
                 && !"NOT_STARTED".equals(state.invocationState()))
             throw new IllegalStateException("review the exact previous result before sending a new assignment revision");
         ParsedPayload payload = parsePayload(call.payload());
-        if (!state.mediaType().equals(payload.mediaType()) || !state.contractVersion().equals(payload.contractVersion()))
+        if (!state.mediaType().equals(payload.mediaType()) || !state.contractVersion().equals(payload.contractVersion())
+                || !sameRequiredFields(payload.requiredFields(), state.requiredFieldsJson()))
             throw new IllegalArgumentException("a follow-up cannot change the frozen deliverable contract");
-        validateReferences(runId, payload);
-        return prepared(call, state.workItemRef(), state.latestRevision() + 1, payload, false, state.required(), state);
+        if (state.resultId() != null && (payload.reviewedResultRef() == null
+                || !state.resultId().equals(payload.reviewedResultRef().resultId())
+                || !state.resultHash().equals(payload.reviewedResultRef().contentHash())))
+            throw new SecurityException("follow-up must reference the exact previous result id and content hash");
+        if (state.resultId() == null && payload.reviewedResultRef() != null)
+            throw new SecurityException("follow-up cannot claim an unbound previous result");
+        List<ResolvedMaterial> materials = validateReferences(runId, payload);
+        return prepared(call, state.workItemRef(), state.latestRevision() + 1, payload, false,
+                state.required(), state, materials);
     }
 
     private Prepared prepared(DelegationAcceptanceProvider.DelegationCall call, String ref, int revision,
-                             ParsedPayload payload, boolean create, boolean required) {
-        return prepared(call, ref, revision, payload, create, required, null);
-    }
-
-    private Prepared prepared(DelegationAcceptanceProvider.DelegationCall call, String ref, int revision,
-                             ParsedPayload payload, boolean create, boolean required, WorkItemState old) {
+                             ParsedPayload payload, boolean create, boolean required, WorkItemState old,
+                             List<ResolvedMaterial> resolvedMaterials) {
         String role = old == null ? call.roleId() : old.roleId();
         var source = old == null ? call.sourceKind() : old.sourceKind();
         Long employee = old == null ? call.employeeId() : old.employeeId();
@@ -318,65 +378,241 @@ public class JdbcDelegationWorkItemRepository {
         String definitionHash = old == null ? call.definitionHash() : old.definitionHash();
         if (old != null && !Objects.equals(call.roleId(), null) && !old.roleId().equals(call.roleId()))
             throw new SecurityException("follow-up role does not match its work item");
+        List<Reference> inputRefs = canonicalReferences(payload.inputRefs(), payload.dependencies(),
+                payload.reviewedResultRef(), resolvedMaterials);
         String payloadJson = json(payload.raw());
         String hash = CanonicalJson.sha256Hex(call.payload().getBytes(StandardCharsets.UTF_8));
         return new Prepared(call, role, source, employee, definitionVersion, definitionHash, ref, revision,
                 required, payload.objective(), payload.mediaType(), payload.contractVersion(),
-                json(payload.requiredFields()), json(payload.inputRefs()), json(payload.dependencies()),
-                payloadJson, hash, normalizedPayload(ref, revision, payload, required), create);
+                json(payload.requiredFields()), json(referenceJson(inputRefs)),
+                json(dependencyJson(payload.dependencies())),
+                payloadJson, hash, normalizedPayload(ref, revision, payload.objective(), payload.mediaType(),
+                        payload.contractVersion(), payload.requiredFields(), inputRefs, payload.dependencies(),
+                        payload.reviewedResultRef(), resolvedMaterials, required), create,
+                payload.raw(), inputRefs, payload.dependencies(), payload.inlineMaterials(),
+                resolvedMaterials, payload.reviewedResultRef());
     }
 
-    private static String normalizedPayload(String ref, int revision, ParsedPayload payload, boolean required) {
+    private Prepared persistInlineMaterials(RunId runId, String attemptId, long fenceToken,
+                                            Prepared item, Instant now) {
+        if (item.inlineMaterials().isEmpty()) return item;
+        List<Reference> refs = new ArrayList<>(item.inputRefs());
+        List<ResolvedMaterial> materials = new ArrayList<>(item.resolvedMaterials());
+        for (InlineMaterial material : item.inlineMaterials()) {
+            String resultId = results.saveRunMaterial(runId, attemptId,
+                    "run-material:" + item.workItemRef() + ":" + item.revision() + ":" + material.name(),
+                    material.mediaType(), material.body(),
+                    materialMetadata(attemptId, fenceToken), now);
+            String hash = CanonicalJson.sha256Hex(material.body().getBytes(StandardCharsets.UTF_8));
+            refs.add(new Reference("RUN_MATERIAL", resultId, hash, "ROOT_SUPPLIED"));
+            materials.add(new ResolvedMaterial(material.name(), "RUN_MATERIAL", resultId, hash,
+                    material.mediaType(), material.body(), "ROOT_SUPPLIED", "INTERNAL"));
+        }
+        JsonNode snapshot = item.rawPayload().deepCopy();
+        if (!(snapshot instanceof ObjectNode payloadObject))
+            throw new IllegalStateException("accepted work-item snapshot is not a JSON object");
+        List<Reference> canonicalRefs = canonicalReferences(refs, item.dependencies(),
+                item.reviewedResultRef(), materials);
+        payloadObject.set("resolvedInputRefs", JSON.valueToTree(referenceJson(canonicalRefs)));
+        return new Prepared(item.call(), item.roleId(), item.sourceKind(), item.employeeId(),
+                item.definitionVersionId(), item.definitionHash(), item.workItemRef(), item.revision(), item.required(),
+                item.objective(), item.mediaType(), item.contractVersion(), item.requiredFieldsJson(),
+                json(referenceJson(canonicalRefs)), item.dependenciesJson(), json(snapshot), item.inputHash(),
+                normalizedPayload(item.workItemRef(), item.revision(), item.objective(), item.mediaType(),
+                        item.contractVersion(), readRequiredFields(item.requiredFieldsJson()), canonicalRefs, item.dependencies(),
+                        item.reviewedResultRef(), materials, item.required()), item.createWorkItem(),
+                item.rawPayload(), canonicalRefs, item.dependencies(), List.of(), materials, item.reviewedResultRef());
+    }
+
+    private static List<String> readRequiredFields(String requiredFieldsJson) {
+        try {
+            List<String> fields = new ArrayList<>();
+            for (JsonNode field : JSON.readTree(requiredFieldsJson)) fields.add(field.asText());
+            return List.copyOf(fields);
+        } catch (Exception invalid) {
+            throw new IllegalStateException("frozen output contract is unreadable", invalid);
+        }
+    }
+
+    private static List<Map<String, Object>> referenceJson(List<Reference> references) {
+        return references.stream().map(reference -> {
+            Map<String, Object> value = new LinkedHashMap<>();
+            value.put("kind", reference.kind());
+            value.put("id", reference.resultId());
+            value.put("contentHash", reference.sha256());
+            value.put("source", reference.source());
+            return value;
+        }).toList();
+    }
+
+    private static String normalizedPayload(String ref, int revision, String objective, String mediaType,
+                                            String contractVersion, List<String> requiredFields,
+                                            List<Reference> inputRefs, List<Dependency> dependencies,
+                                            ReviewedResultRef reviewedResultRef,
+                                            List<ResolvedMaterial> materials, boolean required) {
         Map<String, Object> normalized = new LinkedHashMap<>();
         normalized.put("workItemRef", ref);
         normalized.put("assignmentRevision", revision);
-        normalized.put("objective", payload.objective());
+        normalized.put("objective", objective);
         normalized.put("required", required);
-        normalized.put("deliverable", Map.of("mediaType", payload.mediaType(),
-                "contractVersion", payload.contractVersion(), "requiredFields", payload.requiredFields()));
-        normalized.put("inputRefs", payload.inputRefs());
-        normalized.put("dependsOn", payload.dependencies());
+        normalized.put("deliverable", Map.of("mediaType", mediaType,
+                "contractVersion", contractVersion, "requiredFields", requiredFields));
+        normalized.put("inputRefs", referenceJson(inputRefs));
+        normalized.put("dependsOnResults", dependencyJson(dependencies));
+        normalized.put("materials", materials);
+        if (reviewedResultRef != null) normalized.put("reviewedResultRef", reviewedResultRef.toJson());
         normalized.put("instructions", "仅依据给定资料完成目标；严格符合 deliverable 契约。不要执行外部动作或修改文件。返回完整最终结果。");
         return json(normalized);
     }
 
-    private void validateReferences(RunId runId, ParsedPayload payload) {
+    private static List<Map<String, Object>> dependencyJson(List<Dependency> dependencies) {
+        return dependencies.stream().map(dependency -> {
+            Map<String, Object> value = new LinkedHashMap<>();
+            value.put("condition", dependency.condition());
+            value.put("required", dependency.required());
+            if ("MATERIAL_READY".equals(dependency.condition())) {
+                value.put("kind", dependency.kind());
+                value.put("id", dependency.resultId());
+                value.put("contentHash", dependency.sha256());
+            } else {
+                value.put("workItemRef", dependency.workItemRef());
+                value.put("assignmentRevision", dependency.assignmentRevision());
+                value.put("resultId", dependency.resultId());
+                value.put("contentHash", dependency.sha256());
+            }
+            return value;
+        }).toList();
+    }
+
+    private List<ResolvedMaterial> validateReferences(RunId runId, ParsedPayload payload) {
+        List<ResolvedMaterial> resolved = new ArrayList<>();
         for (Reference ref : payload.inputRefs()) {
-            Integer found = jdbc.queryForObject("SELECT COUNT(*) FROM platform_agent_run_result_reference reference "
+            ResolvedMaterial material = resolveReference(runId, ref);
+            addResolvedMaterial(resolved, material);
+        }
+        if (payload.reviewedResultRef() != null) {
+            ReviewedResultRef reviewed = payload.reviewedResultRef();
+            addResolvedMaterial(resolved, resolveReference(runId, new Reference("SAME_RUN_RESULT",
+                    reviewed.resultId(), reviewed.contentHash(), "SAME_RUN_REVIEW_TARGET")));
+        }
+        for (Dependency dependency : payload.dependencies()) {
+            if ("MATERIAL_READY".equals(dependency.condition())) {
+                addResolvedMaterial(resolved, resolveReference(runId, new Reference(dependency.kind(),
+                        dependency.resultId(), dependency.sha256(), "MATERIAL_READY")));
+                continue;
+            }
+            Integer found = jdbc.queryForObject("SELECT COUNT(*) FROM platform_run_work_item item "
+                            + "JOIN platform_run_work_item_revision revision ON revision.work_item_ref=item.work_item_ref "
+                            + "AND revision.assignment_revision=? JOIN platform_agent_result result "
+                            + "ON result.result_id=revision.result_id AND result.run_id=item.run_id "
+                            + "WHERE item.run_id=? AND item.work_item_ref=? AND revision.result_id=? "
+                            + "AND revision.result_sha256=? AND result.kind='DELEGATION_FINAL' "
+                            + "AND revision.format_status='VALID' AND revision.review_status='ACCEPTED' "
+                            + "AND revision.reviewed_result_id=revision.result_id",
+                    Integer.class, dependency.assignmentRevision(), runId.value(), dependency.workItemRef(),
+                    dependency.resultId(), dependency.sha256());
+            if (found == null || found != 1)
+                throw new IllegalStateException("a dependency result is not accepted at the exact revision");
+            addResolvedMaterial(resolved, resolveReference(runId, new Reference(dependency.kind(),
+                    dependency.resultId(), dependency.sha256(), "DELIVERY_ACCEPTED")));
+        }
+        return List.copyOf(resolved);
+    }
+
+    private static void addResolvedMaterial(List<ResolvedMaterial> materials, ResolvedMaterial candidate) {
+        ResolvedMaterial existing = materials.stream()
+                .filter(material -> material.resultId().equals(candidate.resultId())).findFirst().orElse(null);
+        if (existing == null) {
+            materials.add(candidate);
+            return;
+        }
+        if (!existing.contentHash().equals(candidate.contentHash()) || !existing.kind().equals(candidate.kind()))
+            throw new SecurityException("one result id resolved to conflicting material facts");
+    }
+
+    private ResolvedMaterial resolveReference(RunId runId, Reference ref) {
+        if ("USER_RESULT".equals(ref.kind())) {
+            List<ResolvedMaterial> found = jdbc.query("SELECT result.result_id,result.kind,result.media_type,result.body,"
+                            + "result.body_sha256,result.visibility FROM platform_agent_run_result_reference reference "
                             + "JOIN platform_agent_result result ON result.result_id=reference.result_id "
                             + "JOIN platform_agent_run accepted ON accepted.run_id=reference.run_id "
                             + "JOIN platform_agent_run source ON source.run_id=reference.source_run_id "
                             + "WHERE reference.run_id=? AND reference.result_id=? AND reference.body_sha256=? "
                             + "AND source.user_id=accepted.user_id AND source.session_id=accepted.session_id "
-                            + "AND source.state='SUCCEEDED' AND result.visibility='USER' AND result.body_sha256=reference.body_sha256",
-                    Integer.class, runId.value(), ref.resultId(), ref.sha256());
-            if (found == null || found != 1) throw new SecurityException("input result reference is missing, stale, or unauthorized");
+                            + "AND source.state='SUCCEEDED' AND result.visibility='USER' "
+                            + "AND result.body_sha256=reference.body_sha256",
+                    (rs, row) -> new ResolvedMaterial(null, "USER_RESULT", rs.getString(1), rs.getString(5),
+                            rs.getString(3), rs.getString(4), "AUTHORIZED_SESSION_RESULT", rs.getString(6)),
+                    runId.value(), ref.resultId(), ref.sha256());
+            if (found.size() != 1) throw new SecurityException("input result reference is missing, stale, or unauthorized");
+            return found.get(0);
         }
-        for (Dependency dependency : payload.dependencies()) {
-            Integer found = jdbc.queryForObject("SELECT COUNT(*) FROM platform_run_work_item item "
-                            + "JOIN platform_run_work_item_revision revision ON revision.work_item_ref=item.work_item_ref "
-                            + "AND revision.assignment_revision=? WHERE item.run_id=? AND item.work_item_ref=? "
-                            + "AND revision.result_id=? AND revision.result_sha256=? AND revision.format_status='VALID' "
-                            + "AND revision.review_status='ACCEPTED' AND revision.reviewed_result_id=revision.result_id",
-                    Integer.class, dependency.assignmentRevision(), runId.value(), dependency.workItemRef(),
-                    dependency.resultId(), dependency.sha256());
-            if (found == null || found != 1) throw new IllegalStateException("a dependency result is not accepted at the exact revision");
+        String expectedKind = switch (ref.kind()) {
+            case "RUN_MATERIAL" -> "RUN_MATERIAL";
+            case "DELEGATION_RESULT" -> "DELEGATION_FINAL";
+            case "TEAM_RESULT" -> "TEAM_RESULT";
+            case "SAME_RUN_RESULT" -> null;
+            default -> throw new SecurityException("unsupported input reference kind");
+        };
+        String kindPredicate = expectedKind == null
+                ? "result.kind IN ('RUN_MATERIAL','DELEGATION_FINAL','TEAM_RESULT')"
+                : "result.kind=?";
+        String sql = "SELECT result.result_id,result.kind,result.media_type,result.body,result.body_sha256,"
+                        + "result.visibility,result.check_metadata_json FROM platform_agent_result result "
+                + "WHERE result.run_id=? AND result.result_id=? AND " + kindPredicate
+                + " AND result.body_sha256=? AND result.visibility='INTERNAL'";
+        Object[] args = expectedKind == null
+                ? new Object[]{runId.value(), ref.resultId(), ref.sha256()}
+                : new Object[]{runId.value(), ref.resultId(), expectedKind, ref.sha256()};
+        List<ResolvedMaterial> found = jdbc.query(sql,
+                (rs, row) -> {
+                    String resultKind = rs.getString(2);
+                    String referenceKind = referenceKind(resultKind);
+                    return new ResolvedMaterial(null, referenceKind, rs.getString(1), rs.getString(5),
+                            rs.getString(3), rs.getString(4), materialSource(referenceKind, rs.getString(7)), rs.getString(6));
+                }, args);
+        if (found.size() != 1) throw new SecurityException("same-Run result reference is missing or has a different hash");
+        return found.get(0);
+    }
+
+    private static String referenceKind(String resultKind) {
+        return switch (resultKind) {
+            case "RUN_MATERIAL" -> "RUN_MATERIAL";
+            case "DELEGATION_FINAL" -> "DELEGATION_RESULT";
+            case "TEAM_RESULT" -> "TEAM_RESULT";
+            default -> throw new SecurityException("unsupported same-Run result kind");
+        };
+    }
+
+    private static List<Reference> canonicalReferences(List<Reference> references, List<Dependency> dependencies,
+                                                       ReviewedResultRef reviewedResultRef,
+                                                       List<ResolvedMaterial> materials) {
+        List<Reference> merged = new ArrayList<>(references);
+        if (reviewedResultRef != null)
+            addExactReference(merged, new Reference("SAME_RUN_RESULT", reviewedResultRef.resultId(),
+                    reviewedResultRef.contentHash(), "SAME_RUN_REVIEW_TARGET"));
+        for (Dependency dependency : dependencies) {
+            String kind = "MATERIAL_READY".equals(dependency.condition()) ? dependency.kind() : "DELEGATION_RESULT";
+            addExactReference(merged, new Reference(kind, dependency.resultId(), dependency.sha256(),
+                    dependency.condition()));
         }
+        List<Reference> result = new ArrayList<>(merged.size());
+        for (Reference ref : merged) {
+            ResolvedMaterial resolved = materials.stream()
+                    .filter(material -> material.resultId().equals(ref.resultId())).findFirst()
+                    .orElseThrow(() -> new IllegalStateException("input reference was not resolved before snapshot"));
+            if (!resolved.contentHash().equals(ref.sha256()))
+                throw new SecurityException("input reference hash does not match the resolved result");
+            if (!"SAME_RUN_RESULT".equals(ref.kind()) && !resolved.kind().equals(ref.kind()))
+                throw new SecurityException("input reference kind does not match the resolved result");
+            result.add(new Reference(resolved.kind(), ref.resultId(), ref.sha256(), ref.source()));
+        }
+        return List.copyOf(result);
     }
 
     private boolean existsForRole(RunId runId, String roleId) {
         return !jdbc.query("SELECT work_item_ref FROM platform_run_work_item WHERE run_id=? AND role_id=? FOR UPDATE",
                 (rs, row) -> rs.getString(1), runId.value(), roleId).isEmpty();
-    }
-
-    private static String roleFromKey(String agentKey) {
-        if (agentKey != null) {
-            var matcher = java.util.regex.Pattern.compile("^agent:([a-z0-9][a-z0-9-]{0,63}):[0-9a-fA-F-]{32,36}$")
-                    .matcher(agentKey.strip());
-            if (matcher.matches()) return matcher.group(1);
-        }
-        if (agentKey == null) return null;
-        throw new SecurityException("agent_key is not a recognized native AgentScope key");
     }
 
     private DelegationBudgetProvider.Reservation reservation(String invocationId, RunId runId,
@@ -445,6 +681,21 @@ public class JdbcDelegationWorkItemRepository {
         return new DurableEventMetadata(1, null, attemptId, fenceToken, "ROOT", null, Map.of(), null, null);
     }
 
+    private static DurableEventMetadata materialMetadata(String attemptId, long fenceToken) {
+        return new DurableEventMetadata(1, null, attemptId, fenceToken, "ROOT", null,
+                Map.of("source", "ROOT_SUPPLIED", "visibility", "INTERNAL"), null, null);
+    }
+
+    private static String materialSource(String kind, String checkMetadataJson) {
+        if (!"RUN_MATERIAL".equals(kind)) return "SAME_RUN_" + kind;
+        try {
+            String source = JSON.readTree(checkMetadataJson).path("source").asText(null);
+            return "ROOT_SUPPLIED".equals(source) ? source : "ROOT_SUPPLIED";
+        } catch (Exception ignored) {
+            return "ROOT_SUPPLIED";
+        }
+    }
+
     private static ParsedPayload parsePayload(String source) {
         try {
             JsonNode root = JSON.readTree(source);
@@ -473,21 +724,76 @@ public class JdbcDelegationWorkItemRepository {
             List<Reference> inputRefs = new ArrayList<>();
             JsonNode refs = root.path("inputRefs");
             if (!refs.isMissingNode() && !refs.isArray()) throw new IllegalArgumentException("inputRefs must be an array");
-            if (refs.isArray()) for (JsonNode ref : refs) inputRefs.add(new Reference(
-                    required(ref.path("resultId").asText(null), "inputRefs.resultId"),
-                    digest(ref.path("sha256").asText(null))));
+            if (refs.isArray()) for (JsonNode ref : refs) inputRefs.add(parseReference(ref, "inputRefs"));
+            ReviewedResultRef reviewedResultRef = null;
+            JsonNode reviewed = root.path("reviewedResultRef");
+            if (!reviewed.isMissingNode() && !reviewed.isNull()) {
+                reviewedResultRef = new ReviewedResultRef(
+                        required(reviewed.path("resultId").asText(null), "reviewedResultRef.resultId"),
+                        digest(firstText(reviewed, "contentHash", "sha256")));
+                addExactReference(inputRefs, new Reference("SAME_RUN_RESULT", reviewedResultRef.resultId(),
+                        reviewedResultRef.contentHash(), "SAME_RUN_REVIEW_TARGET"));
+            }
+
+            List<InlineMaterial> inlineMaterials = new ArrayList<>();
+            JsonNode inline = root.path("inlineMaterials");
+            if (!inline.isMissingNode() && !inline.isArray())
+                throw new IllegalArgumentException("inlineMaterials must be an array");
+            int inlineBytes = 0;
+            Set<String> materialNames = new HashSet<>();
+            if (inline.isArray()) {
+                if (inline.size() > MAX_INLINE_MATERIALS)
+                    throw new IllegalArgumentException("too many inline materials");
+                for (JsonNode material : inline) {
+                    String name = required(material.path("name").asText(null), "inlineMaterials.name");
+                    if (!name.matches("[A-Za-z0-9][A-Za-z0-9._-]{0,79}") || !materialNames.add(name))
+                        throw new IllegalArgumentException("inline material names must be unique and safe");
+                    String materialType = required(material.path("mediaType").asText("text/plain"),
+                            "inlineMaterials.mediaType");
+                    if (!Set.of("text/plain", "text/markdown", "application/json").contains(materialType))
+                        throw new IllegalArgumentException("unsupported inline material media type");
+                    String body = material.path("body").asText(null);
+                    if (body == null || body.isBlank()) throw new IllegalArgumentException("inlineMaterials.body is required");
+                    inlineBytes += body.getBytes(StandardCharsets.UTF_8).length;
+                    if (inlineBytes > MAX_INLINE_MATERIAL_BYTES)
+                        throw new IllegalArgumentException("inline materials exceed their aggregate size limit");
+                    inlineMaterials.add(new InlineMaterial(name, materialType, body));
+                }
+            }
+
             List<Dependency> dependencies = new ArrayList<>();
-            JsonNode deps = root.path("dependsOn");
+            if (root.has("dependsOn") && root.has("dependsOnResults"))
+                throw new IllegalArgumentException("use only one dependency field");
+            JsonNode deps = root.has("dependsOnResults") ? root.path("dependsOnResults") : root.path("dependsOn");
             if (!deps.isMissingNode() && !deps.isArray()) throw new IllegalArgumentException("dependsOn must be an array");
             if (deps.isArray()) for (JsonNode dep : deps) {
-                int revision = dep.path("assignmentRevision").asInt(0);
-                if (revision < 1) throw new IllegalArgumentException("dependency assignmentRevision must be positive");
-                dependencies.add(new Dependency(required(dep.path("workItemRef").asText(null), "dependency.workItemRef"),
-                        revision, required(dep.path("resultId").asText(null), "dependency.resultId"),
-                        digest(dep.path("sha256").asText(null))));
+                String condition = required(dep.path("condition").asText("DELIVERY_ACCEPTED"),
+                        "dependency.condition");
+                if ("MATERIAL_READY".equals(condition)) {
+                    String kind = required(dep.path("kind").asText("RUN_MATERIAL"), "dependency.kind");
+                    if (!Set.of("RUN_MATERIAL", "DELEGATION_RESULT", "TEAM_RESULT").contains(kind))
+                        throw new IllegalArgumentException("MATERIAL_READY requires an exact same-Run result kind");
+                    dependencies.add(new Dependency(condition, kind, null, 0,
+                            required(firstText(dep, "id", "resultId"), "dependency.id"),
+                            digest(firstText(dep, "contentHash", "sha256")),
+                            !dep.has("required") || dep.path("required").asBoolean(true)));
+                } else if ("DELIVERY_ACCEPTED".equals(condition)) {
+                    int revision = dep.path("assignmentRevision").asInt(0);
+                    if (revision < 1) throw new IllegalArgumentException("dependency assignmentRevision must be positive");
+                    dependencies.add(new Dependency(condition, "DELEGATION_RESULT",
+                            required(dep.path("workItemRef").asText(null), "dependency.workItemRef"), revision,
+                            required(firstText(dep, "resultId", "id"), "dependency.resultId"),
+                            digest(firstText(dep, "sha256", "contentHash")),
+                            !dep.has("required") || dep.path("required").asBoolean(true)));
+                } else {
+                    throw new IllegalArgumentException("unsupported dependency condition");
+                }
             }
-            if (inputRefs.size() > 32 || dependencies.size() > 32) throw new IllegalArgumentException("too many result references");
-            return new ParsedPayload(root, objective, required, mediaType, contractVersion, fields, inputRefs, dependencies);
+            if (inputRefs.size() > 32 || dependencies.size() > 32)
+                throw new IllegalArgumentException("too many result references");
+            return new ParsedPayload(root, objective, required, mediaType, contractVersion, fields,
+                    List.copyOf(inputRefs), List.copyOf(dependencies), List.copyOf(inlineMaterials), reviewedResultRef,
+                    List.of());
         } catch (IllegalArgumentException invalid) {
             throw invalid;
         } catch (Exception malformed) {
@@ -495,7 +801,48 @@ public class JdbcDelegationWorkItemRepository {
         }
     }
 
-    private static String validateBody(String mediaType, String fieldsJson, String body) {
+    private static Reference parseReference(JsonNode ref, String field) {
+        String kind = ref.path("kind").asText("USER_RESULT");
+        if ("RUN_RESULT".equals(kind)) kind = "DELEGATION_RESULT";
+        if (!Set.of("USER_RESULT", "RUN_MATERIAL", "DELEGATION_RESULT", "TEAM_RESULT").contains(kind))
+            throw new IllegalArgumentException("unsupported " + field + " kind");
+        String id = required(firstText(ref, "id", "resultId"), field + ".id");
+        String hash = digest(firstText(ref, "contentHash", "sha256"));
+        String referenceSource = switch (kind) {
+            case "USER_RESULT" -> "AUTHORIZED_SESSION_RESULT";
+            case "RUN_MATERIAL" -> "ROOT_SUPPLIED";
+            case "DELEGATION_RESULT" -> "SAME_RUN_DELEGATION";
+            default -> "SAME_RUN_TEAM_RESULT";
+        };
+        return new Reference(kind, id, hash, referenceSource);
+    }
+
+    private static void addExactReference(List<Reference> references, Reference candidate) {
+        for (int i = 0; i < references.size(); i++) {
+            Reference existing = references.get(i);
+            if (!existing.resultId().equals(candidate.resultId())) continue;
+            if (!existing.sha256().equals(candidate.sha256()))
+                throw new IllegalArgumentException("one result id cannot be referenced with conflicting hashes");
+            if (existing.kind().equals(candidate.kind())) return;
+            if ("SAME_RUN_RESULT".equals(existing.kind()) && !"SAME_RUN_RESULT".equals(candidate.kind())) {
+                references.set(i, candidate);
+                return;
+            }
+            if ("SAME_RUN_RESULT".equals(candidate.kind()))
+                return;
+            if (!existing.kind().equals(candidate.kind()))
+                throw new IllegalArgumentException("one result id cannot be referenced with conflicting kinds or hashes");
+        }
+        references.add(candidate);
+    }
+
+    private static String firstText(JsonNode node, String first, String second) {
+        String value = node.path(first).asText(null);
+        return value == null || value.isBlank() ? node.path(second).asText(null) : value;
+    }
+
+    private static String validateBody(String mediaType, String fieldsJson, String body,
+                                       ReviewedResultRef expectedReviewedResult) {
         if (body == null || body.isBlank()) return "INVALID";
         if (!"application/json".equals(mediaType)) return "VALID";
         try {
@@ -503,10 +850,37 @@ public class JdbcDelegationWorkItemRepository {
             if (parsed == null || !parsed.isObject()) return "INVALID";
             JsonNode fields = JSON.readTree(fieldsJson);
             for (JsonNode field : fields) if (!parsed.has(field.asText())) return "INVALID";
+            if (parsed.has("reviewedResultRef")) {
+                if (expectedReviewedResult == null) return "INVALID";
+                JsonNode reviewed = parsed.path("reviewedResultRef");
+                String resultId = reviewed.path("resultId").asText(null);
+                String contentHash = firstText(reviewed, "contentHash", "sha256");
+                if (!expectedReviewedResult.resultId().equals(resultId)
+                        || !expectedReviewedResult.contentHash().equals(contentHash)) return "INVALID";
+            }
             return "VALID";
         } catch (Exception malformed) {
             return "INVALID";
         }
+    }
+
+    private static ReviewedResultRef reviewedResultFromAcceptedPayload(String acceptedPayload) {
+        if (acceptedPayload == null || acceptedPayload.isBlank()) return null;
+        try {
+            JsonNode reviewed = JSON.readTree(acceptedPayload).path("reviewedResultRef");
+            if (reviewed.isMissingNode() || reviewed.isNull()) return null;
+            return new ReviewedResultRef(required(reviewed.path("resultId").asText(null),
+                    "accepted reviewedResultRef.resultId"), digest(firstText(reviewed, "contentHash", "sha256")));
+        } catch (IllegalArgumentException invalid) {
+            throw invalid;
+        } catch (Exception malformed) {
+            throw new IllegalStateException("accepted reviewed-result reference is unreadable", malformed);
+        }
+    }
+
+    private static boolean sameRequiredFields(List<String> fields, String frozenJson) {
+        try { return JSON.valueToTree(fields).equals(JSON.readTree(frozenJson)); }
+        catch (Exception invalid) { throw new IllegalStateException("frozen output contract is unreadable", invalid); }
     }
 
     private static String json(Object value) {
@@ -531,24 +905,38 @@ public class JdbcDelegationWorkItemRepository {
 
     private record ParsedPayload(JsonNode raw, String objective, boolean required, String mediaType,
                                  String contractVersion, List<String> requiredFields,
-                                 List<Reference> inputRefs, List<Dependency> dependencies) { }
-    private record Reference(String resultId, String sha256) { }
-    private record Dependency(String workItemRef, int assignmentRevision, String resultId, String sha256) { }
+                                 List<Reference> inputRefs, List<Dependency> dependencies,
+                                 List<InlineMaterial> inlineMaterials, ReviewedResultRef reviewedResultRef,
+                                 List<ResolvedMaterial> resolvedMaterials) { }
+    private record Reference(String kind, String resultId, String sha256, String source) { }
+    private record Dependency(String condition, String kind, String workItemRef, int assignmentRevision,
+                              String resultId, String sha256, boolean required) { }
+    private record InlineMaterial(String name, String mediaType, String body) { }
+    private record ResolvedMaterial(String name, String kind, String resultId, String contentHash,
+                                    String mediaType, String body, String source, String visibility) { }
+    private record ReviewedResultRef(String resultId, String contentHash) {
+        private Map<String, String> toJson() { return Map.of("resultId", resultId, "contentHash", contentHash); }
+    }
     private record Prepared(DelegationAcceptanceProvider.DelegationCall call, String roleId,
                             DelegationAcceptanceProvider.SourceKind sourceKind, Long employeeId,
                             Long definitionVersionId, String definitionHash, String workItemRef,
                             int revision, boolean required, String objective, String mediaType,
                             String contractVersion, String requiredFieldsJson, String inputRefsJson,
                             String dependenciesJson, String payloadJson, String inputHash,
-                            String normalizedPayload, boolean createWorkItem) { }
+                            String normalizedPayload, boolean createWorkItem, JsonNode rawPayload,
+                            List<Reference> inputRefs, List<Dependency> dependencies,
+                            List<InlineMaterial> inlineMaterials, List<ResolvedMaterial> resolvedMaterials,
+                            ReviewedResultRef reviewedResultRef) { }
     private record ReviewTarget(String resultHash, String contractVersion, String formatStatus,
                                 String reviewStatus, boolean required) { }
     private record WorkItemState(String workItemRef, String roleId, DelegationAcceptanceProvider.SourceKind sourceKind,
                                  Long employeeId, Long definitionVersionId, String definitionHash, boolean required,
                                  int latestRevision, String mediaType, String contractVersion, String requiredFieldsJson,
-                                 String reviewStatus, String resultId, String invocationState) { }
+                                 String reviewStatus, String resultId, String resultHash, String invocationState) { }
     private record InvocationTarget(String invocationId, String workItemRef, int revision,
                                    DelegationAcceptanceProvider.SourceKind sourceKind, Long employeeId,
                                    Long definitionVersionId, String mediaType, String contractVersion,
-                                   String requiredFieldsJson) { }
+                                   String requiredFieldsJson, String acceptedPayload) { }
+    private record CompletionTarget(InvocationTarget target, String roleId, String acceptedPayload,
+                                    String state, String nativeSessionId, String resultId, String resultHash) { }
 }

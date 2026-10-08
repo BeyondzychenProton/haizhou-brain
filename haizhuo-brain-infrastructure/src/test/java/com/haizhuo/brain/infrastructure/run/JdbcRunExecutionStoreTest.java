@@ -62,12 +62,13 @@ class JdbcRunExecutionStoreTest {
                 + "role_id VARCHAR(64) NOT NULL,state VARCHAR(16) NOT NULL,started_at TIMESTAMP NOT NULL,"
                 + "finished_at TIMESTAMP NULL,tool_use_id VARCHAR(128),work_item_ref VARCHAR(64),"
                 + "assignment_revision INT,source_kind VARCHAR(32),employee_id BIGINT,definition_version_id BIGINT,"
-                + "definition_hash CHAR(64),input_sha256 CHAR(64),request_sha256 CHAR(64),accepted_payload CLOB)");
+                + "definition_hash CHAR(64),input_sha256 CHAR(64),request_sha256 CHAR(64),accepted_payload CLOB,"
+                + "native_session_id VARCHAR(255))");
         jdbc.execute("CREATE TABLE platform_run_work_item(work_item_ref VARCHAR(64) PRIMARY KEY,run_id VARCHAR(64) NOT NULL,"
                 + "role_id VARCHAR(64) NOT NULL,source_kind VARCHAR(32) NOT NULL,employee_id BIGINT,"
                 + "definition_version_id BIGINT,definition_hash CHAR(64),required BOOLEAN NOT NULL,"
                 + "latest_assignment_revision INT NOT NULL,state VARCHAR(24) NOT NULL,created_at TIMESTAMP NOT NULL,"
-                + "updated_at TIMESTAMP NOT NULL,UNIQUE(run_id,role_id))");
+                + "updated_at TIMESTAMP NOT NULL)");
         jdbc.execute("CREATE TABLE platform_run_work_item_revision(work_item_ref VARCHAR(64) NOT NULL,"
                 + "assignment_revision INT NOT NULL,payload_json CLOB NOT NULL,payload_sha256 CHAR(64) NOT NULL,"
                 + "objective CLOB NOT NULL,deliverable_media_type VARCHAR(64) NOT NULL,contract_version VARCHAR(64) NOT NULL,"

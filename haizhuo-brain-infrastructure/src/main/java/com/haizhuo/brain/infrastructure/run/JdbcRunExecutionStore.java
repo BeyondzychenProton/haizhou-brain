@@ -74,6 +74,13 @@ public class JdbcRunExecutionStore implements RunExecutionStore {
 
     @Override
     @Transactional
+    public Optional<String> completeInvocation(RunId runId, String attemptId, long fenceToken,
+            com.haizhuo.brain.runtime.api.DelegationAcceptanceProvider.CompletedInvocation completed) {
+        return workItems.completeInvocation(runId, attemptId, fenceToken, completed);
+    }
+
+    @Override
+    @Transactional
     public Optional<com.haizhuo.brain.runtime.api.DelegationAcceptanceProvider.WorkItemResult> readResult(
             RunId runId, String attemptId, long fenceToken, String workItemRef, int assignmentRevision) {
         return workItems.readResult(runId, attemptId, fenceToken, workItemRef, assignmentRevision);

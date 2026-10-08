@@ -89,7 +89,12 @@ public class AgentScopeRuntime implements AgentRuntime {
                     HarnessRuntimeTemplate template = runScopedTemplate
                             ? templateCache.buildForRun(request.definition())
                             : templateCache.getOrBuild(request.definition());
-                    Flux<AgentEvent> events = stream(template, request.input(), context);
+                    Runnable verifyPersistence = () -> {
+                        RunScopedDelegationBudget budget = context.get(RunScopedDelegationBudget.class);
+                        if (budget != null) budget.verifyPersistence();
+                    };
+                    Flux<AgentEvent> events = stream(template, request.input(), context)
+                            .doOnNext(event -> verifyPersistence.run()).doOnComplete(verifyPersistence);
                     // 一旦已经翻译出挂起事件，同一条流末尾的完成事件
                     // 就不能再把 Run 翻回 SUCCEEDED（§34）。
                     AtomicBoolean suspended = new AtomicBoolean();
@@ -115,6 +120,8 @@ public class AgentScopeRuntime implements AgentRuntime {
                 })
                 .subscribeOn(Schedulers.boundedElastic())
                 .onErrorResume(error -> {
+                    if (error instanceof com.haizhuo.brain.runtime.api.DelegationPersistenceException)
+                        return Flux.error(error);
                     Throwable root = error;
                     while (root.getCause() != null && root.getCause() != root) {
                         root = root.getCause();

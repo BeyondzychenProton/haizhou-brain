@@ -20,6 +20,26 @@ public interface DelegationAcceptanceProvider {
                          String bodySha256, String contractVersion,
                          ReviewDecision decision, String reason);
 
+    /** Commit the actual child Msg before the native tool returns to the parent. */
+    default Optional<String> completeInvocation(RunId runId, String attemptId, long fenceToken,
+                                                CompletedInvocation completed) {
+        throw new IllegalStateException("durable child result persistence is unavailable");
+    }
+
+    record CompletedInvocation(String invocationId, String roleId, String acceptedPayload,
+                               String body, com.haizhuo.brain.runtime.api.event.AgentEventDescriptor descriptor) {
+        public CompletedInvocation {
+            required(invocationId, "invocationId");
+            required(roleId, "roleId");
+            required(acceptedPayload, "acceptedPayload");
+            Objects.requireNonNull(body);
+            Objects.requireNonNull(descriptor);
+            required(descriptor.nativeSessionId(), "nativeSessionId");
+            if (descriptor.executionRole() != com.haizhuo.brain.runtime.api.event.AgentExecutionRole.CHILD)
+                throw new IllegalArgumentException("child result requires trusted child provenance");
+        }
+    }
+
     enum Operation { SPAWN, FOLLOW_UP }
     enum SourceKind { PUBLISHED_EXPERT, BUILTIN_GENERAL_PURPOSE, RUNTIME_GENERATED }
     enum ReviewDecision { ACCEPT, REQUEST_REVISION, REJECT }

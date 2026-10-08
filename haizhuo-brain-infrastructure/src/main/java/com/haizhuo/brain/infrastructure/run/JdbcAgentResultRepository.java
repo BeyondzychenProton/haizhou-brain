@@ -13,6 +13,7 @@ import java.time.Instant;
 import java.util.Map;
 import java.util.Optional;
 import java.util.List;
+import java.util.TreeMap;
 import java.util.UUID;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
@@ -36,6 +37,24 @@ public class JdbcAgentResultRepository implements AgentResultRepository {
         return save(claim, kind, resultKey, invocationId, mediaType, body, visibility, metadata, now, null);
     }
 
+    /** Run-scoped root material; acceptance callers must already be inside the Run transaction. */
+    public String saveRunMaterial(RunId runId, String attemptId, String resultKey, String mediaType,
+                                  String body, DurableEventMetadata metadata, Instant now) {
+        if (resultKey == null || resultKey.isBlank()) throw new IllegalArgumentException("resultKey is required");
+        String resultId = save(runId, attemptId, "RUN_MATERIAL", resultKey, null, mediaType, body,
+                EventVisibility.INTERNAL, metadata, now, executorIdentity(runId));
+        String materialMetadata = JdbcEventMetadata.json(new TreeMap<>(metadata.payload()));
+        String existingMetadata = jdbc.queryForObject("SELECT check_metadata_json FROM platform_agent_result "
+                + "WHERE result_id=? AND run_id=? AND kind='RUN_MATERIAL'", String.class, resultId, runId.value());
+        if (!"{}".equals(existingMetadata) && !materialMetadata.equals(existingMetadata))
+            throw new IllegalStateException("immutable Run material metadata conflicts");
+        if (!materialMetadata.equals(existingMetadata))
+            jdbc.update("UPDATE platform_agent_result SET check_metadata_json=? WHERE result_id=? AND run_id=? "
+                            + "AND kind='RUN_MATERIAL' AND check_metadata_json='{}'",
+                    materialMetadata, resultId, runId.value());
+        return resultId;
+    }
+
     public String saveDelegation(ExecutionClaim claim, String invocationId, String roleId,
                                  long employeeId, long definitionVersionId, String body,
                                  com.haizhuo.brain.runtime.api.event.AgentEventDescriptor descriptor, Instant now) {
@@ -54,30 +73,45 @@ public class JdbcAgentResultRepository implements AgentResultRepository {
     private String save(ExecutionClaim claim, String kind, String resultKey, String invocationId,
                         String mediaType, String body, EventVisibility visibility,
                         DurableEventMetadata metadata, Instant now, ExecutorIdentity executorOverride) {
+        return save(claim.run().id(), claim.attempt().attemptId(), kind, resultKey, invocationId,
+                mediaType, body, visibility, metadata, now,
+                executorOverride == null ? executorIdentity(claim.run()) : executorOverride);
+    }
+
+    public String saveDelegation(RunId runId, String attemptId, String invocationId, String roleId,
+                                 Long employeeId, Long definitionVersionId, String mediaType, String body,
+                                 com.haizhuo.brain.runtime.api.event.AgentEventDescriptor descriptor, Instant now) {
+        return save(runId, attemptId, "DELEGATION_FINAL", "delegation:" + invocationId, invocationId,
+                mediaType, body, EventVisibility.INTERNAL, DurableEventMetadata.execution(descriptor), now,
+                new ExecutorIdentity(roleId, employeeId, definitionVersionId));
+    }
+
+    private String save(RunId runId, String attemptId, String kind, String resultKey, String invocationId,
+                        String mediaType, String body, EventVisibility visibility,
+                        DurableEventMetadata metadata, Instant now, ExecutorIdentity executor) {
         JdbcRunEventAppender.requireTransaction(jdbc);
         if (!java.util.Set.of("ROOT_FINAL", "DELEGATION_FINAL", "TEAM_RESULT", "RUN_MATERIAL").contains(kind))
             throw new IllegalArgumentException("Invalid result kind");
-        if ("ROOT_FINAL".equals(kind) && !resultKey.equals(claim.run().id().value() + ":final"))
+        if ("ROOT_FINAL".equals(kind) && !resultKey.equals(runId.value() + ":final"))
             throw new IllegalArgumentException("Invalid root result key");
-        if (!"ROOT_FINAL".equals(kind) && resultKey.equals(claim.run().id().value() + ":final"))
+        if (!"ROOT_FINAL".equals(kind) && resultKey.equals(runId.value() + ":final"))
             throw new IllegalArgumentException("Non-root result cannot use final key");
         byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
         if (bytes.length > MAX_RESULT_BYTES) throw new ResultSizeExceededException();
         String hash = CanonicalJson.sha256Hex(bytes);
-        String keyHash = CanonicalJson.sha256Hex((claim.run().id().value() + "|" + resultKey)
+        String keyHash = CanonicalJson.sha256Hex((runId.value() + "|" + resultKey)
                 .getBytes(StandardCharsets.UTF_8));
-        var old = jdbc.query("SELECT result_id,body_sha256 FROM platform_agent_result WHERE result_key=? AND run_id=?",
-                (rs, n) -> new String[] {rs.getString(1),rs.getString(2)}, keyHash, claim.run().id().value());
+        var old = jdbc.query("SELECT result_id,body_sha256 FROM platform_agent_result WHERE result_key=? AND run_id=? FOR UPDATE",
+                (rs, n) -> new String[] {rs.getString(1),rs.getString(2)}, keyHash, runId.value());
         if (!old.isEmpty()) {
             if (!hash.equals(old.get(0)[1])) throw new IllegalStateException("Immutable result conflicts");
             return old.get(0)[0];
         }
         String id = UUID.randomUUID().toString();
-        ExecutorIdentity executor = executorOverride == null ? executorIdentity(claim.run()) : executorOverride;
         jdbc.update("INSERT INTO platform_agent_result(result_id,run_id,result_key,kind,attempt_id,invocation_id,"
                         + "executor_role_id,employee_id,definition_version_id,media_type,body,body_sha256,byte_size,schema_version,visibility,native_refs_json,check_metadata_json,created_at) "
                         + "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                id, claim.run().id().value(), keyHash, kind, claim.attempt().attemptId(), invocationId,
+                id, runId.value(), keyHash, kind, attemptId, invocationId,
                 executor.roleId(), executor.employeeId(), executor.definitionVersionId(), mediaType, body, hash, bytes.length, 2,
                 visibility.name(), JdbcEventMetadata.json(metadata.nativeRefs()), "{}", Timestamp.from(now));
         return id;
@@ -92,6 +126,18 @@ public class JdbcAgentResultRepository implements AgentResultRepository {
         return targets.isEmpty()
                 ? new ExecutorIdentity("coordinator", run.employeeId(), run.definitionVersionId())
                 : targets.get(0);
+    }
+
+    private ExecutorIdentity executorIdentity(RunId runId) {
+        List<ExecutorIdentity> targets = jdbc.query("SELECT target.role_id,target.employee_id,target.definition_version_id "
+                        + "FROM platform_agent_run_execution_target target WHERE target.run_id=? LIMIT 1",
+                (rs, row) -> new ExecutorIdentity(rs.getString("role_id"), nullableLong(rs, "employee_id"),
+                        nullableLong(rs, "definition_version_id")), runId.value());
+        if (!targets.isEmpty()) return targets.get(0);
+        return jdbc.query("SELECT run.employee_id,run.definition_version_id FROM platform_agent_run run WHERE run.run_id=?",
+                (rs, row) -> new ExecutorIdentity("coordinator", nullableLong(rs, "employee_id"),
+                        nullableLong(rs, "definition_version_id")), runId.value()).stream()
+                .findFirst().orElseThrow(() -> new IllegalStateException("Run does not exist for material persistence"));
     }
 
     @Override public Optional<AgentResult> findRoot(RunId runId, UserId owner) {

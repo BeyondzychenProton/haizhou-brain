@@ -165,7 +165,6 @@ public class RunExecutionService {
         AtomicReference<AgentRunCancelledEvent> cancelled = new AtomicReference<>();
         AtomicReference<AgentRunFailedEvent> failed = new AtomicReference<>();
         AtomicLong streamOffset = new AtomicLong();
-        DelegationResultCollector delegationResults = new DelegationResultCollector(request);
         runtime.execute(request).doOnSubscribe(subscription -> {
                     runtimeSubscribed.set(true);
                     activeSubscription.set(subscription);
@@ -180,8 +179,8 @@ public class RunExecutionService {
                         recordPlanSnapshot(claim, plan);
                     }
                     if (event instanceof AgentInternalEvent internal) {
-                        delegationResults.accept(internal).ifPresent(result ->
-                                executionStore.recordDelegationResult(claim, result));
+                        // Native child middleware persists the complete Msg by invocation before
+                        // returning to the parent. Progress/source cannot establish a result identity.
                         executionStore.recordInternalEvent(claim,internal);
                     }
                     classify(event, suspended, completed, cancelled, failed);

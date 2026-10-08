@@ -5,6 +5,9 @@ import com.haizhuo.brain.runtime.agentscope.context.RunScopedDelegationBudget;
 import io.agentscope.core.agent.Agent;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.event.AgentEvent;
+import io.agentscope.core.event.AgentResultEvent;
+import com.haizhuo.brain.runtime.api.event.AgentEventDescriptor;
+import com.haizhuo.brain.runtime.api.event.AgentExecutionRole;
 import io.agentscope.core.middleware.AgentInput;
 import io.agentscope.harness.agent.middleware.HarnessRuntimeMiddleware;
 import java.util.function.Function;
@@ -15,12 +18,14 @@ public final class DelegatedChildScopeMiddleware implements HarnessRuntimeMiddle
     private final String roleId;
     private final String trustedUserId;
     private final HarnessCallContext trustedCall;
+    private final String trustedParentSessionId;
 
     public DelegatedChildScopeMiddleware(String roleId, RuntimeContext parent) {
         this.roleId = roleId;
         this.trustedUserId = parent == null ? null : parent.getUserId();
         this.trustedCall = parent == null ? null : parent.get(HarnessCallContext.class);
         String parentSessionId = parent == null ? null : parent.getSessionId();
+        this.trustedParentSessionId = parentSessionId;
         if (roleId == null || roleId.isBlank() || trustedUserId == null || trustedUserId.isBlank()
                 || parentSessionId == null || parentSessionId.isBlank() || trustedCall == null)
             throw new SecurityException("trusted parent Run context is required for child execution");
@@ -39,11 +44,18 @@ public final class DelegatedChildScopeMiddleware implements HarnessRuntimeMiddle
             return Flux.error(new SecurityException("delegated child Run fence or budget is missing"));
         RunScopedDelegationBudget.Lease lease;
         try {
-            lease = budget.activate(roleId);
+            lease = budget.activate(roleId, input.msgs().get(0).getTextContent());
         } catch (RuntimeException denied) {
             return Flux.error(denied);
         }
-        return next.apply(input).doFinally(signal -> lease.close());
+        return next.apply(input).doOnNext(event -> {
+            if (event instanceof AgentResultEvent result) {
+                budget.complete(lease, result.getResult().getTextContent(),
+                        new AgentEventDescriptor(event.getId(), event.getCreatedAt(), event.getType().name(),
+                                event.getSource(), result.getResult().getId(), null, null, context.getSessionId(),
+                                null, trustedParentSessionId, AgentExecutionRole.CHILD, call.attemptId(), call.fenceToken()));
+            }
+        }).doFinally(signal -> budget.release(lease));
     }
 
     private static boolean sameRun(HarnessCallContext expected, HarnessCallContext actual) {

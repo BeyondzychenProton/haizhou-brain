@@ -9,8 +9,10 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import com.haizhuo.brain.runtime.api.DelegationPersistenceException;
+import com.haizhuo.brain.runtime.api.event.AgentEventDescriptor;
 
 /** Run-scoped bridge from native Harness calls to durable platform acceptance and budgets. */
 public final class RunScopedDelegationBudget {
@@ -24,7 +26,8 @@ public final class RunScopedDelegationBudget {
     private final Map<String, FrozenExpert> allowedFixedDefinitions;
     private final boolean generalPurposeAllowed;
     private final boolean dynamicExpertAllowed;
-    private final ConcurrentHashMap<String, ConcurrentLinkedQueue<DelegationAcceptanceProvider.AcceptedDelegation>> pending
+    private final AtomicReference<DelegationPersistenceException> persistenceFailure = new AtomicReference<>();
+    private final ConcurrentHashMap<String, DelegationAcceptanceProvider.AcceptedDelegation> pending
             = new ConcurrentHashMap<>();
 
     public RunScopedDelegationBudget(DelegationBudgetProvider provider, RunId runId,
@@ -94,7 +97,10 @@ public final class RunScopedDelegationBudget {
         if (accepted == null || accepted.size() != calls.size())
             throw new IllegalStateException("delegation provider did not accept the complete tool-call batch");
         for (var item : accepted) {
-            pending.computeIfAbsent(item.roleId(), ignored -> new ConcurrentLinkedQueue<>()).add(item);
+            String key = acceptanceKey(item.roleId(), item.normalizedPayload());
+            var previous = pending.putIfAbsent(key, item);
+            if (previous != null && !previous.reservation().invocationId().equals(item.reservation().invocationId()))
+                throw new SecurityException("different invocations cannot share the accepted native input");
         }
         return List.copyOf(accepted);
     }
@@ -110,19 +116,60 @@ public final class RunScopedDelegationBudget {
 
     public boolean permitsDynamicExpert() { return dynamicExpertAllowed; }
 
-    public Lease activate(String roleId) {
-        var queue = pending.get(roleId);
-        var accepted = queue == null ? null : queue.poll();
+    public Lease activate(String roleId, String nativeInput) {
+        var accepted = pending.remove(acceptanceKey(roleId, nativeInput));
         if (accepted == null) {
-            // Preserve the pre-SPEC-10 contract for direct native probes. Production tool calls
-            // always arrive through acceptBatch and therefore use an accepted work item.
+            if (acceptanceProvider != null)
+                throw new SecurityException("child input does not match an accepted invocation");
+            // Budget-only legacy probes have no durable work-item provider.
             return acquire(roleId);
         }
-        if (!accepted.reservation().activate()) {
+        boolean activated;
+        try {
+            activated = accepted.reservation().activate();
+        } catch (RuntimeException uncertain) {
+            var failure = new DelegationPersistenceException(uncertain);
+            persistenceFailure.compareAndSet(null, failure);
+            throw failure;
+        }
+        if (!activated) {
             accepted.reservation().close();
             throw new IllegalStateException("delegation acceptance became stale before native execution");
         }
-        return new Lease(accepted.reservation());
+        return new Lease(accepted.reservation(), accepted);
+    }
+
+    private static String acceptanceKey(String roleId, String input) {
+        return Objects.requireNonNull(roleId) + "\u0000" + Objects.requireNonNull(input);
+    }
+
+    public void complete(Lease lease, String body, AgentEventDescriptor descriptor) {
+        if (lease.accepted == null) return;
+        try {
+            var accepted = lease.accepted;
+            var completed = new DelegationAcceptanceProvider.CompletedInvocation(lease.invocationId(),
+                    accepted.roleId(), accepted.normalizedPayload(), body, descriptor);
+            if (acceptanceProvider.completeInvocation(runId, attemptId, fenceToken, completed).isEmpty())
+                throw new IllegalStateException("child result commit was rejected by the current Run fence");
+        } catch (RuntimeException error) {
+            var failure = error instanceof DelegationPersistenceException known
+                    ? known : new DelegationPersistenceException(error);
+            persistenceFailure.compareAndSet(null, failure);
+            throw failure;
+        }
+    }
+
+    /** Native tools may wrap errors; the outer Run must still fail into recovery. */
+    public void verifyPersistence() {
+        var failure = persistenceFailure.get();
+        if (failure != null) throw failure;
+    }
+
+    public void release(Lease lease) {
+        try { lease.close(); }
+        catch (RuntimeException uncertain) {
+            persistenceFailure.compareAndSet(null, new DelegationPersistenceException(uncertain));
+        }
     }
 
     public Optional<DelegationAcceptanceProvider.WorkItemResult> readResult(
@@ -142,10 +189,7 @@ public final class RunScopedDelegationBudget {
 
     /** Close accepted calls that AgentScope did not start before this root execution ended. */
     public void closeUnstarted() {
-        pending.values().forEach(queue -> {
-            DelegationAcceptanceProvider.AcceptedDelegation call;
-            while ((call = queue.poll()) != null) call.reservation().close();
-        });
+        pending.values().forEach(call -> call.reservation().close());
         pending.clear();
     }
 
@@ -175,10 +219,17 @@ public final class RunScopedDelegationBudget {
 
     public static final class Lease implements AutoCloseable {
         private final DelegationBudgetProvider.Reservation reservation;
+        private final DelegationAcceptanceProvider.AcceptedDelegation accepted;
         private final AtomicBoolean closed = new AtomicBoolean();
 
         private Lease(DelegationBudgetProvider.Reservation reservation) {
+            this(reservation, null);
+        }
+
+        private Lease(DelegationBudgetProvider.Reservation reservation,
+                      DelegationAcceptanceProvider.AcceptedDelegation accepted) {
             this.reservation = Objects.requireNonNull(reservation);
+            this.accepted = accepted;
         }
 
         public String invocationId() { return reservation.invocationId(); }

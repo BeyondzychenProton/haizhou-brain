@@ -408,6 +408,7 @@ public final class NativeTeamExecutionGateway {
                         }
                         subscriptions.remove(member.sessionId, subscription);
                         if (turnFailure.get() != null) throw new IllegalStateException("Team member turn failed", turnFailure.get());
+                        checkAbort();
                         lastResult = result.get();
                         if (!persistence.recordMemberEvent(execution, member.roleId,
                                 TeamExecutionPersistence.MemberEvent.ENDED, ordinal, Instant.now()))

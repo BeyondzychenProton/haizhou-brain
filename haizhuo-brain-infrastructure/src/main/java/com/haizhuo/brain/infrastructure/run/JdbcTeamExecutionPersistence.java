@@ -103,6 +103,12 @@ public class JdbcTeamExecutionPersistence implements TeamExecutionPersistence {
         if (roleId == null || roleId.isBlank() || event == null || ordinal < 1 || occurredAt == null)
             throw new IllegalArgumentException("invalid Team member event");
         lockCurrentParent(execution);
+        List<String> active = jdbc.query("SELECT state FROM platform_run_team_execution WHERE team_execution_id=? "
+                        + "AND run_id=? AND attempt_id=? AND fence_token=? FOR UPDATE",
+                (rs, row) -> rs.getString(1), execution.teamExecutionId(), execution.runId().value(),
+                execution.attemptId(), execution.fenceToken());
+        if (active.size() != 1 || !"RUNNING".equals(active.get(0)))
+            throw new IllegalStateException("Team member event is outside its active execution generation");
         TeamExecutionMember member = execution.members().stream()
                 .filter(candidate -> candidate.roleId().equals(roleId))
                 .findFirst().orElseThrow(() -> new SecurityException("Team member is outside the frozen roster"));
