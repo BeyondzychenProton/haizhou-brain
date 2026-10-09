@@ -91,14 +91,18 @@ public class HarnessRuntimeConfiguration {
         String hosts = environment.getProperty("haizhuo.brain.mcp.allowed-hosts", "");
         Set<String> allowlist = Arrays.stream(hosts.split(","))
                 .map(String::trim).filter(s -> !s.isBlank()).collect(Collectors.toSet());
-        boolean simulator = environment.getProperty("haizhuo.brain.mcp.simulator.enabled", Boolean.class, false);
+        boolean isolatedTestProfile = Arrays.equals(environment.getActiveProfiles(), new String[] {"test"});
+        boolean simulator = isolatedTestProfile
+                && environment.getProperty("haizhuo.brain.mcp.simulator.enabled", Boolean.class, false);
         return new McpEndpointPolicy(allowlist, simulator);
     }
 
     @Bean
     McpUserTokenProvider mcpUserTokenProvider(PlatformIdentityRepository identities,
                                                Environment environment, Clock clock) {
-        if (!environment.getProperty("haizhuo.brain.mcp.simulator.enabled", Boolean.class, false))
+        boolean isolatedTestProfile = Arrays.equals(environment.getActiveProfiles(), new String[] {"test"});
+        if (!isolatedTestProfile
+                || !environment.getProperty("haizhuo.brain.mcp.simulator.enabled", Boolean.class, false))
             return (user, connection) -> { throw new IllegalStateException("MCP identity integration is not configured"); };
         return new SimulatorMcpUserTokenProvider(identities,
                 environment.getProperty("haizhuo.brain.mcp.simulator.secret"), clock);

@@ -6,6 +6,7 @@ import com.haizhuo.brain.platform.run.HarnessRunSpecFactory;
 import com.haizhuo.brain.platform.run.AgentResultRepository;
 import com.haizhuo.brain.platform.run.SessionRunStore;
 import com.haizhuo.brain.platform.session.SessionApplicationService;
+import com.haizhuo.brain.platform.employee.RuntimeProfileAdmissionPolicy;
 import java.time.Clock;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -16,7 +17,8 @@ public class SessionRunConfiguration {
     SessionApplicationService sessionApplicationService(SessionRunStore store, EmployeeCatalog employees,
                                                         HarnessDefinitionBundleRepository bundles,
                                                         HarnessRunSpecFactory runSpecFactory,
-                                                        AgentResultRepository results, Clock clock) {
-        return new SessionApplicationService(store, employees, bundles, runSpecFactory, results, clock);
+                                                        AgentResultRepository results, Clock clock,
+                                                        RuntimeProfileAdmissionPolicy profileAdmission) {
+        return new SessionApplicationService(store, employees, bundles, runSpecFactory, results, clock, profileAdmission);
     }
 }

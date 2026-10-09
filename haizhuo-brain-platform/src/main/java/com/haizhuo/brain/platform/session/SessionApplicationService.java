@@ -7,6 +7,7 @@ import com.haizhuo.brain.platform.employee.EmployeeCatalog;
 import com.haizhuo.brain.platform.employee.runtime.HarnessDefinitionBundle;
 import com.haizhuo.brain.platform.employee.runtime.HarnessDefinitionBundleRepository;
 import com.haizhuo.brain.platform.employee.EmployeeRuntimeConfiguration;
+import com.haizhuo.brain.platform.employee.RuntimeProfileAdmissionPolicy;
 import com.haizhuo.brain.platform.run.AgentRun;
 import com.haizhuo.brain.platform.run.AgentResult;
 import com.haizhuo.brain.platform.run.AgentResultRepository;
@@ -45,6 +46,7 @@ public class SessionApplicationService {
     private final HarnessRunSpecFactory runSpecFactory;
     private final AgentResultRepository results;
     private final Clock clock;
+    private final RuntimeProfileAdmissionPolicy profileAdmission;
 
     private static final int MAX_REFERENCED_RESULTS = 8;
     private static final int MAX_REFERENCED_RESULT_BYTES = 512 * 1024;
@@ -52,24 +54,33 @@ public class SessionApplicationService {
     public SessionApplicationService(SessionRunStore store, EmployeeCatalog employees,
                                      HarnessDefinitionBundleRepository bundles,
                                      HarnessRunSpecFactory runSpecFactory, Clock clock) {
-        this(store, employees, bundles, runSpecFactory, null, clock);
+        this(store, employees, bundles, runSpecFactory, null, clock, RuntimeProfileAdmissionPolicy.legacyOnly());
     }
 
     public SessionApplicationService(SessionRunStore store, EmployeeCatalog employees,
                                      HarnessDefinitionBundleRepository bundles,
                                      HarnessRunSpecFactory runSpecFactory, AgentResultRepository results,
                                      Clock clock) {
+        this(store, employees, bundles, runSpecFactory, results, clock, RuntimeProfileAdmissionPolicy.legacyOnly());
+    }
+
+    public SessionApplicationService(SessionRunStore store, EmployeeCatalog employees,
+                                     HarnessDefinitionBundleRepository bundles,
+                                     HarnessRunSpecFactory runSpecFactory, AgentResultRepository results,
+                                     Clock clock, RuntimeProfileAdmissionPolicy profileAdmission) {
         this.store = store;
         this.employees = employees;
         this.bundles = bundles;
         this.runSpecFactory = runSpecFactory;
         this.results = results;
         this.clock = clock;
+        this.profileAdmission = java.util.Objects.requireNonNull(profileAdmission);
     }
 
     public AgentSession create(UserId owner, long employeeId) {
         var published = employees.findPublished(DEFAULT_TENANT, employeeId)
                 .orElseThrow(() -> new IllegalArgumentException("Published employee was not found"));
+        requireProfileAdmission(published.definition().configuration().profile());
         Instant now = clock.instant();
         return store.createSession(new AgentSession(SessionId.newId(), owner, employeeId,
                 AgentSession.Status.ACTIVE, now, now, 0, published.definition().id(), false));
@@ -115,6 +126,7 @@ public class SessionApplicationService {
         // 必须重新发布后才能运行（规格 §8/§10.2）。
         HarnessDefinitionBundle bundle = bundles.findByDefinitionVersionId(versionId)
                 .orElseThrow(() -> new IllegalStateException("Published definition has no runtime bundle; re-publish the employee first"));
+        requireProfileAdmission(bundle.configuration().profile());
         RunExecutionTarget target;
         HarnessDefinitionBundle executionBundle = bundle;
         boolean readOnlyToolsOnly = isTeamProfile(bundle.configuration().profile());
@@ -135,6 +147,7 @@ public class SessionApplicationService {
                     .orElseThrow(() -> new IllegalStateException("Frozen member runtime bundle is missing"));
             if (executionBundle.definitionVersionId() != member.definitionVersionId())
                 throw new IllegalStateException("Frozen member bundle version does not match Session role");
+            requireProfileAdmission(executionBundle.configuration().profile());
             String slotId = UUID.randomUUID().toString();
             SessionRoleSlot slot = store.createRoleSlot(new SessionRoleSlot(slotId, session.id(), owner,
                     targetRoleId, member.employeeId(), member.definitionVersionId(),
@@ -231,6 +244,14 @@ public class SessionApplicationService {
 
     private static boolean isTeamProfile(RuntimeProfile profile) {
         return profile == RuntimeProfile.TEAM_READONLY || profile == RuntimeProfile.TEAM_AUTONOMOUS_READONLY;
+    }
+
+    private void requireProfileAdmission(RuntimeProfile profile) {
+        RuntimeProfileAdmissionPolicy.Admission admission = profileAdmission.evaluate(profile);
+        if (!admission.enabled()) {
+            String reason = admission.reasonCode() == null ? "PROFILE_DISABLED" : admission.reasonCode();
+            throw new IllegalStateException("Runtime profile is not admitted: " + reason);
+        }
     }
 
     public AgentRun getRun(RunId runId, UserId owner) { return store.findRun(runId, owner).orElseThrow(() -> new IllegalArgumentException("Run was not found")); }

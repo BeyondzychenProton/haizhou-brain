@@ -14,6 +14,7 @@ import com.haizhuo.brain.platform.employee.DigitalEmployee;
 import com.haizhuo.brain.platform.employee.EmployeeCatalog;
 import com.haizhuo.brain.platform.employee.EmployeeRuntimeConfiguration;
 import com.haizhuo.brain.platform.employee.PublishedEmployee;
+import com.haizhuo.brain.platform.employee.RuntimeProfileAdmissionPolicy;
 import com.haizhuo.brain.platform.employee.runtime.HarnessDefinitionBundle;
 import com.haizhuo.brain.platform.employee.runtime.HarnessDefinitionBundleRepository;
 import com.haizhuo.brain.platform.run.AgentRun;
@@ -51,7 +52,7 @@ class SessionRoleSwitchingTest {
                 new DigitalEmployee(employeeId, tenant, "owner", "协调员工", true),
                 new AgentDefinitionVersion(10, employeeId, 1, "指令", "openai", "model", NOW), List.of()));
         SessionApplicationService service = new SessionApplicationService(store, employees, bundles,
-                new HarnessRunSpecFactory(null, null), Clock.fixed(NOW, ZoneOffset.UTC));
+                new HarnessRunSpecFactory(null, null), null, Clock.fixed(NOW, ZoneOffset.UTC), verifiedProfiles());
         AgentSession session = service.create(OWNER, 1);
 
         assertEquals(List.of("coordinator", "researcher", "reviewer"),
@@ -85,13 +86,39 @@ class SessionRoleSwitchingTest {
                 new DigitalEmployee(employeeId, tenant, "owner", "协调员工", true),
                 new AgentDefinitionVersion(10, employeeId, 1, "指令", "openai", "model", NOW), List.of()));
         SessionApplicationService service = new SessionApplicationService(store, employees, repository(byVersion),
-                new HarnessRunSpecFactory(null, null), Clock.fixed(NOW, ZoneOffset.UTC));
+                new HarnessRunSpecFactory(null, null), null, Clock.fixed(NOW, ZoneOffset.UTC), verifiedProfiles());
         AgentSession session = service.create(OWNER, 1);
 
         assertThrows(IllegalArgumentException.class,
                 () -> service.createRun(session.id(), OWNER, "blocked", "越权目标", "hidden-role", RunExecutionMode.DIRECT));
         assertThrows(IllegalStateException.class,
                 () -> service.createRun(session.id(), OWNER, "future", "尚未开放", "researcher", RunExecutionMode.COLLABORATIVE));
+        assertTrue(store.targets.isEmpty());
+    }
+
+    @Test
+    void configuredButUnverifiedProfileCannotCreateSessionOrStartRun() {
+        MemoryStore store = new MemoryStore();
+        Map<Long, HarnessDefinitionBundle> byVersion = Map.of(
+                10L, bundle(10, 1, "协调员工", teamConfiguration(), NOW));
+        EmployeeCatalog employees = (tenant, employeeId) -> Optional.of(new PublishedEmployee(
+                new DigitalEmployee(employeeId, tenant, "owner", "协调员工", true),
+                new AgentDefinitionVersion(10, employeeId, 1, "指令", "openai", "model", NOW,
+                        "", teamConfiguration()), List.of()));
+        RuntimeProfileAdmissionPolicy configuredWithoutEvidence = RuntimeProfileAdmissionPolicy.configuredOnly(
+                java.util.Set.of(RuntimeProfile.LEGACY_STABLE, RuntimeProfile.TEAM_READONLY));
+        SessionApplicationService service = new SessionApplicationService(store, employees, repository(byVersion),
+                new HarnessRunSpecFactory(null, null), null, Clock.fixed(NOW, ZoneOffset.UTC),
+                configuredWithoutEvidence);
+
+        assertThrows(IllegalStateException.class, () -> service.create(OWNER, 1));
+        AgentSession frozen = new AgentSession(new SessionId("frozen-team-session"), OWNER, 1,
+                AgentSession.Status.ACTIVE, NOW, NOW, 0, 10L, false);
+        store.createSession(frozen);
+        IllegalStateException rejected = assertThrows(IllegalStateException.class,
+                () -> service.createRun(frozen.id(), OWNER, "req-1", "执行任务"));
+
+        assertTrue(rejected.getMessage().contains("PROFILE_VERIFICATION_MISSING"));
         assertTrue(store.targets.isEmpty());
     }
 
@@ -102,6 +129,10 @@ class SessionRoleSwitchingTest {
                         List.of(new EmployeeRuntimeConfiguration.RoleDelegation("researcher", "reviewer"))),
                 List.of(new EmployeeRuntimeConfiguration.FixedMember("researcher", 2, 20, 4),
                         new EmployeeRuntimeConfiguration.FixedMember("reviewer", 3, 30, 3)));
+    }
+
+    private static RuntimeProfileAdmissionPolicy verifiedProfiles() {
+        return profile -> new RuntimeProfileAdmissionPolicy.Admission(true, true, true, null, "TEST_VERIFICATION");
     }
 
     private static HarnessDefinitionBundle bundle(long version, long employee, String name,
