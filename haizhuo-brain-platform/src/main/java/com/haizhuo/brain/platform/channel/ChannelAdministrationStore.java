@@ -20,6 +20,11 @@ public interface ChannelAdministrationStore {
     /** 只更新启停、默认员工与会话粒度；路由标识不允许经管理面改动。 */
     void updateAccount(ChannelAccountBinding binding);
 
+    /** 面向新版管理员客户端的条件更新；不支持 SQL CAS 的实现必须拒绝此操作。 */
+    default boolean updateAccountIfRevision(ChannelAccountBinding binding, long expectedRevision) {
+        throw new UnsupportedOperationException("Conditional channel account updates are not supported");
+    }
+
     List<ChannelIdentityBinding> findIdentities(String bindingId);
 
     Optional<ChannelIdentityBinding> findIdentity(String bindingId, String externalUserId);

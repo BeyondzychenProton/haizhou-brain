@@ -2,6 +2,7 @@ package com.haizhuo.brain.bootstrap.channel;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.haizhuo.brain.kernel.identity.TenantId;
@@ -14,6 +15,7 @@ import com.haizhuo.brain.platform.channel.ChannelRuntimeAdmin.ChannelRuntimeStat
 import com.haizhuo.brain.platform.channel.ChannelTurnStore;
 import com.haizhuo.brain.platform.channel.SessionScope;
 import com.haizhuo.brain.platform.employee.EmployeeCatalog;
+import io.agentscope.harness.agent.gateway.ChannelManager;
 import io.agentscope.harness.agent.gateway.channel.ChannelBinding;
 import io.agentscope.harness.agent.gateway.channel.ChannelConfig;
 import io.agentscope.harness.agent.gateway.channel.DmScope;
@@ -53,14 +55,22 @@ class AgentScopeChannelRuntimeTest {
     void disabledBindingUnloadsItsProvider() {
         FakeDirectory directory = new FakeDirectory();
         directory.add(binding("feishu-main", "feishu", "cli_app", 11L, SessionScope.PER_PEER, true));
-        AgentScopeChannelRuntime runtime = runtime(directory);
+        ChannelManager registry = new ChannelManager();
+        AgentScopeChannelRuntime runtime = runtime(directory, registry);
         runtime.refreshAll();
+        assertEquals(List.of("feishu"), registry.channelIds(), "启用绑定必须注册到 AgentScope 原生 registry");
         assertEquals(1, runtime.channels().size());
 
         directory.replace(binding("feishu-main", "feishu", "cli_app", 11L, SessionScope.PER_PEER, false));
         runtime.refreshAll();
 
-        assertTrue(runtime.channels().isEmpty(), "没有启用绑定的渠道不应继续留在注册表里");
+        assertTrue(registry.channelIds().isEmpty(), "注销最后一个绑定后必须从 AgentScope 原生 registry 移除渠道");
+        assertTrue(registry.getChannel("feishu").isEmpty(), "被注销渠道不得仍能从 AgentScope 原生 registry 查询到");
+        ChannelRuntimeStatus unloaded = channel(runtime.channels(), "feishu");
+        assertFalse(unloaded.started(), "注销最后一个绑定后不应报告渠道已启动");
+        assertEquals(0, unloaded.bindingCount(), "已注销渠道不应报告运行时绑定");
+        assertEquals("UNLOADED", unloaded.accountSnapshots().get(0).loadState());
+        assertNull(unloaded.accountSnapshots().get(0).loadedRevision());
     }
 
     @Test
@@ -76,6 +86,31 @@ class AgentScopeChannelRuntimeTest {
         runtime.refreshAll();
 
         assertEquals(2, channel(runtime.channels(), "feishu").bindingCount());
+    }
+
+    @Test
+    void runtimeReportsOnlyRevisionsAcceptedByThisInstance() {
+        FakeDirectory directory = new FakeDirectory();
+        directory.add(binding("feishu-main", "feishu", "cli_app", 11L, SessionScope.PER_PEER, true, 1));
+        AgentScopeChannelRuntime runtime = runtime(directory);
+
+        assertEquals("UNKNOWN", runtime.accountSnapshots().get(0).loadState());
+        runtime.refreshAll();
+        assertEquals("LOADED", runtime.accountSnapshots().get(0).loadState());
+        assertEquals(1L, runtime.accountSnapshots().get(0).loadedRevision());
+
+        directory.replace(binding("feishu-main", "feishu", "cli_app", 12L, SessionScope.PER_PEER, true, 2));
+        assertEquals("STALE", runtime.accountSnapshots().get(0).loadState());
+        assertEquals(1L, runtime.accountSnapshots().get(0).loadedRevision());
+
+        runtime.refreshAll();
+        assertEquals("LOADED", runtime.accountSnapshots().get(0).loadState());
+        assertEquals(2L, runtime.accountSnapshots().get(0).loadedRevision());
+
+        directory.replace(binding("feishu-main", "feishu", "cli_app", 12L, SessionScope.PER_PEER, false, 3));
+        runtime.refreshAll();
+        assertEquals("UNLOADED", runtime.accountSnapshots().get(0).loadState());
+        assertNull(runtime.accountSnapshots().get(0).loadedRevision());
     }
 
     @Test
@@ -125,6 +160,10 @@ class AgentScopeChannelRuntimeTest {
         return new AgentScopeChannelRuntime(directory, ingress(), null);
     }
 
+    private static AgentScopeChannelRuntime runtime(FakeDirectory directory, ChannelManager registry) {
+        return new AgentScopeChannelRuntime(directory, ingress(), null, registry);
+    }
+
     private static ChannelRuntimeStatus channel(List<ChannelRuntimeStatus> channels, String channelId) {
         return channels.stream().filter(status -> status.channelId().equals(channelId)).findFirst()
                 .orElseThrow(() -> new AssertionError("channel not registered: " + channelId));
@@ -132,8 +171,13 @@ class AgentScopeChannelRuntimeTest {
 
     private static ChannelAccountBinding binding(String bindingId, String provider, String accountKey,
                                                  long employeeId, SessionScope scope, boolean enabled) {
+        return binding(bindingId, provider, accountKey, employeeId, scope, enabled, 1);
+    }
+
+    private static ChannelAccountBinding binding(String bindingId, String provider, String accountKey,
+                                                 long employeeId, SessionScope scope, boolean enabled, long revision) {
         return new ChannelAccountBinding(bindingId, TENANT, provider, accountKey, "env:" + bindingId,
-                employeeId, scope, enabled);
+                employeeId, scope, enabled, revision);
     }
 
     /** 受理链路在这些用例里不会被触发；空装配即可让装配流程真实执行。 */

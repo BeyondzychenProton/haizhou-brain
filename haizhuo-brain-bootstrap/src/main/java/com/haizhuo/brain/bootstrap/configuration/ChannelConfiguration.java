@@ -5,10 +5,13 @@ import com.haizhuo.brain.bootstrap.channel.SimulatedChannelOutboundSender;
 import com.haizhuo.brain.platform.channel.ChannelAccountDirectory;
 import com.haizhuo.brain.platform.channel.ChannelAdministrationService;
 import com.haizhuo.brain.platform.channel.ChannelAdministrationStore;
+import com.haizhuo.brain.platform.channel.ChannelDeliveryAdministrationQuery;
+import com.haizhuo.brain.platform.channel.ChannelDeliveryAdministrationService;
 import com.haizhuo.brain.platform.channel.ChannelDeliveryOutbox;
 import com.haizhuo.brain.platform.channel.ChannelDeliveryWorker;
 import com.haizhuo.brain.platform.channel.ChannelIdentityDirectory;
 import com.haizhuo.brain.platform.channel.ChannelIngressService;
+import com.haizhuo.brain.platform.channel.ChannelManagementCommandExecutor;
 import com.haizhuo.brain.platform.channel.ChannelOutboundSender;
 import com.haizhuo.brain.platform.channel.ChannelRuntimeAdmin;
 import com.haizhuo.brain.platform.channel.ChannelTurnStore;
@@ -78,8 +81,15 @@ public class ChannelConfiguration {
                                                               EmployeeCatalog employees,
                                                               ToolExecutionUserDirectory users,
                                                               ChannelRuntimeAdmin runtime,
+                                                              ChannelManagementCommandExecutor commands,
                                                               Clock clock) {
-        return new ChannelAdministrationService(store, accounts, employees, users, runtime, clock);
+        return new ChannelAdministrationService(store, accounts, employees, users, runtime, commands, clock);
+    }
+
+    @Bean
+    ChannelDeliveryAdministrationService channelDeliveryAdministrationService(
+            ChannelDeliveryAdministrationQuery query, Clock clock) {
+        return new ChannelDeliveryAdministrationService(query, clock);
     }
 
     /**

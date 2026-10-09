@@ -10,5 +10,14 @@ import com.haizhuo.brain.kernel.identity.TenantId;
  */
 public record ChannelAccountBinding(String bindingId, TenantId tenantId, String provider,
                                     String externalAccountKey, String credentialRef,
-                                    long defaultEmployeeId, SessionScope sessionScope, boolean enabled) {
+                                    long defaultEmployeeId, SessionScope sessionScope, boolean enabled,
+                                    long revision) {
+
+    /** 供现有内部调用方和测试使用的兼容构造器；持久化记录使用显式修订号。 */
+    public ChannelAccountBinding(String bindingId, TenantId tenantId, String provider,
+                                 String externalAccountKey, String credentialRef,
+                                 long defaultEmployeeId, SessionScope sessionScope, boolean enabled) {
+        this(bindingId, tenantId, provider, externalAccountKey, credentialRef,
+                defaultEmployeeId, sessionScope, enabled, 1);
+    }
 }

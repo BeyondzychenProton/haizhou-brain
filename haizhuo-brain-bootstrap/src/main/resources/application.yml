@@ -67,6 +67,22 @@ haizhuo:
       primary-model: qwen-plus
     run-worker:
       enabled: false
+    employee:
+      enabled-profiles: ${HAIZHUO_BRAIN_EMPLOYEE_ENABLED_PROFILES:LEGACY_STABLE}
+    runtime:
+      verification-manifest: ${HAIZHUO_BRAIN_VERIFICATION_MANIFEST:}
+      deployment-commit: ${HAIZHUO_BRAIN_DEPLOYMENT_COMMIT:}
+      deployment-environment: ${HAIZHUO_BRAIN_DEPLOYMENT_ENVIRONMENT:}
+    tool:
+      resource-policy-mode: ${HAIZHUO_BRAIN_TOOL_RESOURCE_POLICY_MODE:STRICT}
+      resource-free-capabilities: ${HAIZHUO_BRAIN_RESOURCE_FREE_CAPABILITIES:}
+    session-render-v3:
+      enabled: false
+    artifacts:
+      markdown:
+        enabled: ${HAIZHUO_BRAIN_MARKDOWN_ARTIFACTS_ENABLED:false}
+        storage-directory: ${HAIZHUO_BRAIN_MARKDOWN_ARTIFACTS_DIRECTORY:}
+        max-bytes: ${HAIZHUO_BRAIN_MARKDOWN_ARTIFACTS_MAX_BYTES:1048576}
     persistence:
       enabled: true
     observability:

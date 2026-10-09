@@ -19,7 +19,7 @@ import org.springframework.stereotype.Repository;
 public class JdbcChannelAccountDirectory implements ChannelAccountDirectory {
 
     private static final String COLUMNS = "binding_id,tenant_id,provider,external_account_key,credential_ref,"
-            + "default_employee_id,dm_scope,enabled";
+            + "default_employee_id,dm_scope,enabled,revision";
 
     private final JdbcTemplate jdbc;
 
@@ -50,7 +50,7 @@ public class JdbcChannelAccountDirectory implements ChannelAccountDirectory {
         return new ChannelAccountBinding(rs.getString("binding_id"), new TenantId(rs.getLong("tenant_id")),
                 rs.getString("provider"), rs.getString("external_account_key"), rs.getString("credential_ref"),
                 rs.getLong("default_employee_id"), sessionScope(rs.getString("dm_scope")),
-                rs.getBoolean("enabled"));
+                rs.getBoolean("enabled"), rs.getLong("revision"));
     }
 
     /**

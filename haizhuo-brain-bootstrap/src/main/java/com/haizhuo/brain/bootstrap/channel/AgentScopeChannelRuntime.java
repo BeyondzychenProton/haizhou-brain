@@ -15,6 +15,11 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.UUID;
+import java.time.Instant;
+import java.util.HashMap;
+import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -38,10 +43,12 @@ public class AgentScopeChannelRuntime implements ChannelRuntimeAdmin {
     /** 平台用员工标识承载 Agent：一个渠道账号绑定指向一个员工。 */
     private static final String AGENT_ID_PREFIX = "employee-";
 
-    private final ChannelManager channels = new ChannelManager();
+    private final ChannelManager channels;
     private final ChannelAccountDirectory directory;
     private final ChannelIngressService ingress;
     private final PlatformChannel.ChannelOutboundConsumer outbound;
+    private final String instanceLabel = "channel-runtime-" + UUID.randomUUID().toString().substring(0, 8);
+    private final Map<String, LoadedAccount> loadedAccounts = new HashMap<>();
 
     /**
      * @param outbound 框架侧的直接投递落点；平台出站统一走 outbox，
@@ -49,14 +56,24 @@ public class AgentScopeChannelRuntime implements ChannelRuntimeAdmin {
      */
     public AgentScopeChannelRuntime(ChannelAccountDirectory directory, ChannelIngressService ingress,
                                     PlatformChannel.ChannelOutboundConsumer outbound) {
+        this(directory, ingress, outbound, new ChannelManager());
+    }
+
+    AgentScopeChannelRuntime(ChannelAccountDirectory directory, ChannelIngressService ingress,
+                             PlatformChannel.ChannelOutboundConsumer outbound, ChannelManager channels) {
         this.directory = Objects.requireNonNull(directory);
         this.ingress = Objects.requireNonNull(ingress);
         this.outbound = outbound;
+        this.channels = Objects.requireNonNull(channels);
     }
 
     @Override
     public synchronized void refreshAll() {
-        Map<String, List<ChannelAccountBinding>> byProvider = enabledBindingsByProvider();
+        List<ChannelAccountBinding> configured = directory.findAll();
+        Map<String, List<ChannelAccountBinding>> byProvider = enabledBindingsByProvider(configured);
+        Set<String> enabledIds = byProvider.values().stream().flatMap(List::stream)
+                .map(ChannelAccountBinding::bindingId).collect(Collectors.toSet());
+        loadedAccounts.keySet().removeIf(bindingId -> !enabledIds.contains(bindingId));
 
         // 1) 卸载：没有任何启用绑定的渠道不该继续留在注册表里（unregister 会顺带 stop）。
         for (String channelId : channels.channelIds()) {
@@ -74,15 +91,19 @@ public class AgentScopeChannelRuntime implements ChannelRuntimeAdmin {
             Channel existing = channels.getChannel(channelId).orElse(null);
             if (existing == null) {
                 channels.register(new PlatformChannel(channelId, directory, ingress, outbound, config));
+                markLoaded(entry.getValue());
                 log.info("channel runtime loaded {} with {} enabled binding(s)", channelId, entry.getValue().size());
                 continue;
             }
             if (existing.applyRoutingConfig(config)) {
+                markLoaded(entry.getValue());
                 continue;
             }
             // 渠道拒绝了新配置：换实例，避免注册表里留着过期的路由表。
+            removeProvider(entry.getValue().get(0).provider());
             channels.unregister(channelId);
             channels.register(new PlatformChannel(channelId, directory, ingress, outbound, config));
+            markLoaded(entry.getValue());
             log.info("channel runtime reloaded {}: previous instance rejected the routing config", channelId);
         }
 
@@ -92,19 +113,66 @@ public class AgentScopeChannelRuntime implements ChannelRuntimeAdmin {
     }
 
     @Override
-    public List<ChannelRuntimeStatus> channels() {
+    public synchronized List<ChannelRuntimeStatus> channels() {
         boolean running = channels.isStarted();
         List<ChannelRuntimeStatus> statuses = new ArrayList<>();
+        List<ChannelAccountBinding> configured = directory.findAll();
         for (Channel channel : channels.getAllChannels()) {
             ChannelConfig config = channel.config();
+            List<AccountLoadSnapshot> snapshots = configured.stream()
+                    .filter(binding -> binding.provider().equals(channel.channelId()))
+                    .map(this::snapshot).toList();
             statuses.add(new ChannelRuntimeStatus(channel.channelId(),
                     config == null ? null : config.defaultAgentId(),
                     config == null || config.dmScope() == null
                             ? SessionScope.defaultScope().name() : config.dmScope().name(),
                     config == null || config.bindings() == null ? 0 : config.bindings().size(),
-                    running));
+                    running, instanceLabel, Instant.now(), snapshots));
         }
+        Set<String> observedProviders = statuses.stream().map(ChannelRuntimeStatus::channelId).collect(Collectors.toSet());
+        configured.stream().map(ChannelAccountBinding::provider).distinct()
+                .filter(provider -> !observedProviders.contains(provider))
+                .forEach(provider -> {
+                    List<ChannelAccountBinding> providerAccounts = configured.stream()
+                            .filter(binding -> binding.provider().equals(provider)).toList();
+                    List<AccountLoadSnapshot> snapshots = providerAccounts.stream().map(this::snapshot).toList();
+                    statuses.add(new ChannelRuntimeStatus(provider, null,
+                            strictestSessionScope(providerAccounts).name(), 0, false, instanceLabel,
+                            Instant.now(), snapshots));
+                });
         return statuses;
+    }
+
+    @Override
+    public String instanceLabel() {
+        return instanceLabel;
+    }
+
+    @Override
+    public synchronized List<AccountLoadSnapshot> accountSnapshots() {
+        return directory.findAll().stream().map(this::snapshot).toList();
+    }
+
+    private AccountLoadSnapshot snapshot(ChannelAccountBinding binding) {
+        LoadedAccount loaded = loadedAccounts.get(binding.bindingId());
+        if (!binding.enabled()) {
+            return new AccountLoadSnapshot(binding.bindingId(), binding.revision(), null, "UNLOADED");
+        }
+        if (loaded == null) {
+            return new AccountLoadSnapshot(binding.bindingId(), binding.revision(), null, "UNKNOWN");
+        }
+        String state = loaded.revision() == binding.revision() ? "LOADED" : "STALE";
+        return new AccountLoadSnapshot(binding.bindingId(), binding.revision(), loaded.revision(), state);
+    }
+
+    private void markLoaded(List<ChannelAccountBinding> bindings) {
+        for (ChannelAccountBinding binding : bindings) {
+            loadedAccounts.put(binding.bindingId(), new LoadedAccount(binding.provider(), binding.revision()));
+        }
+    }
+
+    private void removeProvider(String provider) {
+        loadedAccounts.entrySet().removeIf(entry -> provider.equals(entry.getValue().provider()));
     }
 
     /**
@@ -144,14 +212,18 @@ public class AgentScopeChannelRuntime implements ChannelRuntimeAdmin {
         return strictest;
     }
 
-    private Map<String, List<ChannelAccountBinding>> enabledBindingsByProvider() {
+    private static Map<String, List<ChannelAccountBinding>> enabledBindingsByProvider(
+            List<ChannelAccountBinding> configured) {
         Map<String, List<ChannelAccountBinding>> byProvider = new LinkedHashMap<>();
-        for (ChannelAccountBinding binding : directory.findAll()) {
+        for (ChannelAccountBinding binding : configured) {
             if (!binding.enabled()) {
                 continue;
             }
             byProvider.computeIfAbsent(binding.provider(), ignored -> new ArrayList<>()).add(binding);
         }
         return byProvider;
+    }
+
+    private record LoadedAccount(String provider, long revision) {
     }
 }

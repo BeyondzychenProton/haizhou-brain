@@ -66,6 +66,57 @@ class ChannelAdministrationServiceTest {
     }
 
     @Test
+    void commandUpdateRequiresMatchingRevisionAndAdvancesIt() {
+        FakeStore store = new FakeStore();
+        ChannelAdministrationService service = service(store, new AtomicInteger());
+        service.createAccount(ACTOR, create("feishu-main", "feishu", "cli_app", PUBLISHED_EMPLOYEE));
+
+        ChannelAccountBinding updated = service.updateAccountForCommand(ACTOR, "feishu-main",
+                new ChannelAdministrationService.UpdateAccount(false, null, null), 1L);
+
+        assertEquals(2L, updated.revision());
+        assertThrows(ChannelAccountChangedException.class, () -> service.updateAccountForCommand(ACTOR,
+                "feishu-main", new ChannelAdministrationService.UpdateAccount(true, null, null), 1L));
+        assertTrue(!store.accounts.get("feishu-main").enabled(), "旧修订不得覆盖新的配置");
+    }
+
+    @Test
+    void runtimeObservationFailureAfterCommitReturnsFailedRefreshReceipt() {
+        FakeStore store = new FakeStore();
+        ChannelRuntimeAdmin runtime = new ChannelRuntimeAdmin() {
+            @Override
+            public List<ChannelRuntimeStatus> channels() {
+                return List.of();
+            }
+
+            @Override
+            public void refreshAll() {
+                // 持久化命令已经提交；接下来失败的是状态观测调用。
+            }
+
+            @Override
+            public List<AccountLoadSnapshot> accountSnapshots() {
+                throw new IllegalStateException("runtime observation unavailable");
+            }
+
+            @Override
+            public String instanceLabel() {
+                return "channel-runtime-test";
+            }
+        };
+        ChannelAdministrationService service = service(store, runtime);
+        ChannelAccountBinding saved = service.createAccountForCommand(ACTOR,
+                create("feishu-main", "feishu", "cli_app", PUBLISHED_EMPLOYEE));
+
+        ChannelAdministrationService.RuntimeRefresh refresh = service.refreshAfterMutation(saved);
+
+        assertEquals("FAILED", refresh.status());
+        assertEquals(saved.revision(), refresh.requestedRevision());
+        assertEquals("channel-runtime-test", refresh.instanceLabel());
+        assertEquals("RUNTIME_REFRESH_FAILED", refresh.safeErrorCode());
+    }
+
+    @Test
     void identityLinkRequiresActiveUserAndEnabledAccount() {
         FakeStore store = new FakeStore();
         ChannelAdministrationService service = service(store, new AtomicInteger());
@@ -116,6 +167,21 @@ class ChannelAdministrationServiceTest {
     }
 
     private static ChannelAdministrationService service(FakeStore store, AtomicInteger refreshes) {
+        ChannelRuntimeAdmin runtime = new ChannelRuntimeAdmin() {
+            @Override
+            public List<ChannelRuntimeStatus> channels() {
+                return List.of();
+            }
+
+            @Override
+            public void refreshAll() {
+                refreshes.incrementAndGet();
+            }
+        };
+        return service(store, runtime);
+    }
+
+    private static ChannelAdministrationService service(FakeStore store, ChannelRuntimeAdmin runtime) {
         ChannelAccountDirectory directory = new ChannelAccountDirectory() {
             @Override
             public Optional<ChannelAccountBinding> findById(String bindingId) {
@@ -130,17 +196,6 @@ class ChannelAdministrationServiceTest {
         EmployeeCatalog employees = (tenant, employeeId) -> employeeId == PUBLISHED_EMPLOYEE
                 ? Optional.of(published(tenant)) : Optional.empty();
         ToolExecutionUserDirectory users = userId -> userId == ACTIVE_USER;
-        ChannelRuntimeAdmin runtime = new ChannelRuntimeAdmin() {
-            @Override
-            public List<ChannelRuntimeStatus> channels() {
-                return List.of();
-            }
-
-            @Override
-            public void refreshAll() {
-                refreshes.incrementAndGet();
-            }
-        };
         return new ChannelAdministrationService(store, directory, employees, users, runtime,
                 Clock.fixed(T0, ZoneOffset.UTC));
     }
@@ -177,6 +232,14 @@ class ChannelAdministrationServiceTest {
         @Override
         public void updateAccount(ChannelAccountBinding binding) {
             accounts.put(binding.bindingId(), binding);
+        }
+
+        @Override
+        public boolean updateAccountIfRevision(ChannelAccountBinding binding, long expectedRevision) {
+            ChannelAccountBinding current = accounts.get(binding.bindingId());
+            if (current == null || current.revision() != expectedRevision) return false;
+            accounts.put(binding.bindingId(), binding);
+            return true;
         }
 
         @Override

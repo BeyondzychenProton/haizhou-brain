@@ -23,23 +23,24 @@ public class ChannelDeliveryWorker {
 
     /** @return 是否处理了一条投递；false 表示当前没有待投递项。 */
     public boolean deliverNext() {
-        Optional<ChannelDelivery> claimed = outbox.claimNextDelivery();
+        Optional<ChannelDeliveryClaim> claimed = outbox.claimNextDelivery();
         if (claimed.isEmpty()) {
             return false;
         }
-        ChannelDelivery delivery = claimed.get();
+        ChannelDeliveryClaim claim = claimed.get();
+        ChannelDelivery delivery = claim.delivery();
         ChannelOutboundSender sender = senders.get(delivery.provider());
         if (sender == null) {
             // 没有发送器说明配置缺失；记为永久失败，避免这条记录无限占用队列头部。
-            outbox.recordOutcome(delivery.deliveryId(), new ChannelOutboundSender.DeliveryResult(
+            outbox.recordOutcome(claim, new ChannelOutboundSender.DeliveryResult(
                     ChannelOutboundSender.DeliveryResult.Status.PERMANENT_FAILURE, null));
             return true;
         }
         try {
-            outbox.recordOutcome(delivery.deliveryId(), sender.send(delivery));
+            outbox.recordOutcome(claim, sender.send(delivery));
         } catch (RuntimeException error) {
             // 异常时不带出响应正文：只按"结果不确定"落库。
-            outbox.recordOutcome(delivery.deliveryId(), new ChannelOutboundSender.DeliveryResult(
+            outbox.recordOutcome(claim, new ChannelOutboundSender.DeliveryResult(
                     ChannelOutboundSender.DeliveryResult.Status.UNCERTAIN, null));
         }
         return true;

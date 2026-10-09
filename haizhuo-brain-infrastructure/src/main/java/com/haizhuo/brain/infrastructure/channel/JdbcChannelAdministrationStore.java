@@ -42,19 +42,29 @@ public class JdbcChannelAdministrationStore implements ChannelAdministrationStor
     public void createAccount(ChannelAccountBinding binding) {
         Timestamp now = Timestamp.from(clock.instant());
         jdbc.update("INSERT INTO platform_channel_account(binding_id,tenant_id,provider,external_account_key,"
-                        + "credential_ref,default_employee_id,dm_scope,enabled,created_at,updated_at) "
-                        + "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                        + "credential_ref,default_employee_id,dm_scope,enabled,revision,created_at,updated_at) "
+                        + "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 binding.bindingId(), binding.tenantId().value(), binding.provider(),
                 binding.externalAccountKey(), binding.credentialRef(), binding.defaultEmployeeId(),
-                binding.sessionScope().name(), binding.enabled(), now, now);
+                binding.sessionScope().name(), binding.enabled(), binding.revision(), now, now);
     }
 
     @Override
     public void updateAccount(ChannelAccountBinding binding) {
-        jdbc.update("UPDATE platform_channel_account SET default_employee_id=?,dm_scope=?,enabled=?,updated_at=? "
+        jdbc.update("UPDATE platform_channel_account SET default_employee_id=?,dm_scope=?,enabled=?,"
+                        + "revision=revision+1,updated_at=? "
                         + "WHERE binding_id=?",
                 binding.defaultEmployeeId(), binding.sessionScope().name(), binding.enabled(),
                 Timestamp.from(clock.instant()), binding.bindingId());
+    }
+
+    @Override
+    public boolean updateAccountIfRevision(ChannelAccountBinding binding, long expectedRevision) {
+        int updated = jdbc.update("UPDATE platform_channel_account SET default_employee_id=?,dm_scope=?,enabled=?,"
+                        + "revision=revision+1,updated_at=? WHERE binding_id=? AND revision=?",
+                binding.defaultEmployeeId(), binding.sessionScope().name(), binding.enabled(),
+                Timestamp.from(clock.instant()), binding.bindingId(), expectedRevision);
+        return updated == 1;
     }
 
     @Override

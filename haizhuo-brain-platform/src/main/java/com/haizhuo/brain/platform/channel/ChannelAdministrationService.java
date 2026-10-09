@@ -21,8 +21,8 @@ import java.util.Objects;
  * <p>需要区分两件事：<b>绑定数据写入即生效</b>——入站链路每次都实时查库；
  * <b>运行时装配只影响注册表与配置一致性</b>，因此装配失败不回滚也不上抛。</p>
  *
- * <p>操作者标识已贯穿所有写方法，但平台层按既有约定不直接依赖日志实现，
- * 因此审计留痕需要后续接入审计端口后才能落地。</p>
+ * <p>新管理命令由 {@link ChannelManagementCommandExecutor} 将账号/身份变更、审计与幂等回执
+ * 放入同一持久化事务；旧客户端窗口仍会记录来源为 LEGACY_CLIENT 的审计事实。</p>
  */
 public class ChannelAdministrationService {
 
@@ -37,16 +37,25 @@ public class ChannelAdministrationService {
     private final EmployeeCatalog employees;
     private final ToolExecutionUserDirectory users;
     private final ChannelRuntimeAdmin runtime;
+    private final ChannelManagementCommandExecutor commands;
     private final Clock clock;
 
     public ChannelAdministrationService(ChannelAdministrationStore store, ChannelAccountDirectory directory,
                                         EmployeeCatalog employees, ToolExecutionUserDirectory users,
                                         ChannelRuntimeAdmin runtime, Clock clock) {
+        this(store, directory, employees, users, runtime, ChannelManagementCommandExecutor.DIRECT, clock);
+    }
+
+    public ChannelAdministrationService(ChannelAdministrationStore store, ChannelAccountDirectory directory,
+                                        EmployeeCatalog employees, ToolExecutionUserDirectory users,
+                                        ChannelRuntimeAdmin runtime, ChannelManagementCommandExecutor commands,
+                                        Clock clock) {
         this.store = Objects.requireNonNull(store);
         this.directory = Objects.requireNonNull(directory);
         this.employees = Objects.requireNonNull(employees);
         this.users = Objects.requireNonNull(users);
         this.runtime = runtime == null ? ChannelRuntimeAdmin.NOOP : runtime;
+        this.commands = commands == null ? ChannelManagementCommandExecutor.DIRECT : commands;
         this.clock = Objects.requireNonNull(clock);
     }
 
@@ -60,6 +69,17 @@ public class ChannelAdministrationService {
     }
 
     public ChannelAccountBinding createAccount(UserId actor, CreateAccount command) {
+        ChannelAccountBinding binding = createAccountState(actor, command);
+        refreshRuntime();
+        return binding;
+    }
+
+    /** 在命令事务中持久化账号；事务提交后由 API 刷新运行时。 */
+    public ChannelAccountBinding createAccountForCommand(UserId actor, CreateAccount command) {
+        return createAccountState(actor, command);
+    }
+
+    private ChannelAccountBinding createAccountState(UserId actor, CreateAccount command) {
         String bindingId = required(command.bindingId(), MAX_BINDING_ID, "bindingId");
         String provider = required(command.provider(), MAX_PROVIDER, "provider");
         String externalAccountKey = required(command.externalAccountKey(), MAX_EXTERNAL_ACCOUNT_KEY,
@@ -75,15 +95,30 @@ public class ChannelAdministrationService {
         SessionScope scope = command.sessionScope() == null ? SessionScope.defaultScope() : command.sessionScope();
         boolean enabled = command.enabled() == null || command.enabled();
         ChannelAccountBinding binding = new ChannelAccountBinding(bindingId, tenantId, provider,
-                externalAccountKey, credentialRef, command.defaultEmployeeId(), scope, enabled);
+                externalAccountKey, credentialRef, command.defaultEmployeeId(), scope, enabled, 1);
         store.createAccount(binding);
-        refreshRuntime();
         return binding;
     }
 
     /** PATCH 语义：{@code null} 表示该字段不变。 */
     public ChannelAccountBinding updateAccount(UserId actor, String bindingId, UpdateAccount command) {
+        ChannelAccountBinding binding = updateAccountState(actor, bindingId, command, null);
+        refreshRuntime();
+        return binding;
+    }
+
+    /** 新管理界面使用的 CAS 更新；空修订号仅在旧客户端兼容期内保留。 */
+    public ChannelAccountBinding updateAccountForCommand(UserId actor, String bindingId,
+                                                          UpdateAccount command, Long expectedRevision) {
+        return updateAccountState(actor, bindingId, command, expectedRevision);
+    }
+
+    private ChannelAccountBinding updateAccountState(UserId actor, String bindingId,
+                                                       UpdateAccount command, Long expectedRevision) {
         ChannelAccountBinding current = requireAccount(bindingId);
+        if (expectedRevision != null && (expectedRevision <= 0 || current.revision() != expectedRevision)) {
+            throw new ChannelAccountChangedException();
+        }
         boolean enabled = command.enabled() == null ? current.enabled() : command.enabled();
         long employeeId = command.defaultEmployeeId() == null
                 ? current.defaultEmployeeId() : command.defaultEmployeeId();
@@ -94,10 +129,19 @@ public class ChannelAdministrationService {
 
         ChannelAccountBinding updated = new ChannelAccountBinding(current.bindingId(), current.tenantId(),
                 current.provider(), current.externalAccountKey(), current.credentialRef(), employeeId,
-                scope, enabled);
-        store.updateAccount(updated);
-        refreshRuntime();
+                scope, enabled, current.revision() + 1);
+        if (expectedRevision == null) {
+            store.updateAccount(updated);
+        } else if (!store.updateAccountIfRevision(updated, expectedRevision)) {
+            throw new ChannelAccountChangedException();
+        }
         return updated;
+    }
+
+    /** 在持久化适配器的事务中执行命令并写入审计/回执。 */
+    public <T> T executeManagementCommand(ChannelManagementCommandExecutor.Command command,
+                                         Class<T> responseType, java.util.function.Supplier<T> action) {
+        return commands.execute(command, responseType, action);
     }
 
     public List<ChannelIdentityBinding> identities(String bindingId) {
@@ -136,6 +180,47 @@ public class ChannelAdministrationService {
     /** 渠道运行时的当前装载情况，供管理面确认"配置是否已生效到框架注册表"。 */
     public List<ChannelRuntimeAdmin.ChannelRuntimeStatus> runtimeChannels() {
         return runtime.channels();
+    }
+
+    public RuntimeRefresh refreshAfterMutation(ChannelAccountBinding binding) {
+        try {
+            runtime.refreshAll();
+            return runtimeRefresh(binding);
+        } catch (RuntimeException failure) {
+            return new RuntimeRefresh("FAILED", binding.revision(), null,
+                    safeInstanceLabel(), clock.instant(), "RUNTIME_REFRESH_FAILED");
+        }
+    }
+
+    private String safeInstanceLabel() {
+        try {
+            return runtime.instanceLabel();
+        } catch (RuntimeException ignored) {
+            return "UNKNOWN";
+        }
+    }
+
+    /** 读取当前进程内的观测结果，不宣称集群状态已收敛。 */
+    public RuntimeRefresh runtimeRefresh(ChannelAccountBinding binding) {
+        ChannelRuntimeAdmin.AccountLoadSnapshot snapshot = runtime.accountSnapshots().stream()
+                .filter(candidate -> candidate.bindingId().equals(binding.bindingId())
+                        && candidate.configuredRevision() == binding.revision())
+                .findFirst().orElse(null);
+        Long loaded = snapshot == null ? loadedRevision(binding.bindingId()) : snapshot.loadedRevision();
+        boolean applied = binding.enabled()
+                ? snapshot != null && "LOADED".equals(snapshot.loadState())
+                    && Objects.equals(snapshot.loadedRevision(), binding.revision())
+                : snapshot != null && "UNLOADED".equals(snapshot.loadState());
+        return new RuntimeRefresh(applied ? "APPLIED" : "PENDING", binding.revision(), loaded,
+                runtime.instanceLabel(), clock.instant(), null);
+    }
+
+    private Long loadedRevision(String bindingId) {
+        return runtime.accountSnapshots().stream()
+                .filter(candidate -> candidate.bindingId().equals(bindingId))
+                .map(ChannelRuntimeAdmin.AccountLoadSnapshot::loadedRevision)
+                .filter(Objects::nonNull)
+                .findFirst().orElse(null);
     }
 
     private ChannelAccountBinding requireAccount(String bindingId) {
@@ -185,5 +270,9 @@ public class ChannelAdministrationService {
     }
 
     public record UpdateAccount(Boolean enabled, Long defaultEmployeeId, SessionScope sessionScope) {
+    }
+
+    public record RuntimeRefresh(String status, long requestedRevision, Long loadedRevision,
+                                 String instanceLabel, Instant observedAt, String safeErrorCode) {
     }
 }

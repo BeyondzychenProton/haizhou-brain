@@ -143,7 +143,8 @@ public final class HarnessJdbcTestSupport {
                 + "provider VARCHAR(32) NOT NULL,external_account_key VARCHAR(128) NOT NULL,"
                 + "credential_ref VARCHAR(256) NOT NULL,default_employee_id BIGINT NOT NULL,"
                 + "dm_scope VARCHAR(32) NOT NULL DEFAULT 'PER_PEER',"
-                + "enabled BOOLEAN NOT NULL DEFAULT TRUE,created_at TIMESTAMP NOT NULL,updated_at TIMESTAMP NOT NULL,"
+                + "enabled BOOLEAN NOT NULL DEFAULT TRUE,revision BIGINT NOT NULL DEFAULT 1,"
+                + "created_at TIMESTAMP NOT NULL,updated_at TIMESTAMP NOT NULL,"
                 + "PRIMARY KEY(binding_id),UNIQUE(provider,external_account_key))");
         jdbc.execute("CREATE TABLE platform_channel_identity(binding_id VARCHAR(64) NOT NULL,"
                 + "external_user_id VARCHAR(128) NOT NULL,user_id BIGINT NOT NULL,state VARCHAR(16) NOT NULL,"
