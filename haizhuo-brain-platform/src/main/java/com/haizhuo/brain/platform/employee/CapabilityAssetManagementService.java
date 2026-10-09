@@ -46,6 +46,14 @@ public class CapabilityAssetManagementService {
                 new IllegalArgumentException("Capability asset revision was not found"));
     }
 
+    public CapabilityAssetRevisionPage listRevisions(String capabilityCode, String cursor, int limit) {
+        String code = validateCode(capabilityCode);
+        if (limit < 1 || limit > 100) throw new IllegalArgumentException("limit must be between 1 and 100");
+        if (cursor != null && cursor.length() > 2048) throw new IllegalArgumentException("cursor is too long");
+        if (!repository.assetExists(code)) throw new CapabilityAssetNotFoundException();
+        return repository.listRevisionSummaries(code, cursor, limit);
+    }
+
     public CapabilityAssetDraft saveDraft(String capabilityCode, int expectedDraftRevision,
                                           CapabilityBinding.CapabilityType type, String displayName,
                                           String description, List<CapabilityAssetFileInput> inputs,

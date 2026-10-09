@@ -1,6 +1,7 @@
 package com.haizhuo.brain.infrastructure.employee;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -25,6 +26,7 @@ import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 
 class JdbcCapabilityAssetRepositoryTest {
     private JdbcTemplate jdbc;
+    private JdbcCapabilityAssetRepository repository;
     private CapabilityAssetManagementService service;
 
     @BeforeEach
@@ -34,8 +36,7 @@ class JdbcCapabilityAssetRepositoryTest {
                 + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1");
         jdbc = new JdbcTemplate(dataSource);
         createSchema();
-        JdbcCapabilityAssetRepository repository = new JdbcCapabilityAssetRepository(
-                jdbc, new DataSourceTransactionManager(dataSource), new ObjectMapper());
+        repository = new JdbcCapabilityAssetRepository(jdbc, new DataSourceTransactionManager(dataSource), new ObjectMapper());
         service = new CapabilityAssetManagementService(repository, Clock.systemUTC());
     }
 
@@ -92,6 +93,36 @@ class JdbcCapabilityAssetRepositoryTest {
         } finally {
             pool.shutdownNow();
         }
+    }
+
+    @Test
+    void revisionHistoryUsesStableAssetBoundCursorAndSummarizesFileBytes() {
+        var firstDraft = save(0, "# Customer analysis\nfirst revision");
+        var first = service.publish(firstDraft.capabilityCode(), firstDraft.draftRevision(), "history-publish-1", 7, "首版");
+        var secondDraft = save(1, "# Customer analysis\nsecond revision");
+        var second = service.publish(secondDraft.capabilityCode(), secondDraft.draftRevision(), "history-publish-2", 7, "第二版");
+
+        var page1 = service.listRevisions(first.capabilityCode(), null, 1);
+        assertEquals(1, page1.items().size());
+        assertEquals(second.capabilityRevisionId(), page1.items().get(0).capabilityRevisionId());
+        assertEquals(2, page1.items().get(0).fileCount());
+        assertEquals(second.files().stream().mapToLong(file -> file.byteSize()).sum(), page1.items().get(0).totalBytes());
+        assertTrue(page1.hasMore());
+
+        var thirdDraft = save(2, "# Customer analysis\nthird revision inserted after page one");
+        service.publish(thirdDraft.capabilityCode(), thirdDraft.draftRevision(), "history-publish-3", 7, "并发新发布");
+        var page2 = service.listRevisions(first.capabilityCode(), page1.nextCursor(), 1);
+        assertEquals(1, page2.items().size());
+        assertEquals(first.capabilityRevisionId(), page2.items().get(0).capabilityRevisionId());
+        assertEquals(false, page2.hasMore());
+        assertEquals(null, page2.nextCursor());
+        assertThrows(IllegalArgumentException.class,
+                () -> repository.listRevisionSummaries("skill.other-asset", page1.nextCursor(), 1),
+                "修订游标不能换资产使用");
+        assertFalse(service.listRevisions(first.capabilityCode(), null, 1).items().stream()
+                .anyMatch(item -> item.capabilityRevisionId() == first.capabilityRevisionId()));
+        assertThrows(com.haizhuo.brain.platform.employee.CapabilityAssetNotFoundException.class,
+                () -> service.listRevisions("skill.missing", null, 20));
     }
 
     private com.haizhuo.brain.platform.employee.CapabilityAssetDraft save(int expectedRevision, String skillBody) {

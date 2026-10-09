@@ -4,15 +4,20 @@ import com.haizhuo.brain.platform.employee.CapabilityAssetDraft;
 import com.haizhuo.brain.platform.employee.CapabilityAssetDraftConflictException;
 import com.haizhuo.brain.platform.employee.CapabilityAssetFileInput;
 import com.haizhuo.brain.platform.employee.CapabilityAssetManagementService;
+import com.haizhuo.brain.platform.employee.CapabilityAssetNotFoundException;
+import com.haizhuo.brain.platform.employee.CapabilityAssetRevisionPage;
 import com.haizhuo.brain.platform.employee.CapabilityAssetRevision;
 import com.haizhuo.brain.platform.employee.CapabilityAssetSummary;
 import com.haizhuo.brain.platform.employee.CapabilityAssetValidationException;
 import com.haizhuo.brain.platform.employee.CapabilityBinding;
+import com.haizhuo.brain.api.error.ApiError;
 import com.haizhuo.brain.security.identity.AuthenticatedUser;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.Positive;
 import jakarta.validation.constraints.PositiveOrZero;
 import jakarta.validation.constraints.Size;
@@ -28,6 +33,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 import reactor.core.publisher.Mono;
@@ -78,6 +84,19 @@ public class CapabilityAssetManagementController {
     public Mono<CapabilityAssetRevision> revision(@PathVariable @NotBlank @Size(max = 128) String capabilityCode,
                                                   @PathVariable @Positive long revisionId) {
         return blocking(() -> assets.getRevision(capabilityCode, revisionId));
+    }
+
+    @GetMapping("/{capabilityCode}/revisions")
+    public Mono<CapabilityAssetRevisionPage> revisions(@PathVariable @NotBlank @Size(max = 128) String capabilityCode,
+                                                       @RequestParam(required = false) @Size(max = 2048) String cursor,
+                                                       @RequestParam(defaultValue = "20") @Min(1) @Max(100) int limit) {
+        return blocking(() -> assets.listRevisions(capabilityCode, cursor, limit));
+    }
+
+    @ExceptionHandler(CapabilityAssetNotFoundException.class)
+    @ResponseStatus(HttpStatus.NOT_FOUND)
+    public Mono<ApiError> notFound(CapabilityAssetNotFoundException error) {
+        return Mono.just(new ApiError("RESOURCE_NOT_FOUND", "Capability asset was not found"));
     }
 
     @ExceptionHandler(CapabilityAssetValidationException.class)

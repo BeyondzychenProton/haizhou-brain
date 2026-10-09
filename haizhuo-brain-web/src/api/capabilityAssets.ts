@@ -42,6 +42,25 @@ export interface CapabilityAssetRevision extends Omit<CapabilityAssetDraft, 'dra
   reviewedAt: string
 }
 
+export interface CapabilityAssetRevisionSummary {
+  capabilityRevisionId: number
+  capabilityCode: string
+  type: CapabilityAssetKind
+  revision: string
+  displayName: string
+  assetHash: string
+  reviewedBy: number
+  reviewedAt: string
+  fileCount: number
+  totalBytes: number
+}
+
+export interface CapabilityAssetRevisionPage {
+  items: CapabilityAssetRevisionSummary[]
+  nextCursor: string | null
+  hasMore: boolean
+}
+
 export function listCapabilityAssets() {
   return httpClient.get<CapabilityAssetSummary[]>('/api/admin/v1/capability-assets').then(r => r.data)
 }
@@ -68,5 +87,19 @@ export function publishCapabilityAsset(code: string, expectedDraftRevision: numb
   return httpClient.post<CapabilityAssetRevision>(
     `/api/admin/v1/capability-assets/${encodeURIComponent(code)}/publish`,
     { expectedDraftRevision, requestId, reason }
+  ).then(r => r.data)
+}
+
+export function listCapabilityAssetRevisions(code: string, cursor?: string, limit = 20) {
+  const params: Record<string, string | number> = { limit }
+  if (cursor) params.cursor = cursor
+  return httpClient.get<CapabilityAssetRevisionPage>(
+    `/api/admin/v1/capability-assets/${encodeURIComponent(code)}/revisions`, { params }
+  ).then(r => r.data)
+}
+
+export function getCapabilityAssetRevision(code: string, revisionId: number) {
+  return httpClient.get<CapabilityAssetRevision>(
+    `/api/admin/v1/capability-assets/${encodeURIComponent(code)}/revisions/${revisionId}`
   ).then(r => r.data)
 }

@@ -101,6 +101,22 @@ class CapabilityAssetManagementServiceTest {
         assertEquals("files[1].relativePath", script.fieldPath());
     }
 
+    @Test
+    void revisionHistoryRequiresAnExistingAssetAndAValidPageSize() {
+        FakeRepository repository = new FakeRepository();
+        CapabilityAssetManagementService service = service(repository);
+        assertThrows(CapabilityAssetNotFoundException.class, () -> service.listRevisions("skill.customer-analysis", null, 20));
+        assertThrows(IllegalArgumentException.class, () -> service.listRevisions("skill.customer-analysis", null, 0));
+        assertThrows(IllegalArgumentException.class, () -> service.listRevisions("skill.customer-analysis", "x".repeat(2049), 20));
+
+        service.saveDraft("skill.customer-analysis", 0, CapabilityBinding.CapabilityType.SKILL,
+                "客户分析", "客户分析流程", List.of(skillFile()), 7, "创建资产");
+        var page = service.listRevisions("skill.customer-analysis", null, 20);
+        assertEquals(List.of(), page.items());
+        assertEquals(null, page.nextCursor());
+        assertEquals(false, page.hasMore());
+    }
+
     private static CapabilityAssetFileInput skillFile() {
         return new CapabilityAssetFileInput("SKILL.md",
                 "---\nname: customer-analysis\ndescription: Analyze customer needs\n---\n按字段分析客户。");
@@ -114,6 +130,10 @@ class CapabilityAssetManagementServiceTest {
         private CapabilityAssetDraft saved;
         private int saves;
         @Override public List<CapabilityAssetSummary> listAssetSummaries() { return List.of(); }
+        @Override public boolean assetExists(String code) { return saved != null && saved.capabilityCode().equals(code); }
+        @Override public CapabilityAssetRevisionPage listRevisionSummaries(String code, String cursor, int limit) {
+            return new CapabilityAssetRevisionPage(List.of(), null, false);
+        }
         @Override public Optional<CapabilityAssetDraft> findDraft(String code) { return Optional.ofNullable(saved); }
         @Override public Optional<CapabilityAssetRevision> findRevision(String code, long id) { return Optional.empty(); }
         @Override public CapabilityAssetDraft saveDraft(CapabilityAssetDraft draft, int expected, String reason) {

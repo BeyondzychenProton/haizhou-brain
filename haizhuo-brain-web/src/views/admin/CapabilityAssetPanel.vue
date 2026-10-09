@@ -31,12 +31,19 @@
       <el-table-column label="内容哈希" min-width="170" show-overflow-tooltip>
         <template #default="{ row }">{{ row.assetHash || '—' }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="120" fixed="right">
+      <el-table-column label="操作" width="270" fixed="right">
         <template #default="{ row }">
+          <el-button link type="primary" :disabled="!row.publishedRevisionId"
+                     :title="row.publishedRevisionId ? '查看当前已发布修订' : '该资产尚未发布'"
+                     @click="openRevisionViewer(row, true)">查看已发布</el-button>
+          <el-button link type="primary" @click="openRevisionViewer(row, false)">修订历史</el-button>
           <el-button link type="primary" @click="editAsset(row.capabilityCode)">编辑草稿</el-button>
         </template>
       </el-table-column>
     </el-table>
+
+    <CapabilityAssetRevisionViewer v-model="revisionViewerVisible" :capability-code="revisionAssetCode"
+                                   :initial-revision-id="revisionInitialId" />
 
     <el-dialog v-model="visible" :title="existing ? '编辑资产草稿' : '新增技能 / 知识资产'" width="760px"
                :close-on-click-modal="false" destroy-on-close>
@@ -76,7 +83,7 @@
                     placeholder="UTF-8 文本内容" @input="markDirty" />
         </div>
         <el-form-item label="操作原因" required>
-          <el-input v-model="form.reason" maxlength="500" placeholder="保存或发布的原因" @input="markDirty" />
+          <el-input v-model="form.reason" maxlength="500" placeholder="保存或发布的原因" />
         </el-form-item>
         <el-alert v-if="form.type === 'SKILL'" type="info" :closable="false"
                   title="SKILL.md 必须含有 name 与 description front matter；name 需与编码末段一致。" />
@@ -99,6 +106,7 @@ import { onMounted, reactive, ref } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import * as assetApi from '../../api/capabilityAssets'
 import type { CapabilityAssetKind, CapabilityAssetSummary } from '../../api/capabilityAssets'
+import CapabilityAssetRevisionViewer from './CapabilityAssetRevisionViewer.vue'
 import { notifyError, notifySuccess } from '../../utils/notify'
 
 interface EditableFile { relativePath: string; content: string }
@@ -116,6 +124,9 @@ const loading = ref(false)
 const visible = ref(false)
 const saving = ref(false)
 const publishing = ref(false)
+const revisionViewerVisible = ref(false)
+const revisionAssetCode = ref('')
+const revisionInitialId = ref<number | null>(null)
 const existing = ref(false)
 const dirty = ref(false)
 const draftRevision = ref(0)
@@ -146,6 +157,12 @@ function resetForm(type: CapabilityAssetKind = 'SKILL') {
 function createAsset() {
   resetForm()
   visible.value = true
+}
+
+function openRevisionViewer(asset: CapabilityAssetSummary, showCurrent: boolean) {
+  revisionAssetCode.value = asset.capabilityCode
+  revisionInitialId.value = showCurrent && asset.publishedRevisionId > 0 ? asset.publishedRevisionId : null
+  revisionViewerVisible.value = true
 }
 
 async function editAsset(code: string) {
@@ -203,15 +220,43 @@ async function publish() {
   try {
     await ElMessageBox.confirm(`发布「${form.displayName}」的第 ${draftRevision.value} 版？`, '发布资产', { type: 'warning' })
   } catch { return }
+  const code = form.capabilityCode
+  const revisionNo = draftRevision.value
+  let requestId: string
+  try {
+    requestId = getOrCreatePublishRequestId(code, revisionNo)
+  } catch (error) {
+    notifyError(error, '浏览器无法保存发布重试标识，本次未提交发布')
+    return
+  }
   publishing.value = true
   try {
-    const requestId = globalThis.crypto.randomUUID()
-    const revision = await assetApi.publishCapabilityAsset(form.capabilityCode, draftRevision.value, requestId, form.reason)
+    const revision = await assetApi.publishCapabilityAsset(code, revisionNo, requestId, form.reason)
+    clearPublishRequestId(code, revisionNo, requestId)
     await refresh()
     notifySuccess(`已发布修订 ${revision.revision}`)
     visible.value = false
+    revisionViewerVisible.value = false
   } catch (error) { notifyError(error, '资产发布失败') }
   finally { publishing.value = false }
+}
+
+function publishRequestStorageKey(code: string, revision: number) {
+  return `haizhuo-brain:capability-asset-publish:${encodeURIComponent(code)}:${revision}`
+}
+
+function getOrCreatePublishRequestId(code: string, revision: number) {
+  const key = publishRequestStorageKey(code, revision)
+  const existingId = sessionStorage.getItem(key)
+  if (existingId) return existingId
+  const requestId = globalThis.crypto.randomUUID()
+  sessionStorage.setItem(key, requestId)
+  return requestId
+}
+
+function clearPublishRequestId(code: string, revision: number, requestId: string) {
+  const key = publishRequestStorageKey(code, revision)
+  if (sessionStorage.getItem(key) === requestId) sessionStorage.removeItem(key)
 }
 
 onMounted(refresh)

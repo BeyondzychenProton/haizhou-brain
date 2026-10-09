@@ -6,6 +6,8 @@ import com.haizhuo.brain.platform.employee.CapabilityAssetDraft;
 import com.haizhuo.brain.platform.employee.CapabilityAssetFile;
 import com.haizhuo.brain.platform.employee.CapabilityAssetRepository;
 import com.haizhuo.brain.platform.employee.CapabilityAssetRevision;
+import com.haizhuo.brain.platform.employee.CapabilityAssetRevisionPage;
+import com.haizhuo.brain.platform.employee.CapabilityAssetRevisionSummary;
 import com.haizhuo.brain.platform.employee.CapabilityAssetSummary;
 import com.haizhuo.brain.platform.employee.CapabilityAssetDraftConflictException;
 import com.haizhuo.brain.platform.employee.CapabilityBinding;
@@ -59,6 +61,46 @@ public class JdbcCapabilityAssetRepository implements CapabilityAssetRepository 
                     latest == null ? null : latest.assetHash(), draft.updatedAt()));
         }
         return List.copyOf(result);
+    }
+
+    @Override public boolean assetExists(String capabilityCode) {
+        Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM capability_definition WHERE capability_code=? "
+                + "AND capability_type IN ('SKILL','KNOWLEDGE')", Integer.class, capabilityCode);
+        return count != null && count > 0;
+    }
+
+    @Override public CapabilityAssetRevisionPage listRevisionSummaries(String capabilityCode, String cursor, int limit) {
+        RevisionCursor after = decodeRevisionCursor(cursor, capabilityCode);
+        String where = "WHERE a.capability_code=?";
+        List<Object> parameters = new ArrayList<>();
+        parameters.add(capabilityCode);
+        if (after != null) {
+            where += " AND (a.reviewed_at<? OR (a.reviewed_at=? AND a.capability_revision_id<?))";
+            Timestamp afterAt = Timestamp.from(after.reviewedAt());
+            parameters.add(afterAt);
+            parameters.add(afterAt);
+            parameters.add(after.capabilityRevisionId());
+        }
+        String sql = "SELECT a.capability_revision_id,a.capability_code,a.capability_type,r.revision,r.display_name,"
+                + "a.asset_hash,a.reviewed_by,a.reviewed_at,COUNT(f.relative_path) AS file_count,"
+                + "COALESCE(SUM(f.byte_size),0) AS total_bytes "
+                + "FROM capability_asset_revision a JOIN capability_revision r ON r.capability_revision_id=a.capability_revision_id "
+                + "LEFT JOIN capability_asset_file f ON f.capability_revision_id=a.capability_revision_id " + where + " "
+                + "GROUP BY a.capability_revision_id,a.capability_code,a.capability_type,r.revision,r.display_name,"
+                + "a.asset_hash,a.reviewed_by,a.reviewed_at "
+                + "ORDER BY a.reviewed_at DESC,a.capability_revision_id DESC LIMIT ?";
+        parameters.add(limit + 1);
+        List<CapabilityAssetRevisionSummary> rows = jdbc.query(sql, (rs, n) -> new CapabilityAssetRevisionSummary(
+                rs.getLong("capability_revision_id"), rs.getString("capability_code"),
+                CapabilityBinding.CapabilityType.valueOf(rs.getString("capability_type")), rs.getString("revision"),
+                rs.getString("display_name"), rs.getString("asset_hash"), rs.getLong("reviewed_by"),
+                rs.getTimestamp("reviewed_at").toInstant(), rs.getInt("file_count"), rs.getLong("total_bytes")),
+                parameters.toArray());
+        boolean hasMore = rows.size() > limit;
+        List<CapabilityAssetRevisionSummary> items = List.copyOf(rows.subList(0, Math.min(limit, rows.size())));
+        String next = hasMore && !items.isEmpty()
+                ? encodeRevisionCursor(capabilityCode, items.get(items.size() - 1)) : null;
+        return new CapabilityAssetRevisionPage(items, next, hasMore);
     }
 
     @Override public Optional<CapabilityAssetDraft> findDraft(String capabilityCode) {
@@ -209,6 +251,36 @@ public class JdbcCapabilityAssetRepository implements CapabilityAssetRepository 
                 head.displayName(), head.description(), readRevisionFiles(head.id()), head.manifestJson(), head.assetHash(),
                 head.requestId(), head.reviewedBy(), head.reviewedAt());
     }
+
+    private String encodeRevisionCursor(String capabilityCode, CapabilityAssetRevisionSummary item) {
+        try {
+            byte[] data = json.writeValueAsBytes(java.util.Map.of("kind", "asset-revisions", "asset", capabilityCode,
+                    "at", item.reviewedAt().toString(), "id", item.capabilityRevisionId()));
+            return java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(data);
+        } catch (Exception error) {
+            throw new IllegalStateException("Could not encode capability asset revision cursor", error);
+        }
+    }
+
+    private RevisionCursor decodeRevisionCursor(String raw, String capabilityCode) {
+        if (raw == null || raw.isBlank()) return null;
+        try {
+            com.fasterxml.jackson.databind.JsonNode node = json.readTree(java.util.Base64.getUrlDecoder().decode(raw));
+            if (!"asset-revisions".equals(node.path("kind").asText())
+                    || !capabilityCode.equals(node.path("asset").asText()))
+                throw new IllegalArgumentException("Cursor does not match this capability asset");
+            long id = node.path("id").asLong(0);
+            java.time.Instant at = java.time.Instant.parse(node.path("at").asText());
+            if (id <= 0) throw new IllegalArgumentException("Cursor is invalid");
+            return new RevisionCursor(at, id);
+        } catch (IllegalArgumentException error) {
+            throw error;
+        } catch (Exception error) {
+            throw new IllegalArgumentException("Cursor is invalid", error);
+        }
+    }
+
+    private record RevisionCursor(java.time.Instant reviewedAt, long capabilityRevisionId) {}
 
     private List<CapabilityAssetFile> readFiles(String value) {
         try { return json.readValue(value, FILES); }
