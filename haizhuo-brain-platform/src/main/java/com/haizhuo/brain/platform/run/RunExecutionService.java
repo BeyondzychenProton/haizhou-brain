@@ -165,26 +165,58 @@ public class RunExecutionService {
         AtomicReference<AgentRunCancelledEvent> cancelled = new AtomicReference<>();
         AtomicReference<AgentRunFailedEvent> failed = new AtomicReference<>();
         AtomicLong streamOffset = new AtomicLong();
-        runtime.execute(request).doOnSubscribe(subscription -> {
+        AtomicLong rootTextOffset = new AtomicLong();
+        RootTextBatchAccumulator renderBatches = new RootTextBatchAccumulator((descriptor, offset, from, to, text, at) -> {
+            try {
+                realtimeEvents.publishRootTextDelta(claim.run().sessionId(), claim.run().id(),
+                        claim.attempt().attemptId(), descriptor, offset, from, to, text, at);
+            } catch (RuntimeException ignored) {
+                // 展示持久化采用尽力写入；可行时由发布器将投影标记为降级。
+            }
+        });
+        runtime.execute(request).bufferTimeout(64, Duration.ofMillis(100)).doOnSubscribe(subscription -> {
                     runtimeSubscribed.set(true);
                     activeSubscription.set(subscription);
                     if (leaseLost.get()) subscription.cancel();
-                }).doOnNext(event -> {
-                    if (leaseLost.get()) return;
-                    if (event instanceof AgentTextDeltaEvent delta) {
-                        publishTextDelta(claim.run().sessionId(), claim.run().id(), claim.attempt().attemptId(),
-                                streamOffset.incrementAndGet(), delta.text());
+                }).doOnNext(events -> {
+                    for (BrainAgentEvent event : events) {
+                        if (leaseLost.get()) continue;
+                        if (event instanceof AgentTextDeltaEvent delta) {
+                            long offset = streamOffset.incrementAndGet();
+                            var descriptor = delta.descriptor();
+                            if (descriptor != null && descriptor.executionRole() ==
+                                    com.haizhuo.brain.runtime.api.event.AgentExecutionRole.ROOT) {
+                                String sanitized = SessionRenderTextSanitizer.sanitize(delta.text());
+                                if (!sanitized.isEmpty()) {
+                                    publishTextDelta(claim.run().sessionId(), claim.run().id(),
+                                            claim.attempt().attemptId(), offset, sanitized);
+                                }
+                                long from = rootTextOffset.get();
+                                long to = from + sanitized.codePointCount(0, sanitized.length());
+                                if (to > from) {
+                                    rootTextOffset.set(to);
+                                    renderBatches.append(descriptor, offset, from, sanitized, clock.instant());
+                                }
+                            } else {
+                                renderBatches.flush(clock.instant());
+                            }
+                        } else {
+                            // 在工具、计划和终态边界前刷新，避免持久化文字跨 attempt 混合。
+                            renderBatches.flush(clock.instant());
+                        }
+                        if (event instanceof AgentPlanUpdatedEvent plan) {
+                            recordPlanSnapshot(claim, plan);
+                        }
+                        if (event instanceof AgentInternalEvent internal) {
+                            // 原生子执行者中间件会在返回父执行者前，按 invocation 持久化完整 Msg。
+                            // 进度或来源信息不能用来确认结果身份。
+                            executionStore.recordInternalEvent(claim,internal);
+                        }
+                        classify(event, suspended, completed, cancelled, failed);
                     }
-                    if (event instanceof AgentPlanUpdatedEvent plan) {
-                        recordPlanSnapshot(claim, plan);
-                    }
-                    if (event instanceof AgentInternalEvent internal) {
-                        // Native child middleware persists the complete Msg by invocation before
-                        // returning to the parent. Progress/source cannot establish a result identity.
-                        executionStore.recordInternalEvent(claim,internal);
-                    }
-                    classify(event, suspended, completed, cancelled, failed);
-                })
+                    renderBatches.flush(clock.instant());
+                }).doOnError(ignored -> renderBatches.flush(clock.instant()))
+                .doOnCancel(() -> renderBatches.flush(clock.instant()))
                 .blockLast();
         return new DrivenRun(claim, request, deliverables.stream().map(PlatformToolExecution::id).toList(),
                 suspended.get(), completed.get(), cancelled.get(), failed.get());

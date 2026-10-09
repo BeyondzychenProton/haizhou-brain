@@ -6,8 +6,9 @@
 import DOMPurify from 'dompurify'
 import MarkdownIt from 'markdown-it'
 import { computed } from 'vue'
+import { sanitizeDisplayText } from '../../utils/sanitizeDisplayText'
 
-const props = defineProps<{ content: string }>()
+const props = defineProps<{ content: string; sanitizeSensitive?: boolean }>()
 
 const markdown = new MarkdownIt({
   html: false,
@@ -41,7 +42,8 @@ markdown.renderer.rules.link_open = (tokens, index, options, env, self) => {
 }
 
 const html = computed(() => {
-  const rendered = markdown.render(props.content ?? '')
+  const content = props.sanitizeSensitive ? sanitizeDisplayText(props.content) : (props.content ?? '')
+  const rendered = markdown.render(content)
   return DOMPurify.sanitize(rendered, {
     USE_PROFILES: { html: true },
     ALLOWED_TAGS: [

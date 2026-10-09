@@ -24,6 +24,8 @@ import com.haizhuo.brain.platform.tool.ToolApproval;
 import com.haizhuo.brain.platform.tool.ToolExecutionRepository;
 import com.haizhuo.brain.platform.tool.ToolExecutionState;
 import com.haizhuo.brain.runtime.api.AgentRuntime;
+import com.haizhuo.brain.runtime.api.event.AgentEventDescriptor;
+import com.haizhuo.brain.runtime.api.event.AgentExecutionRole;
 import com.haizhuo.brain.runtime.api.event.AgentPlanUpdatedEvent;
 import com.haizhuo.brain.runtime.api.event.AgentRunCancelledEvent;
 import com.haizhuo.brain.runtime.api.event.AgentRunCompletedEvent;
@@ -83,7 +85,8 @@ class RunExecutionServiceTest {
         toolExecutions = new FakeToolExecutions();
         capturedRequest = new AtomicReference<>();
         runtimeBehavior = new AtomicReference<>(request -> Flux.just(
-                new AgentTextDeltaEvent(RUN, "你"), new AgentRunCompletedEvent(RUN, "你好，已完成。")));
+                new AgentTextDeltaEvent(RUN, "你", descriptor(AgentExecutionRole.ROOT, "reply-1", "text")),
+                new AgentRunCompletedEvent(RUN, "你好，已完成。")));
         AgentRuntime runtime = request -> {
             capturedRequest.set(request);
             return runtimeBehavior.get().apply(request);
@@ -208,6 +211,37 @@ class RunExecutionServiceTest {
         assertEquals("h".repeat(64), request.binding().bridgeSnapshotHash());
         assertEquals("用户要订明天下午的会议室。", request.binding().bridgeContext());
         assertNull(store.failedCode);
+    }
+
+    @Test
+    void onlyRootSafeTextIsPublishedAndCanonicalResultRemainsUnchanged() {
+        String rawCanonical = "Authorization: Bearer formal-secret\n"
+                + "api_key=canonical-key at C:\\Users\\Alice\\private\\answer.md and /home/alice/private.txt";
+        runtimeBehavior.set(request -> Flux.just(
+                new AgentTextDeltaEvent(RUN, "Authorization: Bearer live-secret",
+                        descriptor(AgentExecutionRole.ROOT, "reply-1", "text")),
+                new AgentTextDeltaEvent(RUN, "child private body",
+                        descriptor(AgentExecutionRole.CHILD, "reply-child", "text")),
+                new AgentTextDeltaEvent(RUN, "unknown private body",
+                        descriptor(AgentExecutionRole.UNKNOWN, "reply-unknown", "text")),
+                new AgentTextDeltaEvent(RUN, "legacy without descriptor"),
+                new AgentTextDeltaEvent(RUN, "api_key=live-key at C:\\Users\\Alice\\private\\draft.md and /home/alice/draft.md",
+                        descriptor(AgentExecutionRole.ROOT, "reply-2", "text")),
+                new AgentRunCompletedEvent(RUN, rawCanonical)));
+
+        assertTrue(service.executeNext("worker-1", TTL));
+
+        assertEquals(List.of("Authorization: [redacted]",
+                "api_key=[redacted] at [internal path omitted] and [internal path omitted]"),
+                realtimeEvents.textDeltas);
+        assertEquals(List.of(1L, 5L), realtimeEvents.streamOffsets,
+                "hidden ROOT/CHILD/UNKNOWN/null events still consume internal attempt offsets");
+        assertEquals(List.of("Authorization: [redacted]",
+                "api_key=[redacted] at [internal path omitted] and [internal path omitted]"),
+                realtimeEvents.rootTextDeltas);
+        assertEquals(List.of(1L, 5L), realtimeEvents.rootStreamOffsets);
+        assertEquals(rawCanonical, store.completedResult,
+                "display sanitization must not mutate the persisted formal ROOT_FINAL source text");
     }
 
     @Test
@@ -561,6 +595,8 @@ class RunExecutionServiceTest {
         final List<String> textDeltas = new ArrayList<>();
         final List<String> attemptIds = new ArrayList<>();
         final List<Long> streamOffsets = new ArrayList<>();
+        final List<String> rootTextDeltas = new ArrayList<>();
+        final List<Long> rootStreamOffsets = new ArrayList<>();
         boolean failPublish;
 
         @Override public void publishTextDelta(SessionId sessionId, RunId runId, String attemptId, long streamOffset,
@@ -573,6 +609,23 @@ class RunExecutionServiceTest {
             streamOffsets.add(streamOffset);
             textDeltas.add(text);
         }
+
+        @Override public void publishRootTextDelta(SessionId sessionId, RunId runId, String attemptId,
+                                                   AgentEventDescriptor descriptor, long streamOffset,
+                                                   long fromOffset, long toOffset, String sanitizedText,
+                                                   Instant occurredAt) {
+            if (failPublish) throw new IllegalStateException("realtime unavailable");
+            assertEquals(SESSION, sessionId);
+            assertEquals(RUN, runId);
+            assertEquals(AgentExecutionRole.ROOT, descriptor.executionRole());
+            rootStreamOffsets.add(streamOffset);
+            rootTextDeltas.add(sanitizedText);
+        }
+    }
+
+    private static AgentEventDescriptor descriptor(AgentExecutionRole role, String replyId, String blockId) {
+        return new AgentEventDescriptor("event-" + replyId, T0.toString(), "TextBlockDelta", "model",
+                replyId, blockId, null, null, null, null, role, "attempt-1", 1L);
     }
 
     private static final class FakeExecutionStore implements RunExecutionStore {

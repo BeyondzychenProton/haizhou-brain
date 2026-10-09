@@ -2,6 +2,7 @@ package com.haizhuo.brain.platform.run;
 
 import com.haizhuo.brain.kernel.identity.RunId;
 import com.haizhuo.brain.kernel.identity.SessionId;
+import com.haizhuo.brain.runtime.api.event.AgentEventDescriptor;
 import java.time.Instant;
 
 /**
@@ -13,4 +14,9 @@ public interface RunRealtimeEventPublisher {
 
     void publishTextDelta(SessionId sessionId, RunId runId, String attemptId, long streamOffset, String text,
                           Instant occurredAt);
+
+    /** 可选的独立 v3 草稿持久化路径；现有 v1/v2 实现保持源码兼容。 */
+    default void publishRootTextDelta(SessionId sessionId, RunId runId, String attemptId,
+                                      AgentEventDescriptor descriptor, long streamOffset,
+                                      long fromOffset, long toOffset, String sanitizedText, Instant occurredAt) { }
 }

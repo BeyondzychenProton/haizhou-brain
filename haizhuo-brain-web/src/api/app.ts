@@ -11,7 +11,8 @@ export interface ReferenceableResult { resultId:string; runId:string; kind:strin
 export interface RunResult { resultId:string|null; runId:string; mediaType:string; body:string; bodySha256:string;
   byteSize:number; schemaVersion:number; createdAt:string; legacySummary:boolean; executorRoleId:string|null;
   executorEmployeeId:number|null; executorDefinitionVersionId:number|null }
-export interface RunEvent { runId:string; sequenceNo:number; type:string; content:string; createdAt:string }
+export interface RunEvent { runId:string; sequenceNo:number; type:string; content:string; createdAt:string;
+  executorRoleId?:string; resultId?:string|null }
 /** 会话级持久事件，形状与后端统一事件信封一致。 */
 export type SessionEvent = RunStreamEvent
 export interface TimelineItem extends RunEvent { }
@@ -23,9 +24,9 @@ export async function listRuns(sessionId:string){return(await httpClient.get<Run
 export async function createSession(employeeId:number){return(await httpClient.post<Session>('/api/v1/sessions',{employeeId})).data}
 export async function getSessionRoles(sessionId:string){return(await httpClient.get<SessionRole[]>(`/api/v1/sessions/${sessionId}/roles`)).data}
 export async function listReferenceableResults(sessionId:string){return(await httpClient.get<ReferenceableResult[]>(`/api/v1/sessions/${sessionId}/results`)).data}
-export async function createRun(sessionId:string,input:string,targetRoleId?:string,referencedResultIds:string[]=[]){
+  export async function createRun(sessionId:string,input:string,targetRoleId?:string,referencedResultIds:string[]=[],clientRequestId: string = crypto.randomUUID()){
   return(await httpClient.post<Run>(`/api/v1/sessions/${sessionId}/runs`,{
-    clientRequestId:crypto.randomUUID(),input,targetRoleId,mode:'DIRECT',referencedResultIds,
+    clientRequestId,input,targetRoleId,mode:'DIRECT',referencedResultIds,
   })).data
 }
 export async function getRun(runId:string){return(await httpClient.get<Run>(`/api/v1/sessions/runs/${runId}`)).data}

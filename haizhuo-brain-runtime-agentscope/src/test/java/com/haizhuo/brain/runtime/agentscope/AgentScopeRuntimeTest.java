@@ -1,7 +1,9 @@
 package com.haizhuo.brain.runtime.agentscope;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.haizhuo.brain.runtime.agentscope.config.AgentScopeRuntimeProperties;
@@ -15,6 +17,7 @@ import com.haizhuo.brain.runtime.api.RunControlInbox;
 import com.haizhuo.brain.runtime.api.RunGuidanceMessage;
 import com.haizhuo.brain.runtime.api.event.AgentRunCompletedEvent;
 import com.haizhuo.brain.runtime.api.event.AgentRunFailedEvent;
+import com.haizhuo.brain.runtime.api.event.AgentTextDeltaEvent;
 import com.haizhuo.brain.runtime.api.event.AgentToolSuspendedEvent;
 import com.haizhuo.brain.runtime.api.event.BrainAgentEvent;
 import com.haizhuo.brain.runtime.api.model.AgentExecutionRequest;
@@ -153,6 +156,55 @@ class AgentScopeRuntimeTest {
                 .map(AgentRunCompletedEvent.class::cast)
                 .findFirst().orElseThrow();
         assertEquals("reservation complete", completed.result());
+    }
+
+    @Test
+    @Timeout(30)
+    void fixedVersionProbePreservesRootRepliesAcrossExternalToolWaitAndNewAttempt() {
+        AgentScopeRuntime runtime = runtimeWith(new RootTextThenToolModel());
+        RuntimeDefinitionSnapshot definition = TestRequests.definition("bundle-render-probe",
+                List.of(TestRequests.tool(1L, "meeting.reserve")));
+        var constraints = TestRequests.constraints(Set.of("meeting.reserve"));
+        var binding = TestRequests.binding("render-probe-session", "render-probe-workspace", null);
+        var base = TestRequests.request(definition, constraints, binding,
+                new com.haizhuo.brain.runtime.api.model.UserPromptExecutionInput("先检查再预约"));
+        var firstRequest = new com.haizhuo.brain.runtime.api.model.AgentExecutionRequest(base.tenantId(),
+                base.userId(), base.platformSessionId(), base.runId(), base.traceId(), "attempt-before-wait", 4L,
+                definition, constraints, binding, base.input());
+
+        List<BrainAgentEvent> waiting = runtime.execute(firstRequest).collectList().block(Duration.ofSeconds(15));
+        var firstDeltas = waiting.stream().filter(AgentTextDeltaEvent.class::isInstance)
+                .map(AgentTextDeltaEvent.class::cast).toList();
+        var suspension = waiting.stream().filter(AgentToolSuspendedEvent.class::isInstance)
+                .map(AgentToolSuspendedEvent.class::cast).findFirst().orElseThrow();
+        assertFalse(firstDeltas.isEmpty(), "the root reply before external tool suspension must be observable");
+        assertTrue(firstDeltas.stream().allMatch(delta -> delta.descriptor().executionRole()
+                == com.haizhuo.brain.runtime.api.event.AgentExecutionRole.ROOT));
+        assertTrue(firstDeltas.stream().allMatch(delta -> "attempt-before-wait".equals(delta.descriptor().attemptId())
+                && Long.valueOf(4L).equals(delta.descriptor().fenceToken())));
+        assertEquals("tool-use-1", suspension.toolCalls().get(0).toolUseId());
+        assertTrue(waiting.stream().noneMatch(AgentRunCompletedEvent.class::isInstance));
+
+        var resumeRequest = new com.haizhuo.brain.runtime.api.model.AgentExecutionRequest(base.tenantId(),
+                base.userId(), base.platformSessionId(), base.runId(), base.traceId(), "attempt-after-wait", 5L,
+                definition, constraints, binding,
+                new ExternalToolResultExecutionInput(List.of(new ExternalToolResult("tool-use-1",
+                        "meeting.reserve", true, "room available"))));
+        List<BrainAgentEvent> resumed = runtime.execute(resumeRequest).collectList().block(Duration.ofSeconds(15));
+        var resumedDeltas = resumed.stream().filter(AgentTextDeltaEvent.class::isInstance)
+                .map(AgentTextDeltaEvent.class::cast).toList();
+        var completed = resumed.stream().filter(AgentRunCompletedEvent.class::isInstance)
+                .map(AgentRunCompletedEvent.class::cast).findFirst().orElseThrow();
+        assertFalse(resumedDeltas.isEmpty());
+        assertTrue(resumedDeltas.stream().allMatch(delta -> delta.descriptor().executionRole()
+                == com.haizhuo.brain.runtime.api.event.AgentExecutionRole.ROOT));
+        assertTrue(resumedDeltas.stream().allMatch(delta -> "attempt-after-wait".equals(delta.descriptor().attemptId())
+                && Long.valueOf(5L).equals(delta.descriptor().fenceToken())));
+        assertTrue(firstDeltas.stream().map(delta -> delta.descriptor().replyId()).noneMatch(reply ->
+                resumedDeltas.stream().anyMatch(next -> java.util.Objects.equals(reply, next.descriptor().replyId()))),
+                "reply identity is scoped to the native reply and must not merge across the resumed attempt");
+        assertNull(completed.descriptor().replyId(), "formal root result has no native reply identity");
+        assertEquals("预约已完成。 reservation complete", completed.result());
     }
 
     @Test
@@ -351,5 +403,24 @@ class AgentScopeRuntimeTest {
         public String getModelName() {
             return "tool-calling-model";
         }
+    }
+
+    private static final class RootTextThenToolModel extends ChatModelBase {
+        private final AtomicInteger calls = new AtomicInteger();
+        @Override
+        protected Flux<ChatResponse> doStream(List<io.agentscope.core.message.Msg> messages,
+                                              List<ToolSchema> tools, GenerateOptions options) {
+            if (calls.getAndIncrement() == 0) {
+                return Flux.just(ChatResponse.builder().id("pre-tool-reply")
+                        .content(List.of(TextBlock.builder().text("正在检查会议室。 ").build(),
+                                new ToolUseBlock("tool-use-1", "meeting.reserve", Map.of("room", "A-101"))))
+                        .finishReason("tool_calls").build());
+            }
+            return Flux.just(ChatResponse.builder().id("post-tool-reply")
+                    .content(List.of(TextBlock.builder().text("预约已完成。 ").build(),
+                            TextBlock.builder().text("reservation complete").build()))
+                    .finishReason("stop").build());
+        }
+        @Override public String getModelName() { return "root-text-tool-wait-probe"; }
     }
 }
