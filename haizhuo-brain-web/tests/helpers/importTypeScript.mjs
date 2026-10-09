@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises'
 import ts from 'typescript'
 
-/** Load a pure TypeScript module for Node's built-in test runner without adding a runtime dependency. */
+/** 通过 Node 内置测试运行器加载纯 TypeScript 模块，不增加运行时依赖。 */
 export async function importTypeScript(sourceUrl) {
   const source = await readFile(sourceUrl, 'utf8')
   const compiled = ts.transpileModule(source, {
