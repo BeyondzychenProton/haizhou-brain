@@ -39,11 +39,37 @@ public record HarnessTemplateKey(String value) {
         projection.put("definitionBundleHash", definition.definitionBundleHash());
         projection.put("modelProvider", definition.modelProvider());
         projection.put("modelName", definition.modelName());
+        projection.put("modelConnectionBindings", modelConnectionBindings(definition));
         projection.put("maxIterations", definition.maxIterations());
         projection.put("staticToolCatalogHash", staticToolCatalogHash(definition.toolCatalog()));
         projection.put("workspaceContentHash", definition.workspaceContentHash());
         projection.put("harnessPolicyHash", HARNESS_POLICY_HASH);
         return new HarnessTemplateKey(CanonicalJson.sha256(projection));
+    }
+
+    private static Map<String, Object> modelConnectionBindings(RuntimeDefinitionSnapshot definition) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("connectionRef", connectionReference(definition.modelConnectionRef()));
+        result.put("fixedMembers", definition.configuration().members().stream().map(member -> {
+            Map<String, Object> entry = new LinkedHashMap<>();
+            entry.put("roleId", member.roleId());
+            entry.put("definitionVersionId", member.definitionVersionId());
+            entry.put("connectionRef", member.definition() == null ? null
+                    : connectionReference(member.definition().modelConnectionRef()));
+            return entry;
+        }).toList());
+        return result;
+    }
+
+    private static Map<String, Object> connectionReference(
+            com.haizhuo.brain.runtime.api.model.RuntimeModelConnectionRef reference) {
+        if (reference == null) return null;
+        Map<String, Object> projection = new LinkedHashMap<>();
+        projection.put("connectionId", reference.connectionId());
+        projection.put("revision", reference.revision());
+        projection.put("contentHash", reference.contentHash());
+        projection.put("kind", reference.kind().name());
+        return projection;
     }
 
     private static String staticToolCatalogHash(List<RuntimeToolSchema> catalog) {

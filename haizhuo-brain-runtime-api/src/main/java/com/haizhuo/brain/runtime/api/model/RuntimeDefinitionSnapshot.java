@@ -13,7 +13,8 @@ public record RuntimeDefinitionSnapshot(long definitionVersionId, String employe
                                         String workspaceContentHash, String workspaceManifestJson,
                                         List<RuntimeToolSchema> toolCatalog,
                                         RuntimeEmployeeConfiguration configuration,
-                                        List<RuntimeWorkspaceFile> workspaceFiles) {
+                                        List<RuntimeWorkspaceFile> workspaceFiles,
+                                        RuntimeModelConnectionRef modelConnectionRef) {
     public RuntimeDefinitionSnapshot {
         if (definitionVersionId <= 0) throw new IllegalArgumentException("definitionVersionId must be positive");
         Objects.requireNonNull(employeeName);
@@ -27,6 +28,19 @@ public record RuntimeDefinitionSnapshot(long definitionVersionId, String employe
         workspaceFiles = List.copyOf(Objects.requireNonNull(workspaceFiles));
     }
 
+    /** 为尚未支持冻结模型连接引用的旧调用方保留源码兼容构造方法。 */
+    public RuntimeDefinitionSnapshot(long definitionVersionId, String employeeName, String instructions,
+                                     String modelProvider, String modelName, int maxIterations,
+                                     String definitionBundleHash, String workspaceProjectionKey,
+                                     String workspaceContentHash, String workspaceManifestJson,
+                                     List<RuntimeToolSchema> toolCatalog,
+                                     RuntimeEmployeeConfiguration configuration,
+                                     List<RuntimeWorkspaceFile> workspaceFiles) {
+        this(definitionVersionId, employeeName, instructions, modelProvider, modelName, maxIterations,
+                definitionBundleHash, workspaceProjectionKey, workspaceContentHash, workspaceManifestJson,
+                toolCatalog, configuration, workspaceFiles, null);
+    }
+
     /** Source-compatible constructor for existing LEGACY_STABLE runtime snapshots. */
     public RuntimeDefinitionSnapshot(long definitionVersionId, String employeeName, String instructions,
                                      String modelProvider, String modelName, int maxIterations,
@@ -35,7 +49,12 @@ public record RuntimeDefinitionSnapshot(long definitionVersionId, String employe
         this(definitionVersionId, employeeName, instructions, modelProvider, modelName, maxIterations,
                 definitionBundleHash, workspaceProjectionKey, workspaceContentHash,
                 "{\"schemaVersion\":1,\"agents\":\"AGENTS.md\",\"skills\":[],\"subagents\":[],\"knowledge\":[]}",
-                toolCatalog,
-                RuntimeEmployeeConfiguration.legacyStable(), List.of());
+                toolCatalog, RuntimeEmployeeConfiguration.legacyStable(), List.of(), null);
+    }
+
+    public RuntimeDefinitionSnapshot withModelConnectionRef(RuntimeModelConnectionRef reference) {
+        return new RuntimeDefinitionSnapshot(definitionVersionId, employeeName, instructions, modelProvider,
+                modelName, maxIterations, definitionBundleHash, workspaceProjectionKey, workspaceContentHash,
+                workspaceManifestJson, toolCatalog, configuration, workspaceFiles, reference);
     }
 }

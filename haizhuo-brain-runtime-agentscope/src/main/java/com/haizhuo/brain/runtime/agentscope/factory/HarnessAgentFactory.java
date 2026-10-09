@@ -17,7 +17,7 @@ import com.haizhuo.brain.runtime.api.RunControlInbox;
 import com.haizhuo.brain.runtime.api.model.RuntimeDefinitionSnapshot;
 import com.haizhuo.brain.runtime.api.model.RuntimeToolSchema;
 import io.agentscope.core.tracing.OtelTracingMiddleware;
-import io.agentscope.core.model.ChatModelBase;
+import io.agentscope.core.model.Model;
 import io.agentscope.core.state.AgentStateStore;
 import io.agentscope.harness.agent.DistributedStore;
 import io.agentscope.harness.agent.IsolationScope;
@@ -385,7 +385,7 @@ public class HarnessAgentFactory {
     }
 
     /** 供测试使用：单元测试可替换成不触网络的确定性模型。 */
-    protected ChatModelBase createModel(RuntimeDefinitionSnapshot definition) {
+    protected Model createModel(RuntimeDefinitionSnapshot definition) {
         return modelFactory.create(definition);
     }
 }
