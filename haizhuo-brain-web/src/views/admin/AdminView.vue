@@ -3,7 +3,7 @@
     <div class="page-head">
       <div>
         <h2>管理中心</h2>
-        <p class="muted">能力启停、MCP 连接审核、员工定义编排与发布、平台账号管理</p>
+        <p class="muted">能力启停、员工与渠道配置、授权管理、运行核查和平台账号管理</p>
       </div>
     </div>
     <el-tabs v-model="tab">
@@ -19,6 +19,15 @@
       <el-tab-pane label="员工定义编排" name="definitions">
         <DefinitionPanel v-if="tab === 'definitions'" />
       </el-tab-pane>
+      <el-tab-pane label="渠道管理与投递核查" name="channels">
+        <ChannelManagementView v-if="tab === 'channels'" />
+      </el-tab-pane>
+      <el-tab-pane label="异常运行核查" name="recovery">
+        <RunRecoveryPanel v-if="tab === 'recovery'" />
+      </el-tab-pane>
+      <el-tab-pane label="运维总览" name="operations">
+        <OperationsPanel v-if="tab === 'operations'" />
+      </el-tab-pane>
       <el-tab-pane label="用户管理" name="users">
         <UserPanel v-if="tab === 'users'" />
       </el-tab-pane>
@@ -33,6 +42,9 @@ import CapabilityPanel from './CapabilityPanel.vue'
 import ToolGrantPanel from './ToolGrantPanel.vue'
 import McpPanel from './McpPanel.vue'
 import DefinitionPanel from './DefinitionPanel.vue'
+import ChannelManagementView from './ChannelManagementView.vue'
+import RunRecoveryPanel from './RunRecoveryPanel.vue'
+import OperationsPanel from './OperationsPanel.vue'
 import UserPanel from './UserPanel.vue'
 
 // 用 v-if 强制每次切换都重新挂载，保证看到的是最新数据而不是缓存的旧列表。
