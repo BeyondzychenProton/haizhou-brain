@@ -60,6 +60,8 @@ public class JdbcTeamExecutionPersistence implements TeamExecutionPersistence {
                     execution.teamExecutionId(), member.roleId(), employeeId, member.definitionVersionId(),
                     member.harnessSessionKey(), member.kind().name(), "BOUND");
         }
+        JdbcRunProgressNotifier.append(events, execution.runId(), execution.attemptId(), execution.fenceToken(),
+                "team:" + execution.teamExecutionId() + ":started", execution.startedAt());
     }
 
     @Override
@@ -78,10 +80,13 @@ public class JdbcTeamExecutionPersistence implements TeamExecutionPersistence {
                 execution.teamExecutionId(), action.name());
         if ((used == null ? 0 : used) + count > limit)
             throw new IllegalStateException("Team action budget exhausted");
+        String actionId = UUID.randomUUID().toString();
+        Instant reservedAt = Instant.now();
         jdbc.update("INSERT INTO platform_run_team_action_reservation(action_id,team_execution_id,action_type,"
                         + "action_count,reserved_at) VALUES(?,?,?,?,?)",
-                UUID.randomUUID().toString(), execution.teamExecutionId(), action.name(), count,
-                Timestamp.from(Instant.now()));
+                actionId, execution.teamExecutionId(), action.name(), count, Timestamp.from(reservedAt));
+        JdbcRunProgressNotifier.append(events, execution.runId(), execution.attemptId(), execution.fenceToken(),
+                "team-action:" + actionId, reservedAt);
     }
 
     @Override
@@ -90,10 +95,14 @@ public class JdbcTeamExecutionPersistence implements TeamExecutionPersistence {
         if (resultSha256 == null || !resultSha256.matches("[0-9a-f]{64}"))
             throw new IllegalArgumentException("Team result hash is invalid");
         lockCurrentParent(execution);
-        return jdbc.update("UPDATE platform_run_team_execution SET state='COMPLETED',completed_at=?,result_sha256=? "
+        Instant completedAt = Instant.now();
+        boolean completed = jdbc.update("UPDATE platform_run_team_execution SET state='COMPLETED',completed_at=?,result_sha256=? "
                         + "WHERE team_execution_id=? AND run_id=? AND attempt_id=? AND fence_token=? AND state='RUNNING'",
-                Timestamp.from(Instant.now()), resultSha256, execution.teamExecutionId(), execution.runId().value(),
+                Timestamp.from(completedAt), resultSha256, execution.teamExecutionId(), execution.runId().value(),
                 execution.attemptId(), execution.fenceToken()) == 1;
+        if (completed) JdbcRunProgressNotifier.append(events, execution.runId(), execution.attemptId(),
+                execution.fenceToken(), "team:" + execution.teamExecutionId() + ":completed", completedAt);
+        return completed;
     }
 
     @Override
@@ -112,6 +121,24 @@ public class JdbcTeamExecutionPersistence implements TeamExecutionPersistence {
         TeamExecutionMember member = execution.members().stream()
                 .filter(candidate -> candidate.roleId().equals(roleId))
                 .findFirst().orElseThrow(() -> new SecurityException("Team member is outside the frozen roster"));
+        String state = switch (event) {
+            case STARTED -> "RUNNING";
+            case ENDED -> "IDLE";
+            case STOPPED -> "STOPPED";
+        };
+        int phase = event == MemberEvent.STARTED ? 1 : 2;
+        List<MemberTransition> previous = jdbc.query("SELECT last_transition_ordinal,last_transition_phase "
+                        + "FROM platform_run_team_member_binding WHERE team_execution_id=? AND role_id=? FOR UPDATE",
+                (rs, row) -> new MemberTransition(rs.getLong(1), rs.getInt(2)), execution.teamExecutionId(), roleId);
+        if (previous.isEmpty()) throw new IllegalStateException("Team member lifecycle binding is missing");
+        MemberTransition current = previous.get(0);
+        if (ordinal < current.ordinal() || ordinal == current.ordinal() && phase <= current.phase()) return true;
+        int transitioned = jdbc.update("UPDATE platform_run_team_member_binding SET state=?,last_transition_ordinal=?,"
+                        + "last_transition_phase=?,last_transition_at=? WHERE team_execution_id=? AND role_id=? "
+                        + "AND (last_transition_ordinal<? OR (last_transition_ordinal=? AND last_transition_phase<?))",
+                state, ordinal, phase, Timestamp.from(occurredAt), execution.teamExecutionId(), roleId,
+                ordinal, ordinal, phase);
+        if (transitioned != 1) throw new IllegalStateException("Team member lifecycle changed under its Run lock");
         AgentEventDescriptor descriptor = new AgentEventDescriptor(
                 "team:" + execution.teamExecutionId() + ":" + roleId + ":" + ordinal + ":" + event.name(),
                 DateTimeFormatter.ISO_INSTANT.format(occurredAt), "TEAM_MEMBER_" + event.name(),
@@ -119,6 +146,9 @@ public class JdbcTeamExecutionPersistence implements TeamExecutionPersistence {
                 execution.sessionId().value(), AgentExecutionRole.CHILD, execution.attemptId(), execution.fenceToken());
         events.append(execution.runId(), "INTERNAL_TEAM_MEMBER_" + event.name(), "", EventVisibility.INTERNAL,
                 DurableEventMetadata.execution(descriptor), descriptor.nativeEventId(), occurredAt);
+        JdbcRunProgressNotifier.append(events, execution.runId(), execution.attemptId(), execution.fenceToken(),
+                "team-member:" + execution.teamExecutionId() + ":" + roleId + ":" + ordinal + ":" + event.name(),
+                occurredAt);
         return true;
     }
 
@@ -159,6 +189,8 @@ public class JdbcTeamExecutionPersistence implements TeamExecutionPersistence {
             events.append(execution.runId(), "RUN_RECOVERY_REQUIRED",
                     "自治 Team 执行结果不确定，需要管理员核查。", now);
         }
+        JdbcRunProgressNotifier.append(events, execution.runId(), execution.attemptId(), execution.fenceToken(),
+                "team:" + execution.teamExecutionId() + ":recovery:" + safeReasonCode, now);
         return true;
     }
 
@@ -187,4 +219,5 @@ public class JdbcTeamExecutionPersistence implements TeamExecutionPersistence {
     }
 
     private record ParentRun(long employeeId, long definitionVersionId) {}
+    private record MemberTransition(long ordinal, int phase) {}
 }

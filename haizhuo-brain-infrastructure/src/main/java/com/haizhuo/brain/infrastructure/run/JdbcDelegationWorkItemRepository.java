@@ -24,6 +24,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
@@ -38,12 +39,21 @@ public class JdbcDelegationWorkItemRepository {
     private final JdbcTemplate jdbc;
     private final JdbcRunEventAppender events;
     private final JdbcAgentResultRepository results;
+    private final JdbcDelegationReservationLifecycle reservationLifecycle;
 
     public JdbcDelegationWorkItemRepository(JdbcTemplate jdbc, JdbcRunEventAppender events,
                                             JdbcAgentResultRepository results) {
+        this(jdbc, events, results, new JdbcDelegationReservationLifecycle(jdbc, events));
+    }
+
+    @Autowired
+    public JdbcDelegationWorkItemRepository(JdbcTemplate jdbc, JdbcRunEventAppender events,
+                                            JdbcAgentResultRepository results,
+                                            JdbcDelegationReservationLifecycle reservationLifecycle) {
         this.jdbc = jdbc;
         this.events = events;
         this.results = results;
+        this.reservationLifecycle = reservationLifecycle;
     }
 
     @Transactional
@@ -119,6 +129,8 @@ public class JdbcDelegationWorkItemRepository {
             events.append(runId, item.createWorkItem() ? "WORK_ITEM_ACCEPTED" : "WORK_ITEM_REVISED",
                     "只读协作工作项已受理", EventVisibility.INTERNAL,
                     eventMetadata(attemptId, fenceToken), "work-item:" + item.workItemRef() + ":" + item.revision(), now);
+            JdbcRunProgressNotifier.append(events, runId, attemptId, fenceToken,
+                    "work-item:" + item.workItemRef() + ":" + item.revision(), now);
             accepted.put(item.call().toolUseId(), new DelegationAcceptanceProvider.AcceptedDelegation(
                     reservation(invocationId, runId, attemptId, fenceToken), item.roleId(), item.workItemRef(),
                     item.revision(), item.normalizedPayload(), item.workItemRef(), item.sourceKind(),
@@ -205,6 +217,8 @@ public class JdbcDelegationWorkItemRepository {
                 status, Timestamp.from(now), workItemRef, runId.value());
         events.append(runId, "WORK_ITEM_" + status, "根 Agent 已记录工作项验收决定", EventVisibility.INTERNAL,
                 eventMetadata(attemptId, fenceToken), "work-item-review:" + workItemRef + ":" + revision + ":" + status, now);
+        JdbcRunProgressNotifier.append(events, runId, attemptId, fenceToken,
+                "work-item-review:" + workItemRef + ":" + revision + ":" + status, now);
         return true;
     }
 
@@ -290,6 +304,8 @@ public class JdbcDelegationWorkItemRepository {
                 Timestamp.from(now), target.workItemRef());
         events.append(runId, "WORK_ITEM_RESULT_READY", "子 Agent 完整结果已保存并等待根 Agent 验收",
                 EventVisibility.INTERNAL, DurableEventMetadata.execution(result.descriptor()).withResult(resultId),
+                "work-item-result:" + target.workItemRef() + ":" + target.revision(), now);
+        JdbcRunProgressNotifier.append(events, runId, attemptId, result.descriptor().fenceToken(),
                 "work-item-result:" + target.workItemRef() + ":" + target.revision(), now);
         jdbc.update("UPDATE platform_run_delegation_invocation SET state='FINISHED',finished_at=? "
                         + "WHERE invocation_id=? AND state='ACTIVE'", Timestamp.from(now), target.invocationId());
@@ -626,30 +642,13 @@ public class JdbcDelegationWorkItemRepository {
         return new DelegationBudgetProvider.Reservation() {
             @Override public String invocationId() { return invocationId; }
             @Override public boolean activate() {
-                Instant now = Instant.now();
-                boolean started = jdbc.update("UPDATE platform_run_delegation_invocation SET state='ACTIVE',started_at=? "
-                                + "WHERE invocation_id=? AND run_id=? AND attempt_id=? AND fence_token=? AND state='ACCEPTED' "
-                                + "AND EXISTS (SELECT 1 FROM platform_run_execution_attempt attempt "
-                                + "JOIN platform_agent_run run ON run.run_id=attempt.run_id "
-                                + "WHERE attempt.run_id=? AND run.state='RUNNING' AND run.runtime_profile='TEAM_READONLY' "
-                                + "AND attempt.attempt_id=? AND attempt.fence_token=? AND attempt.state='RUNNING' "
-                                + "AND attempt.lease_expires_at>?)",
-                        Timestamp.from(now), invocationId, runId.value(), attemptId, fenceToken,
-                        runId.value(), attemptId, fenceToken, Timestamp.from(now)) == 1;
+                boolean started = reservationLifecycle.activate(runId, attemptId, fenceToken, invocationId);
                 if (started) activated.set(true);
                 return started;
             }
             @Override public void close() {
-                Instant now = Instant.now();
-                if (activated.getAndSet(false)) {
-                    jdbc.update("UPDATE platform_run_delegation_invocation SET state='FINISHED',finished_at=? "
-                                    + "WHERE invocation_id=? AND state='ACTIVE'",
-                            Timestamp.from(now), invocationId);
-                } else if (acceptanceOwner) {
-                    jdbc.update("UPDATE platform_run_delegation_invocation SET state='NOT_STARTED',finished_at=? "
-                                    + "WHERE invocation_id=? AND state='ACCEPTED'",
-                            Timestamp.from(now), invocationId);
-                }
+                reservationLifecycle.close(runId, attemptId, fenceToken, invocationId,
+                        activated.getAndSet(false), acceptanceOwner);
             }
         };
     }

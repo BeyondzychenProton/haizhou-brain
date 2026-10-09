@@ -106,7 +106,6 @@ class JdbcRunExecutionStoreTest {
         insertRun(jdbc, "run-budget", "session-1", "RUNNING");
         jdbc.update("UPDATE platform_agent_run SET runtime_profile='TEAM_READONLY' WHERE run_id='run-budget'");
         insertBudgetAttempt("attempt-budget-1", "run-budget", 1);
-        insertBudgetAttempt("attempt-budget-2", "run-budget", 2);
 
         var first = store.reserve(new RunId("run-budget"), "attempt-budget-1", 1L,
                 "researcher", 1, 1);
@@ -115,11 +114,16 @@ class JdbcRunExecutionStoreTest {
         first.close();
         assertEquals("FINISHED", jdbc.queryForObject("SELECT state FROM platform_run_delegation_invocation "
                 + "WHERE invocation_id=?", String.class, first.invocationId()));
+        assertEquals(2, jdbc.queryForObject("SELECT COUNT(*) FROM platform_agent_run_event "
+                + "WHERE run_id='run-budget' AND event_type='RUN_PROGRESS_UPDATED'", Integer.class));
+        insertBudgetAttempt("attempt-budget-2", "run-budget", 2);
         assertThrows(IllegalStateException.class, () -> store.reserve(new RunId("run-budget"),
                 "attempt-budget-2", 2L, "researcher", 1, 1),
                 "attempt 重建不能重置 Run 总调用预算");
         assertEquals(1, jdbc.queryForObject("SELECT COUNT(*) FROM platform_run_delegation_invocation "
                 + "WHERE run_id='run-budget'", Integer.class));
+        assertEquals(2, jdbc.queryForObject("SELECT COUNT(*) FROM platform_agent_run_event "
+                + "WHERE run_id='run-budget' AND event_type='RUN_PROGRESS_UPDATED'", Integer.class));
 
         jdbc.update("UPDATE platform_run_execution_attempt SET state='FAILED' WHERE attempt_id='attempt-budget-1'");
         assertThrows(IllegalStateException.class, () -> store.reserve(new RunId("run-budget"),
@@ -187,6 +191,8 @@ class JdbcRunExecutionStoreTest {
                 + "WHERE run_id='run-result' AND event_type='WORK_ITEM_RESULT_READY'", String.class));
         assertEquals("INTERNAL", jdbc.queryForObject("SELECT visibility FROM platform_agent_session_event "
                 + "WHERE run_id='run-result' AND event_type='WORK_ITEM_RESULT_READY'", String.class));
+        assertEquals(3, jdbc.queryForObject("SELECT COUNT(*) FROM platform_agent_run_event "
+                + "WHERE run_id='run-result' AND event_type='RUN_PROGRESS_UPDATED'", Integer.class));
 
         var exact = store.readResult(claim.run().id(), claim.attempt().attemptId(), claim.attempt().fenceToken(),
                 accepted.workItemRef(), accepted.assignmentRevision()).orElseThrow();
@@ -200,6 +206,14 @@ class JdbcRunExecutionStoreTest {
         assertTrue(store.reviewResult(claim.run().id(), claim.attempt().attemptId(), claim.attempt().fenceToken(),
                 accepted.workItemRef(), accepted.assignmentRevision(), resultId, exact.bodySha256(),
                 exact.contractVersion(), DelegationAcceptanceProvider.ReviewDecision.ACCEPT, null));
+        assertEquals(4, jdbc.queryForObject("SELECT COUNT(*) FROM platform_agent_run_event "
+                + "WHERE run_id='run-result' AND event_type='RUN_PROGRESS_UPDATED'", Integer.class));
+        assertTrue(store.reviewResult(claim.run().id(), claim.attempt().attemptId(), claim.attempt().fenceToken(),
+                accepted.workItemRef(), accepted.assignmentRevision(), resultId, exact.bodySha256(),
+                exact.contractVersion(), DelegationAcceptanceProvider.ReviewDecision.ACCEPT, null));
+        assertEquals(4, jdbc.queryForObject("SELECT COUNT(*) FROM platform_agent_run_event "
+                + "WHERE run_id='run-result' AND event_type='RUN_PROGRESS_UPDATED'",
+                Integer.class), "重复验收不得追加重复进度通知");
         assertTrue(new JdbcDelegationWorkItemRepository(jdbc, new JdbcRunEventAppender(jdbc,
                 new JdbcSessionEventProjector(jdbc)), new JdbcAgentResultRepository(jdbc))
                 .requiredWorkItemsAccepted(claim.run().id()));
@@ -262,6 +276,8 @@ class JdbcRunExecutionStoreTest {
         assertEquals(first.reservation().invocationId(), replay.reservation().invocationId());
         assertEquals(first.normalizedPayload(), replay.normalizedPayload());
         assertEquals(1, jdbc.queryForObject("SELECT COUNT(*) FROM platform_run_delegation_invocation", Integer.class));
+        assertEquals(1, jdbc.queryForObject("SELECT COUNT(*) FROM platform_agent_run_event "
+                + "WHERE run_id='run-idempotent' AND event_type='RUN_PROGRESS_UPDATED'", Integer.class));
         var changedIdentity = new DelegationAcceptanceProvider.DelegationCall(call.toolUseId(), call.operation(),
                 call.roleId(), call.sourceKind(), call.employeeId(), call.definitionVersionId(), "b".repeat(64),
                 call.agentKey(), call.label(), call.payload());
@@ -270,14 +286,102 @@ class JdbcRunExecutionStoreTest {
         replay.reservation().close();
         assertEquals("ACCEPTED", jdbc.queryForObject("SELECT state FROM platform_run_delegation_invocation", String.class));
         assertTrue(first.reservation().activate());
+        assertEquals(2, jdbc.queryForObject("SELECT COUNT(*) FROM platform_agent_run_event "
+                + "WHERE run_id='run-idempotent' AND event_type='RUN_PROGRESS_UPDATED'", Integer.class));
         assertFalse(replay.reservation().activate());
         replay.reservation().close();
         assertEquals("ACTIVE", jdbc.queryForObject("SELECT state FROM platform_run_delegation_invocation", String.class));
         first.reservation().close();
         assertEquals("FINISHED", jdbc.queryForObject("SELECT state FROM platform_run_delegation_invocation", String.class));
+        assertEquals(3, jdbc.queryForObject("SELECT COUNT(*) FROM platform_agent_run_event "
+                + "WHERE run_id='run-idempotent' AND event_type='RUN_PROGRESS_UPDATED'", Integer.class));
         jdbc.update("UPDATE platform_run_delegation_invocation SET request_sha256=NULL");
         assertThrows(IllegalStateException.class, () -> store.acceptBatch(claim.run().id(),
                 claim.attempt().attemptId(), claim.attempt().fenceToken(), 1, 1, List.of(call)));
+    }
+
+    @Test
+    void delegationReservationTransitionAndNoticeCommitOrRollBackTogether() {
+        insertRun(jdbc, "run-reservation-notice", "session-1", "QUEUED");
+        insertRunSpec(jdbc, "run-reservation-notice");
+        jdbc.update("UPDATE platform_agent_run SET runtime_profile='TEAM_READONLY' WHERE run_id='run-reservation-notice'");
+        var claim = store.claimNext("worker-reservation-notice", TTL).orElseThrow();
+        var call = new DelegationAcceptanceProvider.DelegationCall("tool-reservation-notice",
+                DelegationAcceptanceProvider.Operation.SPAWN, "researcher",
+                DelegationAcceptanceProvider.SourceKind.PUBLISHED_EXPERT, 22L, 202L, "a".repeat(64),
+                null, null, workItemPayload("notice transaction", true, "text/plain", "v1", List.of(), List.of(), List.of()));
+        var accepted = store.acceptBatch(claim.run().id(), claim.attempt().attemptId(), claim.attempt().fenceToken(),
+                2, 1, List.of(call)).get(0);
+
+        jdbc.execute("ALTER TABLE platform_agent_session_event ADD CONSTRAINT reject_progress_notice "
+                + "CHECK (event_type <> 'RUN_PROGRESS_UPDATED')");
+        assertThrows(org.springframework.dao.DataIntegrityViolationException.class, accepted.reservation()::activate);
+        assertEquals("ACCEPTED", jdbc.queryForObject("SELECT state FROM platform_run_delegation_invocation "
+                + "WHERE invocation_id=?", String.class, accepted.reservation().invocationId()));
+        assertEquals(1, jdbc.queryForObject("SELECT COUNT(*) FROM platform_agent_run_event "
+                + "WHERE run_id='run-reservation-notice' AND event_type='RUN_PROGRESS_UPDATED'", Integer.class));
+
+        jdbc.execute("ALTER TABLE platform_agent_session_event DROP CONSTRAINT reject_progress_notice");
+        assertTrue(accepted.reservation().activate());
+        assertEquals("ACTIVE", jdbc.queryForObject("SELECT state FROM platform_run_delegation_invocation "
+                + "WHERE invocation_id=?", String.class, accepted.reservation().invocationId()));
+        assertEquals(2, jdbc.queryForObject("SELECT COUNT(*) FROM platform_agent_run_event "
+                + "WHERE run_id='run-reservation-notice' AND event_type='RUN_PROGRESS_UPDATED'", Integer.class));
+
+        accepted.reservation().close();
+        accepted.reservation().close();
+        assertEquals("FINISHED", jdbc.queryForObject("SELECT state FROM platform_run_delegation_invocation "
+                + "WHERE invocation_id=?", String.class, accepted.reservation().invocationId()));
+        assertEquals(3, jdbc.queryForObject("SELECT COUNT(*) FROM platform_agent_run_event "
+                + "WHERE run_id='run-reservation-notice' AND event_type='RUN_PROGRESS_UPDATED'", Integer.class));
+    }
+
+    @Test
+    void delegationReservationRejectsAnOldFenceWithoutChangingOrNotifying() {
+        insertRun(jdbc, "run-reservation-stale", "session-1", "QUEUED");
+        insertRunSpec(jdbc, "run-reservation-stale");
+        jdbc.update("UPDATE platform_agent_run SET runtime_profile='TEAM_READONLY' WHERE run_id='run-reservation-stale'");
+        var claim = store.claimNext("worker-reservation-stale", TTL).orElseThrow();
+        var call = new DelegationAcceptanceProvider.DelegationCall("tool-reservation-stale",
+                DelegationAcceptanceProvider.Operation.SPAWN, "researcher",
+                DelegationAcceptanceProvider.SourceKind.PUBLISHED_EXPERT, 22L, 202L, "a".repeat(64),
+                null, null, workItemPayload("stale fence", true, "text/plain", "v1", List.of(), List.of(), List.of()));
+        var accepted = store.acceptBatch(claim.run().id(), claim.attempt().attemptId(), claim.attempt().fenceToken(),
+                2, 1, List.of(call)).get(0);
+        jdbc.update("UPDATE platform_run_execution_attempt SET fence_token=2 WHERE attempt_id=?",
+                claim.attempt().attemptId());
+
+        assertFalse(accepted.reservation().activate());
+        accepted.reservation().close();
+
+        assertEquals("ACCEPTED", jdbc.queryForObject("SELECT state FROM platform_run_delegation_invocation "
+                + "WHERE invocation_id=?", String.class, accepted.reservation().invocationId()));
+        assertEquals(1, jdbc.queryForObject("SELECT COUNT(*) FROM platform_agent_run_event "
+                + "WHERE run_id='run-reservation-stale' AND event_type='RUN_PROGRESS_UPDATED'", Integer.class));
+    }
+
+    @Test
+    void progressNotificationFailureRollsBackWorkItemAndInternalFact() {
+        insertRun(jdbc, "run-progress-rollback", "session-1", "QUEUED");
+        insertRunSpec(jdbc, "run-progress-rollback");
+        jdbc.update("UPDATE platform_agent_run SET runtime_profile='TEAM_READONLY' WHERE run_id='run-progress-rollback'");
+        var claim = store.claimNext("worker-progress-rollback", TTL).orElseThrow();
+        jdbc.execute("ALTER TABLE platform_agent_session_event ADD CONSTRAINT reject_progress_notice "
+                + "CHECK (event_type <> 'RUN_PROGRESS_UPDATED')");
+        var call = new DelegationAcceptanceProvider.DelegationCall("tool-progress-rollback",
+                DelegationAcceptanceProvider.Operation.SPAWN, "researcher",
+                DelegationAcceptanceProvider.SourceKind.PUBLISHED_EXPERT, 22L, 202L, "a".repeat(64),
+                null, null, workItemPayload("private objective", true, "text/plain", "v1", List.of(), List.of(), List.of()));
+
+        assertThrows(org.springframework.dao.DataIntegrityViolationException.class,
+                () -> store.acceptBatch(claim.run().id(), claim.attempt().attemptId(), claim.attempt().fenceToken(),
+                        1, 1, List.of(call)));
+
+        assertEquals(0, jdbc.queryForObject("SELECT COUNT(*) FROM platform_run_work_item WHERE run_id=?",
+                Integer.class, "run-progress-rollback"));
+        assertEquals(0, jdbc.queryForObject("SELECT COUNT(*) FROM platform_run_delegation_invocation WHERE run_id=?",
+                Integer.class, "run-progress-rollback"));
+        assertEquals(List.of("RUN_STARTED"), eventTypes(jdbc, "run-progress-rollback"));
     }
 
     @Test

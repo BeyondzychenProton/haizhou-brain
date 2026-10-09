@@ -48,20 +48,33 @@ public class JdbcRunExecutionStore implements RunExecutionStore {
     private final JdbcAgentResultRepository results;
     private final ChannelReplyEnqueuer replies;
     private final JdbcDelegationWorkItemRepository workItems;
+    private final JdbcDelegationReservationLifecycle reservationLifecycle;
 
     public JdbcRunExecutionStore(JdbcTemplate jdbc, JdbcSessionEventProjector sessionEvents) {
         this(jdbc, new JdbcRunEventAppender(jdbc,sessionEvents), new JdbcAgentResultRepository(jdbc),
                 new JdbcChannelReplyEnqueuer(jdbc,new JdbcChannelDeliveryOutbox(jdbc,java.time.Clock.systemUTC())));
     }
 
-    @org.springframework.beans.factory.annotation.Autowired
     public JdbcRunExecutionStore(JdbcTemplate jdbc, JdbcRunEventAppender events, JdbcAgentResultRepository results,
                                  ChannelReplyEnqueuer replies) {
         this.jdbc = jdbc;
         this.events = events;
         this.results = results;
         this.replies = replies;
-        this.workItems = new JdbcDelegationWorkItemRepository(jdbc, events, results);
+        this.reservationLifecycle = new JdbcDelegationReservationLifecycle(jdbc, events);
+        this.workItems = new JdbcDelegationWorkItemRepository(jdbc, events, results, reservationLifecycle);
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public JdbcRunExecutionStore(JdbcTemplate jdbc, JdbcRunEventAppender events, JdbcAgentResultRepository results,
+                                 ChannelReplyEnqueuer replies, JdbcDelegationWorkItemRepository workItems,
+                                 JdbcDelegationReservationLifecycle reservationLifecycle) {
+        this.jdbc = jdbc;
+        this.events = events;
+        this.results = results;
+        this.replies = replies;
+        this.workItems = workItems;
+        this.reservationLifecycle = reservationLifecycle;
     }
 
     @Override
@@ -110,6 +123,7 @@ public class JdbcRunExecutionStore implements RunExecutionStore {
             throw new IllegalArgumentException("run, attempt, and role are required");
         if (maxInvocations < 1 || maxParallel < 1)
             throw new IllegalStateException("expert delegation is disabled by the frozen Run policy");
+        if (events.lockRun(runId) == null) throw new IllegalStateException("expert reservation Run is missing");
         List<String> runRows = jdbc.query("SELECT run_id FROM platform_agent_run WHERE run_id=? "
                         + "AND state='RUNNING' AND runtime_profile='TEAM_READONLY' FOR UPDATE",
                 (rs, n) -> rs.getString(1), runId.value());
@@ -138,13 +152,13 @@ public class JdbcRunExecutionStore implements RunExecutionStore {
         jdbc.update("INSERT INTO platform_run_delegation_invocation(invocation_id,run_id,attempt_id,fence_token,"
                         + "role_id,state,started_at) VALUES(?,?,?,?,?,'ACTIVE',?)",
                 invocationId, runId.value(), attemptId, fenceToken, roleId, Timestamp.from(now));
+        JdbcRunProgressNotifier.append(events, runId, attemptId, fenceToken,
+                "delegation-invocation:" + invocationId + ":activated", now);
         return new DelegationBudgetProvider.Reservation() {
             @Override public String invocationId() { return invocationId; }
 
             @Override public void close() {
-                jdbc.update("UPDATE platform_run_delegation_invocation SET state='FINISHED',finished_at=? "
-                                + "WHERE invocation_id=? AND state='ACTIVE'",
-                        Timestamp.from(Instant.now()), invocationId);
+                reservationLifecycle.close(runId, attemptId, fenceToken, invocationId, true, false);
             }
         };
     }
