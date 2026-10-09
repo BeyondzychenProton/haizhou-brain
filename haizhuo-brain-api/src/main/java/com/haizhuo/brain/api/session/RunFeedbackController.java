@@ -17,6 +17,7 @@ import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 import java.time.Instant;
 import java.util.List;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
@@ -36,11 +37,12 @@ import reactor.core.scheduler.Schedulers;
 @RestController
 @Validated
 @RequestMapping("/api/v1/sessions/runs/{runId}/feedback")
-public final class RunFeedbackController {
+public class RunFeedbackController {
     private static final String SCORE_NAME = "user.satisfaction";
     private final RunFeedbackService feedback;
     private final NumericScoreSubmitter evaluations;
 
+    @Autowired
     public RunFeedbackController(RunFeedbackService feedback, LangfuseEvaluationService evaluations) {
         this(feedback, evaluations::submitNumeric);
     }

@@ -34,7 +34,7 @@ import reactor.core.scheduler.Schedulers;
 /** 通过属主身份校验提供 Markdown 成果物导出与附件下载。 */
 @RestController
 @Validated
-public final class RunArtifactController {
+public class RunArtifactController {
     private final RunArtifactService artifacts;
 
     public RunArtifactController(RunArtifactService artifacts) { this.artifacts = artifacts; }

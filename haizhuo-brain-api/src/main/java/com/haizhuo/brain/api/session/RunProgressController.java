@@ -30,7 +30,7 @@ import reactor.core.scheduler.Schedulers;
 @RestController
 @Validated
 @RequestMapping("/api/v1/sessions/runs/{runId}")
-public final class RunProgressController {
+public class RunProgressController {
     private final RunProgressQueryService progress;
 
     public RunProgressController(RunProgressQueryService progress) { this.progress = progress; }

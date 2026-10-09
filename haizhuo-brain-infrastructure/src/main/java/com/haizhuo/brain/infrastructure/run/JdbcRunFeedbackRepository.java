@@ -4,22 +4,27 @@ import com.haizhuo.brain.kernel.identity.RunId;
 import com.haizhuo.brain.kernel.identity.UserId;
 import com.haizhuo.brain.platform.run.RunFeedback;
 import com.haizhuo.brain.platform.run.RunFeedbackRepository;
+
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.util.List;
 import java.util.Optional;
+
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
 @Repository
-public final class JdbcRunFeedbackRepository implements RunFeedbackRepository {
+public class JdbcRunFeedbackRepository implements RunFeedbackRepository {
     private final JdbcTemplate jdbc;
 
-    public JdbcRunFeedbackRepository(JdbcTemplate jdbc) { this.jdbc = jdbc; }
+    public JdbcRunFeedbackRepository(JdbcTemplate jdbc) {
+        this.jdbc = jdbc;
+    }
 
-    @Override public SaveResult saveOrGet(RunFeedback proposed) {
+    @Override
+    public SaveResult saveOrGet(RunFeedback proposed) {
         try {
             jdbc.update("INSERT INTO platform_run_feedback(feedback_id,run_id,user_id,client_request_id,request_digest,"
                             + "score_value,feedback_comment,created_at,export_disposition) VALUES(?,?,?,?,?,?,?,?,?)",
@@ -33,13 +38,15 @@ public final class JdbcRunFeedbackRepository implements RunFeedbackRepository {
         }
     }
 
-    @Override public Optional<RunFeedback> findByRequest(UserId owner, RunId runId, String clientRequestId) {
+    @Override
+    public Optional<RunFeedback> findByRequest(UserId owner, RunId runId, String clientRequestId) {
         return jdbc.query("SELECT * FROM platform_run_feedback WHERE user_id=? AND run_id=? AND client_request_id=?",
                 JdbcRunFeedbackRepository::map, owner.value(), runId.value(), clientRequestId).stream().findFirst();
     }
 
-    @Override public Optional<RunFeedback> updateExportDisposition(UserId owner, RunId runId, String feedbackId,
-                                                                    RunFeedback.ExportDisposition disposition) {
+    @Override
+    public Optional<RunFeedback> updateExportDisposition(UserId owner, RunId runId, String feedbackId,
+                                                         RunFeedback.ExportDisposition disposition) {
         jdbc.update("UPDATE platform_run_feedback SET export_disposition=? WHERE user_id=? AND run_id=? "
                         + "AND feedback_id=? AND export_disposition='QUEUE_STATUS_UNKNOWN'",
                 disposition.name(), owner.value(), runId.value(), feedbackId);
@@ -47,7 +54,8 @@ public final class JdbcRunFeedbackRepository implements RunFeedbackRepository {
                 JdbcRunFeedbackRepository::map, owner.value(), runId.value(), feedbackId).stream().findFirst();
     }
 
-    @Override public List<RunFeedback> list(UserId owner, RunId runId, Position before, int limit) {
+    @Override
+    public List<RunFeedback> list(UserId owner, RunId runId, Position before, int limit) {
         int boundedLimit = Math.max(1, Math.min(limit, 101));
         if (before == null) {
             return jdbc.query("SELECT * FROM platform_run_feedback WHERE user_id=? AND run_id=? "

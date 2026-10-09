@@ -1,15 +1,19 @@
 package com.haizhuo.brain.infrastructure.run;
 
 import com.haizhuo.brain.platform.run.RunArtifactBlobReferenceQuery;
+
 import java.sql.PreparedStatement;
 import java.util.Objects;
+
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.ResultSetExtractor;
 import org.springframework.stereotype.Repository;
 
-/** 精确查询所有状态的引用；写入进行期间，STAGED 行会保护对应 Blob。 */
+/**
+ * 精确查询所有状态的引用；写入进行期间，STAGED 行会保护对应 Blob。
+ */
 @Repository
-public final class JdbcRunArtifactBlobReferenceQuery implements RunArtifactBlobReferenceQuery {
+public class JdbcRunArtifactBlobReferenceQuery implements RunArtifactBlobReferenceQuery {
     private static final String EXISTS_SQL =
             "SELECT 1 FROM platform_run_artifact WHERE blob_ref=? LIMIT 1";
     private final JdbcTemplate jdbc;

@@ -32,7 +32,7 @@ import reactor.core.scheduler.Schedulers;
 @RestController
 @Validated
 @RequestMapping("/api/v1/sessions")
-public final class SessionHistoryController {
+public class SessionHistoryController {
     private final SessionHistoryQueryService history;
     private final SessionApplicationService sessions;
     private final ToolApprovalService toolApprovals;

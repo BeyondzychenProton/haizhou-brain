@@ -1,16 +1,20 @@
 package com.haizhuo.brain.infrastructure.session;
 
 import com.haizhuo.brain.platform.session.SessionHistoryQuery;
+
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.List;
+
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Repository;
 
-/** 执行属主范围内的 keyset 查询；不会读取结果正文或 Run 内部字段。 */
+/**
+ * 执行属主范围内的 keyset 查询；不会读取结果正文或 Run 内部字段。
+ */
 @Repository
-public final class JdbcSessionHistoryQuery implements SessionHistoryQuery {
+public class JdbcSessionHistoryQuery implements SessionHistoryQuery {
     private final NamedParameterJdbcTemplate jdbc;
 
     public JdbcSessionHistoryQuery(org.springframework.jdbc.core.JdbcTemplate jdbc) {
@@ -102,7 +106,9 @@ public final class JdbcSessionHistoryQuery implements SessionHistoryQuery {
         args.addValue("beforeCreatedAt", Timestamp.from(before.createdAt())).addValue("beforeId", before.id());
     }
 
-    private static Instant instant(Timestamp value) { return value == null ? null : value.toInstant(); }
+    private static Instant instant(Timestamp value) {
+        return value == null ? null : value.toInstant();
+    }
 
     private static Long nullableLong(java.sql.ResultSet rs, String name) throws java.sql.SQLException {
         long value = rs.getLong(name);
