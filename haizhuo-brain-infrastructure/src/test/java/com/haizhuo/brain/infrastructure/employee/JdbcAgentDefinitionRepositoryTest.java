@@ -174,6 +174,33 @@ class JdbcAgentDefinitionRepositoryTest {
     }
 
     @Test
+    void grantWriteChecksCapabilityAndAccountStateInsideTheGrantTransaction() {
+        jdbc.update("UPDATE capability_definition SET status='DISABLED' WHERE capability_code='sample.read'");
+        assertThrows(IllegalStateException.class, () -> repository.setUserCapabilityGrant(42, "sample.read", true,
+                audit("USER_CAPABILITY_GRANT_CHANGED", "PLATFORM_USER", "42", null)));
+        repository.setUserCapabilityGrant(42, "sample.read", false,
+                audit("USER_CAPABILITY_GRANT_CHANGED", "PLATFORM_USER", "42", null));
+        assertFalse(repository.hasUserCapabilityGrant(42, "sample.read"), "停用能力仍允许撤销已有授权");
+
+        jdbc.update("UPDATE platform_user SET status='DISABLED' WHERE id=43");
+        assertThrows(IllegalStateException.class, () -> repository.setUserCapabilityGrant(43, "sample.write", true,
+                audit("USER_CAPABILITY_GRANT_CHANGED", "PLATFORM_USER", "43", null)));
+        repository.setUserCapabilityGrant(43, "sample.write", false,
+                audit("USER_CAPABILITY_GRANT_CHANGED", "PLATFORM_USER", "43", null));
+        assertFalse(repository.hasUserCapabilityGrant(43, "sample.write"), "停用用户允许提交撤销");
+
+        jdbc.update("UPDATE platform_user SET status='PENDING_ACTIVATION' WHERE id=44");
+        assertThrows(IllegalStateException.class, () -> repository.setUserCapabilityGrant(44, "sample.write", true,
+                audit("USER_CAPABILITY_GRANT_CHANGED", "PLATFORM_USER", "44", null)));
+        assertEquals(0, jdbc.queryForObject("SELECT COUNT(*) FROM agent_user_capability_grant WHERE user_id=44", Integer.class),
+                "拒绝授予不能创建孤立或未授权记录");
+        assertThrows(IllegalArgumentException.class, () -> repository.setUserCapabilityGrant(999, "sample.write", false,
+                audit("USER_CAPABILITY_GRANT_CHANGED", "PLATFORM_USER", "999", null)));
+        assertThrows(IllegalArgumentException.class, () -> repository.setUserCapabilityGrant(42, "missing.capability", false,
+                audit("USER_CAPABILITY_GRANT_CHANGED", "PLATFORM_USER", "42", null)));
+    }
+
+    @Test
     void recordsToolInvocationAuditRow() {
         jdbc.update("INSERT INTO agent_run(run_id) VALUES (?)", "run-jdbc-1");
         repository.recordToolInvocation(new ToolInvocationAudit(UUID.randomUUID().toString(), "run-jdbc-1", "sample.read", "1",
@@ -183,6 +210,7 @@ class JdbcAgentDefinitionRepositoryTest {
 
     private void createSchema() {
         jdbc.execute("CREATE TABLE digital_employee(id BIGINT PRIMARY KEY,tenant_id BIGINT NOT NULL,employee_code VARCHAR(64),display_name VARCHAR(128),enabled BOOLEAN,current_published_version_id BIGINT,row_version BIGINT)");
+        jdbc.execute("CREATE TABLE platform_user(id BIGINT PRIMARY KEY,status VARCHAR(24) NOT NULL)");
         jdbc.execute("CREATE TABLE capability_definition(capability_code VARCHAR(128) PRIMARY KEY,capability_type VARCHAR(24),status VARCHAR(24),updated_by BIGINT,updated_at TIMESTAMP,status_reason VARCHAR(500))");
         jdbc.execute("CREATE TABLE capability_revision(capability_revision_id BIGINT AUTO_INCREMENT UNIQUE,capability_code VARCHAR(128),revision VARCHAR(32),display_name VARCHAR(128),description VARCHAR(1000),tool_name VARCHAR(128),implementation_key VARCHAR(64),business_action VARCHAR(128),input_schema_json TEXT,requires_confirmation BOOLEAN DEFAULT FALSE,content_hash CHAR(64),PRIMARY KEY(capability_code,revision),UNIQUE(tool_name),FOREIGN KEY(capability_code) REFERENCES capability_definition(capability_code))");
         jdbc.execute("CREATE TABLE agent_definition_draft(employee_id BIGINT PRIMARY KEY,draft_revision INT,instructions TEXT,model_provider VARCHAR(32),model_name VARCHAR(128),configuration_json CLOB,updated_by BIGINT,updated_at TIMESTAMP,FOREIGN KEY(employee_id) REFERENCES digital_employee(id))");
@@ -195,6 +223,7 @@ class JdbcAgentDefinitionRepositoryTest {
         jdbc.execute("CREATE TABLE agent_run(run_id VARCHAR(36) PRIMARY KEY)");
         jdbc.execute("CREATE TABLE tool_invocation_audit(invocation_id VARCHAR(36) PRIMARY KEY,run_id VARCHAR(36),capability_code VARCHAR(128),capability_revision VARCHAR(32),user_id BIGINT,business_action VARCHAR(128),arguments_hash CHAR(64),decision VARCHAR(24),result_status VARCHAR(24),result_summary VARCHAR(1000),created_at TIMESTAMP,FOREIGN KEY(run_id) REFERENCES agent_run(run_id),FOREIGN KEY(capability_code,capability_revision) REFERENCES capability_revision(capability_code,revision))");
         jdbc.update("INSERT INTO digital_employee VALUES(1,1,'sample-employee','测试员工',TRUE,1,0)");
+        jdbc.update("INSERT INTO platform_user VALUES(42,'ACTIVE'),(43,'ACTIVE'),(44,'PENDING_ACTIVATION')");
         jdbc.update("INSERT INTO capability_definition VALUES('sample.read','TOOL','ACTIVE',42,CURRENT_TIMESTAMP,NULL),('sample.write','TOOL','ACTIVE',42,CURRENT_TIMESTAMP,NULL)");
         String schema = "{\"type\":\"object\",\"properties\":{\"startAt\":{\"type\":\"string\"},\"endAt\":{\"type\":\"string\"},\"attendees\":{\"type\":\"integer\"}},\"required\":[\"startAt\",\"endAt\",\"attendees\"],\"additionalProperties\":false}";
         for (String code : List.of("sample.read", "sample.write")) {

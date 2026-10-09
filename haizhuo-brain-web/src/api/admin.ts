@@ -187,6 +187,155 @@ export interface DraftUpdatePayload {
   reason: string
 }
 
+export interface EmployeeAdminSummary {
+  employeeId: number
+  employeeCode: string
+  displayName: string
+  enabled: boolean
+  published: boolean
+  currentPublishedVersionId: number | null
+  rowVersion: number
+  createdAt: string
+}
+
+export interface EmployeeAdminPage {
+  items: EmployeeAdminSummary[]
+  nextCursor: string | null
+  hasMore: boolean
+}
+
+export interface RuntimeProfileOption {
+  profile: RuntimeProfile
+  schemaVersion: number
+  configuredEnabled: boolean
+  publishEnabled: boolean
+  disabledReasonCode: string | null
+  memberLimit: number
+}
+
+export interface IntegerRange { min: number; max: number }
+
+export interface ReservedDelegationTarget {
+  kind: string
+  targetRoleId: string
+  readonly: boolean
+  supportedProfiles: RuntimeProfile[]
+  profileGate: string
+}
+
+export interface EmployeeRuntimeOptions {
+  profiles: RuntimeProfileOption[]
+  maxIterations: IntegerRange
+  maxParallelDelegations: IntegerRange
+  maxExpertInvocationsPerRun: IntegerRange
+  syncTimeoutSeconds: IntegerRange
+  memoryEnabled: boolean
+  instructionMaxLength: number
+  memberLimits: Record<string, number>
+  supportedMemberProfiles: RuntimeProfile[]
+  reservedDelegationTargets: ReservedDelegationTarget[]
+  admissionEvidenceStatus: string
+  optionsVersion: string
+}
+
+export interface EmployeeVersionSummary {
+  versionId: number
+  employeeId: number
+  versionNo: number
+  contentHash: string
+  profile: RuntimeProfile
+  publishedBy: number
+  publishedAt: string
+  current: boolean
+}
+
+export interface EmployeeVersionPage {
+  items: EmployeeVersionSummary[]
+  nextCursor: string | null
+  hasMore: boolean
+}
+
+export interface EmployeeVersionDetail {
+  summary: EmployeeVersionSummary
+  instructions: string
+  modelProvider: string
+  modelName: string
+  configuration: EmployeeRuntimeConfiguration
+  capabilities: Array<{
+    capabilityCode: string
+    revision: string
+    displayName: string
+    capabilityType: CapabilityType
+    contentHash: string
+    enabled: boolean
+  }>
+  members: Array<{
+    roleId: string
+    employeeId: number
+    employeeCode: string
+    displayName: string
+    definitionVersionId: number
+    versionNo: number
+    contentHash: string
+    profile: RuntimeProfile
+    steps: number
+    employeeEnabled: boolean
+  }>
+  runtimeBundleAvailable: boolean
+}
+
+export interface CreatedEmployee {
+  employee: EmployeeAdminSummary
+  draft: AgentDefinitionDraft
+}
+
+export function employeeRuntimeOptions() {
+  return httpClient.get<EmployeeRuntimeOptions>('/api/admin/v1/agents/runtime-options').then(r => r.data)
+}
+
+export function listManagedEmployees(query: {
+  query?: string
+  enabled?: boolean
+  published?: boolean
+  cursor?: string
+  limit?: number
+} = {}) {
+  return httpClient.get<EmployeeAdminPage>('/api/admin/v1/agents', { params: query }).then(r => r.data)
+}
+
+export function createEmployee(employeeCode: string, displayName: string, requestId: string, reason: string) {
+  return httpClient.post<CreatedEmployee>('/api/admin/v1/agents', { employeeCode, displayName, requestId, reason })
+    .then(r => r.data)
+}
+
+export function updateEmployee(employeeId: number, expectedRowVersion: number, displayName: string,
+                               requestId: string, reason: string) {
+  return httpClient.patch<EmployeeAdminSummary>(`/api/admin/v1/agents/${employeeId}`,
+    { expectedRowVersion, displayName, requestId, reason }).then(r => r.data)
+}
+
+export function setEmployeeEnabled(employeeId: number, expectedRowVersion: number, enabled: boolean,
+                                   requestId: string, reason: string) {
+  return httpClient.put<EmployeeAdminSummary>(`/api/admin/v1/agents/${employeeId}/status`,
+    { expectedRowVersion, enabled, requestId, reason }).then(r => r.data)
+}
+
+export function employeeVersions(employeeId: number, cursor?: string, limit = 20) {
+  return httpClient.get<EmployeeVersionPage>(`/api/admin/v1/agents/${employeeId}/versions`,
+    { params: { cursor, limit } }).then(r => r.data)
+}
+
+export function employeeVersion(employeeId: number, versionId: number) {
+  return httpClient.get<EmployeeVersionDetail>(`/api/admin/v1/agents/${employeeId}/versions/${versionId}`)
+    .then(r => r.data)
+}
+
+export function restoreEmployeeDraft(employeeId: number, sourceVersionId: number,
+                                     expectedDraftRevision: number, requestId: string, reason: string) {
+  return httpClient.post<AgentDefinitionDraft>(`/api/admin/v1/agents/${employeeId}/draft/restore`,
+    { sourceVersionId, expectedDraftRevision, requestId, reason }).then(r => r.data)
+}
+
 /** 与后端 ValidationIssue 对齐。 */
 export interface ValidationIssue {
   code: string

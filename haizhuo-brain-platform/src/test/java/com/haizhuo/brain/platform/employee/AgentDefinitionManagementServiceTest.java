@@ -111,6 +111,79 @@ class AgentDefinitionManagementServiceTest {
         assertFalse(result.issues().stream().anyMatch(issue -> issue.code().startsWith("MEMBER_")));
     }
 
+    @Test
+    void readonlyTeamAllowsCoordinatorToDelegateToReservedNativeTargets() {
+        int ownerId = 53;
+        int memberId = 63;
+        int versionId = 903;
+        EmployeeRuntimeConfiguration configuration = new EmployeeRuntimeConfiguration(2, RuntimeProfile.TEAM_READONLY,
+                new EmployeeRuntimeConfiguration.RuntimePolicy(5, 1, 2, 60, false),
+                new EmployeeRuntimeConfiguration.TeamConfiguration("analyst", List.of("analyst"), List.of(
+                        new EmployeeRuntimeConfiguration.RoleDelegation("coordinator", "general-purpose"),
+                        new EmployeeRuntimeConfiguration.RoleDelegation("coordinator", "dynamic-expert"))),
+                List.of(new EmployeeRuntimeConfiguration.FixedMember("analyst", memberId, versionId, 8)));
+        AgentDefinitionDraft draft = draft(ownerId, configuration, List.of());
+        DigitalEmployee member = employee(memberId, 1);
+        PublishedEmployee exact = new PublishedEmployee(member,
+                new AgentDefinitionVersion(versionId, memberId, 1, "冻结只读成员", "openai", "test-model", NOW), List.of());
+        AgentDefinitionRepository repository = repository(draft,
+                Map.of((long) ownerId, employee(ownerId, 1), (long) memberId, member),
+                Map.of(new VersionKey(memberId, versionId), exact), Map.of());
+
+        var result = service(repository, Set.of(RuntimeProfile.LEGACY_STABLE, RuntimeProfile.TEAM_READONLY))
+                .validateDraft(ownerId);
+
+        assertTrue(result.publishable(), () -> result.issues().toString());
+    }
+
+    @Test
+    void configuredProfileWithoutDeploymentEvidenceCannotBePublished() {
+        AgentDefinitionDraft draft = draft(EmployeeRuntimeConfiguration.singleSkilled(6), List.of());
+        AgentDefinitionRepository repository = repository(draft, Map.of(), Map.of(), Map.of());
+        CapabilityExecutorRegistry executors = new CapabilityExecutorRegistry() {
+            @Override public boolean supports(String implementationKey, String capabilityCode) { return true; }
+            @Override public com.haizhuo.brain.platform.tool.CapabilityExecutor resolve(CapabilityCatalogEntry capability) { return null; }
+        };
+        HarnessDefinitionPublisher publisher = (employeeId, expectedRevision, audit) -> null;
+        var service = new AgentDefinitionManagementService(repository, executors, publisher, null,
+                RuntimeProfileAdmissionPolicy.configuredOnly(Set.of(RuntimeProfile.LEGACY_STABLE,
+                        RuntimeProfile.SINGLE_SKILLED)));
+
+        var result = service.validateDraft(draft.employeeId());
+
+        assertFalse(result.publishable());
+        assertTrue(result.issues().stream().anyMatch(issue -> issue.code().equals("PROFILE_VERIFICATION_MISSING")
+                && issue.fieldPath().equals("configuration.profile")));
+    }
+
+    @Test
+    void reservedTargetsRejectUnsupportedSourcesProfilesAndFixedMemberRoleAliases() {
+        int ownerId = 54;
+        int memberId = 64;
+        int versionId = 904;
+        EmployeeRuntimeConfiguration configuration = new EmployeeRuntimeConfiguration(2, RuntimeProfile.TEAM_READONLY,
+                new EmployeeRuntimeConfiguration.RuntimePolicy(5, 1, 2, 60, false),
+                new EmployeeRuntimeConfiguration.TeamConfiguration("analyst", List.of("analyst"), List.of(
+                        new EmployeeRuntimeConfiguration.RoleDelegation("analyst", "general-purpose"),
+                        new EmployeeRuntimeConfiguration.RoleDelegation("coordinator", "future-target"))),
+                List.of(new EmployeeRuntimeConfiguration.FixedMember("analyst", memberId, versionId, 4),
+                        new EmployeeRuntimeConfiguration.FixedMember("dynamic-expert", memberId, versionId, 4)));
+        AgentDefinitionDraft draft = draft(ownerId, configuration, List.of());
+        DigitalEmployee member = employee(memberId, 1);
+        PublishedEmployee exact = new PublishedEmployee(member,
+                new AgentDefinitionVersion(versionId, memberId, 1, "冻结只读成员", "openai", "test-model", NOW), List.of());
+        AgentDefinitionRepository repository = repository(draft,
+                Map.of((long) ownerId, employee(ownerId, 1), (long) memberId, member),
+                Map.of(new VersionKey(memberId, versionId), exact), Map.of());
+
+        var result = service(repository, Set.of(RuntimeProfile.LEGACY_STABLE, RuntimeProfile.TEAM_READONLY))
+                .validateDraft(ownerId);
+
+        assertTrue(result.issues().stream().anyMatch(issue -> issue.code().equals("DELEGATION_SOURCE_NOT_SUPPORTED")));
+        assertTrue(result.issues().stream().anyMatch(issue -> issue.code().equals("DELEGATION_TARGET_UNKNOWN")));
+        assertTrue(result.issues().stream().anyMatch(issue -> issue.code().equals("ROLE_ID_RESERVED")));
+    }
+
     private static AgentDefinitionManagementService service(AgentDefinitionRepository repository,
                                                             Set<RuntimeProfile> enabledProfiles) {
         CapabilityExecutorRegistry executors = new CapabilityExecutorRegistry() {
@@ -118,7 +191,12 @@ class AgentDefinitionManagementServiceTest {
             @Override public com.haizhuo.brain.platform.tool.CapabilityExecutor resolve(CapabilityCatalogEntry capability) { return null; }
         };
         HarnessDefinitionPublisher publisher = (employeeId, expectedRevision, audit) -> null;
-        return new AgentDefinitionManagementService(repository, executors, publisher, null, enabledProfiles);
+        RuntimeProfileAdmissionPolicy testVerifiedProfiles = profile -> {
+            boolean enabled = enabledProfiles.contains(profile);
+            return new RuntimeProfileAdmissionPolicy.Admission(enabled, enabled, enabled,
+                    enabled ? null : "PROFILE_DISABLED", enabled ? "TEST_VERIFICATION" : "NOT_CONFIGURED");
+        };
+        return new AgentDefinitionManagementService(repository, executors, publisher, null, testVerifiedProfiles);
     }
 
     private static AgentDefinitionRepository repository(AgentDefinitionDraft draft,

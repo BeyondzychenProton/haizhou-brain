@@ -212,6 +212,15 @@ public class JdbcAgentDefinitionRepository implements AgentDefinitionRepository 
 
     @Override public void setUserCapabilityGrant(long userId, String code, boolean enabled, AgentDefinitionManagementAudit audit) {
         tx.executeWithoutResult(status -> {
+            // 所有授权变更都使用相同的加锁顺序，避免并发状态变化插入校验与写入之间：能力、用户、授权行。
+            List<String> capabilityStates = jdbc.query("SELECT status FROM capability_definition WHERE capability_code=? FOR UPDATE",
+                    (rs, n) -> rs.getString(1), code);
+            if (capabilityStates.isEmpty()) throw new IllegalArgumentException("Capability does not exist");
+            List<String> userStates = jdbc.query("SELECT status FROM platform_user WHERE id=? FOR UPDATE",
+                    (rs, n) -> rs.getString(1), userId);
+            if (userStates.isEmpty()) throw new IllegalArgumentException("User does not exist");
+            if (enabled && (!"ACTIVE".equals(capabilityStates.get(0)) || !"ACTIVE".equals(userStates.get(0))))
+                throw new IllegalStateException("User or capability status changed; refresh before granting access");
             List<Boolean> existing = jdbc.query("SELECT enabled FROM agent_user_capability_grant WHERE user_id=? AND capability_code=? FOR UPDATE",
                     (rs, n) -> rs.getBoolean(1), userId, code);
             Instant now = Instant.now();

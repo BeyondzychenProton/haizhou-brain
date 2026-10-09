@@ -23,13 +23,13 @@ public class AgentDefinitionManagementService {
     private final CapabilityExecutorRegistry executors;
     private final HarnessDefinitionPublisher publisher;
     private final CapabilityAssetRepository assets;
-    private final Set<RuntimeProfile> enabledProfiles;
+    private final RuntimeProfileAdmissionPolicy profileAdmission;
 
     /** Compatibility constructor: old callers can continue using the legacy runtime only. */
     public AgentDefinitionManagementService(AgentDefinitionRepository repository,
                                             CapabilityExecutorRegistry executors,
                                             HarnessDefinitionPublisher publisher) {
-        this(repository, executors, publisher, null, Set.of(RuntimeProfile.LEGACY_STABLE));
+        this(repository, executors, publisher, null, RuntimeProfileAdmissionPolicy.legacyOnly());
     }
 
     public AgentDefinitionManagementService(AgentDefinitionRepository repository,
@@ -37,13 +37,19 @@ public class AgentDefinitionManagementService {
                                             HarnessDefinitionPublisher publisher,
                                             CapabilityAssetRepository assets,
                                             Set<RuntimeProfile> enabledProfiles) {
+        this(repository, executors, publisher, assets, RuntimeProfileAdmissionPolicy.configuredOnly(enabledProfiles));
+    }
+
+    public AgentDefinitionManagementService(AgentDefinitionRepository repository,
+                                            CapabilityExecutorRegistry executors,
+                                            HarnessDefinitionPublisher publisher,
+                                            CapabilityAssetRepository assets,
+                                            RuntimeProfileAdmissionPolicy profileAdmission) {
         this.repository = Objects.requireNonNull(repository);
         this.executors = Objects.requireNonNull(executors);
         this.publisher = Objects.requireNonNull(publisher);
         this.assets = assets;
-        this.enabledProfiles = Set.copyOf(Objects.requireNonNull(enabledProfiles));
-        if (!this.enabledProfiles.contains(RuntimeProfile.LEGACY_STABLE))
-            throw new IllegalArgumentException("LEGACY_STABLE must remain enabled");
+        this.profileAdmission = Objects.requireNonNull(profileAdmission);
     }
 
     public List<CapabilityCatalogEntry> listCapabilities() { return repository.listCapabilities(); }
@@ -58,6 +64,12 @@ public class AgentDefinitionManagementService {
     }
 
     public AgentDefinitionDraft saveDraft(long employeeId, int expectedRevision, DraftUpdate update, long actorId, String reason) {
+        return saveDraft(employeeId, expectedRevision, update, actorId, null, reason);
+    }
+
+    /** 恢复等幂等管理员命令可以在审计记录中保留命令键。 */
+    public AgentDefinitionDraft saveDraft(long employeeId, int expectedRevision, DraftUpdate update, long actorId,
+                                          String requestId, String reason) {
         Objects.requireNonNull(update, "update");
         if (update.instructions() == null || update.instructions().isBlank() || update.instructions().length() > 12000)
             throw new IllegalArgumentException("instructions must be between 1 and 12000 characters");
@@ -96,7 +108,7 @@ public class AgentDefinitionManagementService {
         return repository.saveDraft(employeeId, expectedRevision, update.instructions().trim(),
                 update.modelProvider(), update.modelName().trim(), update.capabilities(), configuration,
                 AgentDefinitionManagementAudit.pending(actorId, "DRAFT_SAVED", "DIGITAL_EMPLOYEE",
-                        String.valueOf(employeeId), null, reason));
+                        String.valueOf(employeeId), requestId, reason));
     }
 
     public ValidationResult validateDraft(long employeeId) {
@@ -104,9 +116,13 @@ public class AgentDefinitionManagementService {
         List<ValidationIssue> issues = new ArrayList<>();
         EmployeeRuntimeConfiguration configuration = draft.configuration();
         RuntimeProfile profile = configuration.profile();
-        if (!enabledProfiles.contains(profile)) {
-            issues.add(issue("PROFILE_DISABLED", "configuration.profile",
-                    "该运行配置尚未通过完整验收，当前不能发布", profile.name()));
+        RuntimeProfileAdmissionPolicy.Admission admission = profileAdmission.evaluate(profile);
+        if (!admission.enabled()) {
+            String reason = admission.reasonCode() == null ? "PROFILE_DISABLED" : admission.reasonCode();
+            String message = "PROFILE_VERIFICATION_MISSING".equals(reason)
+                    ? "该运行配置缺少与当前部署版本和环境匹配的验收证据，当前不能发布"
+                    : "该运行配置尚未启用，当前不能发布";
+            issues.add(issue(reason, "configuration.profile", message, profile.name()));
         }
         validateRuntimeConfiguration(employeeId, configuration, issues);
 
@@ -221,7 +237,15 @@ public class AgentDefinitionManagementService {
             if (delegation.fromRoleId() == null || !("coordinator".equals(delegation.fromRoleId())
                     || roles.contains(delegation.fromRoleId())))
                 issues.add(issue("DELEGATION_SOURCE_UNKNOWN", field + ".fromRoleId", "委派来源必须是协调者或固定成员角色", delegation.fromRoleId()));
-            if (delegation.toRoleId() == null || !roles.contains(delegation.toRoleId()))
+            if (!"coordinator".equals(delegation.fromRoleId()))
+                issues.add(issue("DELEGATION_SOURCE_NOT_SUPPORTED", field + ".fromRoleId",
+                        "当前运行工厂仅支持协调者发起委派", delegation.fromRoleId()));
+            boolean reservedTarget = "general-purpose".equals(delegation.toRoleId())
+                    || "dynamic-expert".equals(delegation.toRoleId());
+            if (reservedTarget && configuration.profile() != RuntimeProfile.TEAM_READONLY)
+                issues.add(issue("RESERVED_TARGET_PROFILE_UNSUPPORTED", field + ".toRoleId",
+                        "通用只读与动态只读目标仅支持 TEAM_READONLY", delegation.toRoleId()));
+            if (!reservedTarget && (delegation.toRoleId() == null || !roles.contains(delegation.toRoleId())))
                 issues.add(issue("DELEGATION_TARGET_UNKNOWN", field + ".toRoleId", "委派目标必须是固定成员角色", delegation.toRoleId()));
             if (Objects.equals(delegation.fromRoleId(), delegation.toRoleId()))
                 issues.add(issue("DELEGATION_SELF_REFERENCE", field, "角色不能委派给自身", delegation.fromRoleId()));
@@ -261,13 +285,17 @@ public class AgentDefinitionManagementService {
         }
         if (!MEMBER_PROFILES.contains(published.definition().configuration().profile()))
             issues.add(issue("MEMBER_PROFILE_UNSUPPORTED", field + ".definitionVersionId", "固定成员只能使用 LEGACY_STABLE 或 SINGLE_SKILLED", String.valueOf(member.definitionVersionId())));
+        else if (!profileAdmission.evaluate(published.definition().configuration().profile()).enabled())
+            issues.add(issue("MEMBER_PROFILE_DISABLED", field + ".definitionVersionId",
+                    "固定成员的运行配置未通过当前部署准入", String.valueOf(member.definitionVersionId())));
     }
 
     private static void validateRoleId(String roleId, String field, List<ValidationIssue> issues) {
         if (roleId == null || !roleId.matches(ROLE_ID)) {
             issues.add(issue("ROLE_ID_INVALID", field, "角色标识必须是小写字母开头的短标识", roleId));
-        } else if ("coordinator".equals(roleId)) {
-            issues.add(issue("ROLE_ID_RESERVED", field, "coordinator 是系统保留角色", roleId));
+        } else if ("coordinator".equals(roleId) || "general-purpose".equals(roleId)
+                || "dynamic-expert".equals(roleId) || roleId.startsWith("dyn-")) {
+            issues.add(issue("ROLE_ID_RESERVED", field, "该角色标识由运行时保留，不能作为固定成员角色", roleId));
         }
     }
 
@@ -340,8 +368,11 @@ public class AgentDefinitionManagementService {
     }
 
     public void setUserCapabilityGrant(long userId, String capabilityCode, boolean enabled, long actorId, String reason) {
+        if (userId <= 0 || actorId <= 0) throw new IllegalArgumentException("User and actor IDs must be positive");
         if (repository.listCapabilities().stream().noneMatch(entry -> entry.capabilityCode().equals(capabilityCode)))
             throw new IllegalArgumentException("Capability does not exist");
+        if (reason == null || reason.isBlank() || reason.length() > 500)
+            throw new IllegalArgumentException("A reason of at most 500 characters is required");
         repository.setUserCapabilityGrant(userId, capabilityCode, enabled,
                 AgentDefinitionManagementAudit.pending(actorId, "USER_CAPABILITY_GRANT_CHANGED", "PLATFORM_USER",
                         String.valueOf(userId), null, reason));
