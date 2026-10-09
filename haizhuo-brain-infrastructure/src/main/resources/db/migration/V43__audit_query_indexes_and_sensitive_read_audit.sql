@@ -1,4 +1,4 @@
--- 全局 keyset 扫描按现有审计事实统一使用时间戳和来源键排序。
+-- Global keyset scans use one timestamp/source-key order over the existing audit facts.
 ALTER TABLE platform_user_audit
     ADD KEY idx_platform_user_audit_time_id (occurred_at, id);
 
@@ -24,8 +24,8 @@ ALTER TABLE platform_channel_management_audit
     ADD KEY idx_channel_management_audit_time_id (created_at, audit_id),
     ADD KEY idx_channel_management_audit_request_time (request_id, created_at, audit_id);
 
--- 明细和 CSV 读取属于敏感管理员操作。仅保存请求目标/筛选条件的摘要，
--- 不保存审计正文、导出行、原因文本、请求载荷或凭据。
+-- Detail and CSV reads are sensitive admin operations. Keep a digest of the requested target/filter,
+-- not the audit body, exported rows, reason text, request payload or credentials.
 CREATE TABLE platform_admin_audit_read (
     audit_read_id BIGINT NOT NULL AUTO_INCREMENT,
     actor_user_id BIGINT NOT NULL,

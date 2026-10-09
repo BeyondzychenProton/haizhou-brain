@@ -1,5 +1,5 @@
--- 模型连接元数据只保存精确的凭据服务引用，绝不保存
--- API Key、Token 或解析后的凭据材料。
+-- Model connection metadata stores exact credential-service references only. It never stores
+-- API keys, tokens, or resolved credential material.
 CREATE TABLE platform_model_connection (
     connection_id VARCHAR(64) NOT NULL,
     tenant_id BIGINT NOT NULL,

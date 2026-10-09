@@ -1,9 +1,9 @@
--- 账号配置修订号用于条件更新，现有记录从修订号 1 开始。
+-- Account configuration revision enables conditional edits. Existing rows start at revision 1.
 ALTER TABLE platform_channel_account
     ADD COLUMN revision BIGINT NOT NULL DEFAULT 1;
 
--- 管理审计与账号/身份命令在同一事务中提交。
--- 载荷只保留摘要和白名单变更摘要，不保存原始请求。
+-- Management audit is committed in the same transaction as account/identity commands.
+-- The payload is represented by a digest and an allowlisted change summary, never the raw request.
 CREATE TABLE platform_channel_management_audit (
     audit_id BIGINT NOT NULL AUTO_INCREMENT,
     binding_id VARCHAR(64) NOT NULL,
@@ -21,8 +21,8 @@ CREATE TABLE platform_channel_management_audit (
     KEY idx_channel_management_audit_actor (actor_user_id, created_at, audit_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
--- 超时重试只保留请求摘要和安全响应快照。
--- 此处绝不存储凭据材料或请求正文。
+-- Only a request digest and safe response snapshot are retained for timeout retries.
+-- Credential material and request bodies are never stored here.
 CREATE TABLE platform_channel_management_receipt (
     actor_user_id BIGINT NOT NULL,
     request_id VARCHAR(128) NOT NULL,

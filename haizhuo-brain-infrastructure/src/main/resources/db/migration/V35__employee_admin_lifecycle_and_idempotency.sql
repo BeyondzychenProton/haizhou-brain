@@ -1,5 +1,5 @@
--- 管理员员工列表需要稳定的创建顺序。已有员工使用相同迁移时间，
--- 通过 ID 作为次级排序键，保证 keyset 分页结果确定。
+-- Administrative employee pages require a stable creation order. Existing employees
+-- share the migration time; the id tie-breaker keeps the keyset deterministic.
 ALTER TABLE digital_employee
     ADD COLUMN created_at DATETIME(3) NULL;
 
@@ -13,8 +13,8 @@ ALTER TABLE digital_employee
 CREATE INDEX idx_digital_employee_tenant_created
     ON digital_employee (tenant_id, created_at, id);
 
--- 旧员工表的 ID 由应用分配。并发创建时通过此行串行分配，
--- 不依赖 MAX(id) 推导下一个 ID。
+-- The legacy employee table uses application-assigned IDs. Serialize allocations
+-- in this row instead of relying on MAX(id) during concurrent creates.
 CREATE TABLE platform_id_allocator (
     scope_key VARCHAR(64) NOT NULL,
     next_id BIGINT NOT NULL,
@@ -25,8 +25,8 @@ INSERT INTO platform_id_allocator (scope_key, next_id)
 SELECT 'digital_employee', COALESCE(MAX(id), 0) + 1
 FROM digital_employee;
 
--- 幂等回执与管理员变更原子提交，
--- 并保存客户端在连接结果不确定时重试所需的响应。
+-- Idempotency receipts commit atomically with the administrative mutation and
+-- keep the response needed by clients that retry after an uncertain connection.
 CREATE TABLE employee_admin_command_receipt (
     actor_user_id BIGINT NOT NULL,
     request_id VARCHAR(128) NOT NULL,
